@@ -8,9 +8,15 @@
     "dev": "concurrently -k -n api,ui -c blue,green \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\"",
     "dev:backend": "npm --prefix backend run dev",
     "dev:frontend": "npm --prefix frontend run dev",
-    "typecheck": "npm --prefix backend run typecheck && npm --prefix frontend run typecheck"
+    "typecheck": "npm --prefix backend run typecheck && npm --prefix frontend run typecheck",
+    "ig:check": "npm --prefix backend run ig:check",
+    "ig:stream-check": "npm --prefix backend run ig:stream-check",
+    "ig:ts-check": "npm --prefix backend run ig:ts-check"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
+  },
+  "engines": {
+    "node": ">=24.12.0 <25.0.0"
   }
 }

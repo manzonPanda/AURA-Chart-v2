@@ -15,11 +15,21 @@ export interface IgRequestOptions {
   version?: string;
 }
 
+/** Session details needed by the Lightstreamer connection (CST/XST + stream ids). */
+export interface StreamSessionInfo {
+  endpoint?: string;
+  accountId?: string;
+  cst: string;
+  xSecurityToken: string;
+}
+
 const DEFAULT_TIMEOUT_MS = 20000;
 
 export class IgClient {
   private cst?: string;
   private xSecurityToken?: string;
+  private lightstreamerEndpoint?: string;
+  private lightstreamerAccountId?: string;
   /** Timestamp of the last successful login — used to avoid re-login loops. */
   private lastAuthAt = 0;
   /** Timestamp of the last failed login — gates retries to protect the API key. */
@@ -31,6 +41,43 @@ export class IgClient {
 
   get configured(): boolean {
     return Boolean(this.creds.apiKey && this.creds.username && this.creds.password && this.creds.baseUrl);
+  }
+
+  /**
+   * Secret VALUES currently held by this client — the IG API key, password and
+   * the live session CST / X-SECURITY-TOKEN. Consumed ONLY by the crash-path
+   * log redactor (lib/redact.ts) so fatal logs can never leak them; values are
+   * re-read at log time, so rotated session tokens stay covered. Never logged
+   * directly and never returned to the frontend.
+   */
+  redactables(): Array<string | undefined> {
+    return [this.creds.apiKey, this.creds.password, this.cst, this.xSecurityToken];
+  }
+
+  /**
+   * Session data required to open the IG Lightstreamer streaming connection.
+   * Callers must `await request()` (or this) at least once so a session exists;
+   * if no live session is held yet we authenticate lazily here. No tokens are
+   * ever returned to the frontend — this stays entirely backend-internal.
+   */
+  async getStreamSession(): Promise<StreamSessionInfo> {
+    await this.ensureSession();
+    // Prefer the endpoint IG returned at login; fall back to the REST gateway
+    // host (same authority daisy-chains for some gateways).
+    const endpoint =
+      this.lightstreamerEndpoint ||
+      this.creds.baseUrl.replace(/\/gateway\/deal$/, "") ||
+      this.creds.baseUrl;
+    const accountId = this.lightstreamerAccountId || this.creds.accountId || "";
+    if (!this.cst || !this.xSecurityToken) {
+      throw new IgApiError("auth", 503, "No IG session available for streaming.");
+    }
+    return {
+      endpoint,
+      accountId,
+      cst: this.cst,
+      xSecurityToken: this.xSecurityToken,
+    };
   }
 
   private async ensureSession(): Promise<void> {
@@ -55,6 +102,8 @@ export class IgClient {
       const session = await createSession(this.creds);
       this.cst = session.cst;
       this.xSecurityToken = session.xSecurityToken;
+      this.lightstreamerEndpoint = session.lightstreamerEndpoint;
+      this.lightstreamerAccountId = session.lightstreamerAccountId || this.creds.accountId;
       this.lastAuthAt = Date.now();
     } catch (err) {
       if (err instanceof IgApiError && err.kind === "auth") {
@@ -132,6 +181,9 @@ export class IgClient {
     if (res.status === 429) {
       throw new IgApiError("rate_limit", 429, "IG rate limit reached — retry shortly.");
     }
+    if (res.status === 429) {
+      throw new IgApiError("rate_limit", 429, "IG rate limit reached — retry shortly.");
+    }
     if (res.status === 404) {
       throw new IgApiError(
         "invalid_epic",
@@ -140,9 +192,24 @@ export class IgClient {
       );
     }
     if (res.status === 401 || res.status === 403) {
+      // Read the IG errorCode so the failure is classified TRUTHFULLY:
+      //  - an exhausted historical-data allowance (403) can NEVER be fixed by
+      //    re-authenticating — surfacing it as "auth failed" would burn login
+      //    attempts and mislead the UI;
+      //  - anything else on 401/403 is treated as a dead session (re-auth once).
+      const errBody = (await res.json().catch(() => null)) as { errorCode?: string } | null;
+      const igErrorCode = errBody?.errorCode;
+      if (igErrorCode && igErrorCode.includes("allowance")) {
+        throw new IgApiError(
+          "rate_limit",
+          403,
+          "IG historical data allowance exhausted.",
+          igErrorCode,
+        );
+      }
       // Distinguish "our session token stopped working" (retryable after a
       // genuine re-login) from login failures, which must surface verbatim.
-      throw new IgApiError("session_expired", 401, "IG rejected the session tokens.");
+      throw new IgApiError("session_expired", 401, "IG rejected the session tokens.", igErrorCode);
     }
     if (!res.ok) {
       throw new IgApiError("upstream", res.status, `IG returned an error (HTTP ${res.status}).`);

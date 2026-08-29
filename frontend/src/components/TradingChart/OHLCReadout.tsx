@@ -1,4 +1,5 @@
 import type { Candle } from "../../types/candle";
+import { formatManilaDateTimeFull } from "../../services/timefmt";
 
 interface Props {
   candle?: Candle;
@@ -19,6 +20,11 @@ export function OHLCReadout({ candle }: Props) {
 
   return (
     <div className="ohlc" aria-label="OHLC">
+      {last && (
+        <span className="ohlc-item time" title="Bucket start — Asia/Manila (UTC+08:00)">
+          {formatManilaDateTimeFull(last.ts)}
+        </span>
+      )}
       <span className="ohlc-item o">
         O&nbsp;{fmtPrice(last?.open)}
       </span>

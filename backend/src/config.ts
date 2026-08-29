@@ -16,6 +16,11 @@ export interface Config {
     sessionVersion: string;
     sendEncryptFlag: boolean;
   };
+  supabase: {
+    url: string;
+    serviceKey: string;
+    table: string;
+  };
 }
 
 /**
@@ -39,6 +44,14 @@ export function loadConfig(): Config {
       //   version header "1" + RSA(base64(password)) cipher.
       sessionVersion: (process.env.IG_SESSION_VERSION || "1").trim() || "1",
       sendEncryptFlag: (process.env.IG_ENCRYPT_FLAG ?? "on").trim().toLowerCase() !== "off",
+    },
+    // Server-side ONLY (service-role key never reaches the browser or logs).
+    // When unset, candle persistence + the /api/candles/db endpoint degrade
+    // gracefully; the realtime IG stream is unaffected.
+    supabase: {
+      url: (process.env.SUPABASE_URL || "").trim(),
+      serviceKey: (process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim(),
+      table: (process.env.SUPABASE_CANDLES_TABLE || "ohlc_candles").trim(),
     },
   };
 }

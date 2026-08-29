@@ -25,6 +25,16 @@ export const API_KEY_HEADER = "X-IG-API-KEY";
 export interface IgSession {
   cst: string;
   xSecurityToken: string;
+  /**
+   * IG Lightstreamer WebSocket endpoint returned by /session (e.g.
+   * https://push.ig.com for live). This is provided by IG at login time and
+   * must NOT be hardcoded. Absent on some gateways/limits.
+   */
+  lightstreamerEndpoint?: string;
+  /** Account identifier to present as the Lightstreamer username. */
+  lightstreamerAccountId?: string;
+  /** Fallback account id parsed from the session body when available. */
+  accountId?: string;
 }
 
 /**
@@ -134,7 +144,23 @@ export async function createSession(creds: IgCredentials): Promise<IgSession> {
       code || undefined,
     );
   }
-  return { cst, xSecurityToken };
+
+  // Success: read the Lightstreamer endpoint / streaming account identifiers
+  // from the session body. They are part of the login response and subject to
+  // change, so they are never hardcoded.
+  const sessionBody = (await res.json().catch(() => null)) as {
+    lightstreamerEndpoint?: string;
+    lightstreamerAccountId?: string;
+    accountId?: string;
+  } | null;
+
+  return {
+    cst,
+    xSecurityToken,
+    lightstreamerEndpoint: sessionBody?.lightstreamerEndpoint || undefined,
+    lightstreamerAccountId: sessionBody?.lightstreamerAccountId || undefined,
+    accountId: sessionBody?.accountId || undefined,
+  };
 }
 
 async function igRawFetch(url: string, init: {

@@ -1,4 +1,4 @@
-import type { CandlesResponse } from "../types/candle";
+import type { Candle, CandlesResponse } from "../types/candle";
 
 /**
  * Talks ONLY to our Hono backend (`/api/...`, proxied by Vite). The browser
@@ -17,6 +17,20 @@ export class ApiError extends Error {
   }
 }
 
+/** Shared error-body parsing for non-OK backend responses. */
+async function toApiError(res: Response): Promise<ApiError> {
+  let message = res.statusText || "Request failed";
+  let code = "HTTP_ERROR";
+  try {
+    const body = (await res.json()) as { error?: string; code?: string };
+    if (body?.error) message = body.error;
+    if (body?.code) code = body.code;
+  } catch {
+    /* non-JSON error body */
+  }
+  return new ApiError(res.status, code, message);
+}
+
 export async function fetchCandles(
   resolution: string,
   limit = 500,
@@ -25,19 +39,62 @@ export async function fetchCandles(
   const res = await fetch(`${API_BASE}/candles?${qs.toString()}`);
 
   if (!res.ok) {
-    let message = res.statusText || "Request failed";
-    let code = "HTTP_ERROR";
-    try {
-      const body = (await res.json()) as { error?: string; code?: string };
-      if (body?.error) message = body.error;
-      if (body?.code) code = body.code;
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new ApiError(res.status, code, message);
+    throw await toApiError(res);
   }
 
   return (await res.json()) as CandlesResponse;
+}
+
+/** One persisted candle row from our Supabase table (backend `/api/candles/db`). */
+interface DbCandleDto {
+  /** Bucket START in epoch SECONDS (absolute UTC — epoch math is timezone-free). */
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  tickCount: number | null;
+}
+
+interface DbCandlesResponse {
+  epic: string;
+  timeframe: string;
+  count: number;
+  candles: DbCandleDto[];
+}
+
+/**
+ * Chart history from OUR Supabase persistence — the normal page-load source
+ * (`GET /api/candles/db`). Never touches IG historical REST, so IG 429/403
+ * allowance errors cannot affect chart history. `fetchCandles` (IG REST) is
+ * kept for a future bootstrap/backfill role only.
+ *
+ * Returns candles ASCENDING with `ts` = bucket start in epoch ms — the exact
+ * same time base as the realtime WS frames, so the live candle merges into /
+ * appends after the newest persisted bucket with no duplicates.
+ */
+export async function fetchCandlesDb(
+  timeframe: string,
+  limit = 500,
+): Promise<{ epic: string; candles: Candle[] }> {
+  const qs = new URLSearchParams({ timeframe, limit: String(limit) });
+  const res = await fetch(`${API_BASE}/candles/db?${qs.toString()}`);
+
+  if (!res.ok) {
+    throw await toApiError(res);
+  }
+
+  const body = (await res.json()) as DbCandlesResponse;
+  return {
+    epic: body.epic,
+    candles: body.candles.map((c) => ({
+      ts: c.time * 1000,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+    })),
+  };
 }
 
 export async function fetchHealth(): Promise<{ ok: boolean; configured: boolean; environment: string }> {

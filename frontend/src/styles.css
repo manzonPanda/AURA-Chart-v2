@@ -69,6 +69,26 @@ body {
 .refresh-btn:hover { border-color: var(--accent); }
 .refresh-btn:disabled { opacity: 0.6; cursor: default; }
 
+/* ── Stream status chip ─────────────────────────────────────── */
+.stream-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 0.7rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--muted); white-space: nowrap;
+}
+.stream-chip .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.stream-chip.live { color: var(--up); border-color: rgba(38, 166, 154, 0.45); }
+.stream-chip.live .dot {
+  background: var(--up); box-shadow: 0 0 8px var(--up);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+.stream-chip.connecting, .stream-chip.reconnecting { color: #ffb74d; border-color: rgba(251, 140, 0, 0.4); }
+.stream-chip.connecting .dot, .stream-chip.reconnecting .dot { background: #ffb74d; }
+.stream-chip.disconnected { color: var(--muted); border-color: var(--border); }
+/* Truthful "socket up but no real ticks" state — distinct from LIVE. */
+.stream-chip.noticks { color: #90caf9; border-color: rgba(144, 202, 249, 0.4); }
+.stream-chip.noticks .dot { background: #90caf9; }
+
 /* ── Banners ─────────────────────────────────────────────── */
 .banner { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.5rem 1rem; font-size: 0.85rem; }
 .banner.error { background: rgba(239, 83, 80, 0.12); color: #ff8a80; border-bottom: 1px solid rgba(239, 83, 80, 0.25); }

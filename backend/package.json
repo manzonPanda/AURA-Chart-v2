@@ -10,17 +10,37 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "ig:check": "node scripts/check-auth.mjs",
+    "ig:stream-check": "tsx src/scripts/stream-check.ts",
+    "ig:ts-check": "tsx src/scripts/ts-check.ts",
+    "ig:prices-check": "tsx src/scripts/prices-check.ts",
+    "ig:ohlc-compare": "tsx src/scripts/ohlc-compare.ts",
+    "db:migrate": "tsx src/scripts/db-migrate.ts",
+    "db:candle-check": "tsx src/scripts/db-candle-check.ts",
+    "db:tz-verify": "tsx src/scripts/db-tz-verify.ts",
+    "gap:test": "tsx src/scripts/gap-test.ts",
+    "lifecycle:test": "tsx src/scripts/shutdown-test.ts",
+    "backfill": "tsx src/scripts/backfill.ts",
+    "backfill:test": "tsx src/scripts/backfill-test.ts",
     "env-summary": "node scripts/env-summary.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
+    "@supabase/supabase-js": "^2.45.0",
     "dotenv": "^16.4.7",
-    "hono": "^4.6.14"
+    "hono": "^4.6.14",
+    "lightstreamer-client": "^7.3.2",
+    "pg": "^8.13.0",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/pg": "^8.11.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "undici": "^8.10.0"
+  },
+  "engines": {
+    "node": ">=24.12.0 <25.0.0"
   }
 }

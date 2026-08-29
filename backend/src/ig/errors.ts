@@ -67,8 +67,16 @@ export function toHttpError(err: unknown): { status: number; code: string; error
         return { status: 404, code: "IG_EPIC_NOT_FOUND", error: "Unknown instrument EPIC" };
       case "invalid_resolution":
         return { status: 400, code: "INVALID_RESOLUTION", error: "Unsupported timeframe/resolution" };
-      case "rate_limit":
-        return { status: 429, code: "IG_RATE_LIMITED", error: "Market data rate limit reached" };
+      case "rate_limit": {
+        const allowance = err.igErrorCode?.includes("allowance") ?? false;
+        return {
+          status: 429,
+          code: allowance ? "IG_ALLOWANCE_EXHAUSTED" : "IG_RATE_LIMITED",
+          error: allowance
+            ? "IG historical data allowance exhausted — resets daily"
+            : "Market data rate limit reached",
+        };
+      }
       case "network":
         return { status: 502, code: "IG_UNREACHABLE", error: "Market data provider unreachable" };
       case "upstream":

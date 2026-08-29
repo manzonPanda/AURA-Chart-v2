@@ -31,24 +31,16 @@ export interface IgHistoricalPricesResponse {
   };
 }
 
-export const IG_RESOLUTIONS = [
-  "SECOND",
-  "MINUTE",
-  "MINUTE_2",
-  "MINUTE_3",
-  "MINUTE_5",
-  "MINUTE_10",
-  "MINUTE_15",
-  "MINUTE_30",
-  "HOUR",
-  "HOUR_2",
-  "HOUR_3",
-  "HOUR_4",
-  "DAY",
-  "WEEK",
-  "MONTH",
-] as const;
+/**
+ * The ONLY chart resolution — a single 3-minute timeframe.
+ *   - `MINUTE_3` → backend-aggregated 3-minute candle built from IG MINUTE data
+ *     (epoch-bucket floor(ts/180)*180). IG v3 /prices is capped at 500
+ *     points/request and offers no reliable 3-minute page, so 3m is NEVER
+ *     requested from IG directly — we pull a small 1-minute window and
+ *     aggregate it into one-day-ish 3m candles.
+ */
+export const CHART_RESOLUTIONS = ["MINUTE_3"] as const;
 
-export type IgResolution = (typeof IG_RESOLUTIONS)[number];
+export type ChartResolution = (typeof CHART_RESOLUTIONS)[number];
 
 export const MAX_PAGE_SIZE = 500;

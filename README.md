@@ -17,7 +17,7 @@ IG Markets REST API
     CandleKit  →  Lightweight Charts
         │
         ▼
-   DAX candlestick chart + EMA 20 / EMA 50
+   DAX candlestick chart — 1m & 3m (realtime via Lightstreamer)
 ```
 
 > The frontend **never** talks to IG and **never** holds IG credentials. It only calls our
@@ -43,14 +43,12 @@ IG Markets REST API
   - `ChartView` from `@getcandlekit/charts/react` (v0.1.0) on Lightweight Charts v5.
   - Candlestick chart, dark trading-dashboard theme, responsive + auto-resizes with the
     window (CandleKit's built-in ResizeObserver handling).
-  - Timeframe selector: **1m · 5m · 15m · 1h · 4h · 1D** — each mapped to a real IG
-    resolution (`MINUTE`, `MINUTE_5`, `MINUTE_15`, `HOUR`, `HOUR_4`, `DAY`).
+  - Timeframe selector: **1m · 3m** — 1m is IG's native minute resolution; 3m is
+    aggregated server-side from 1-minute candles (epoch bucket floor(t/180)*180).
   - OHLC/change/volume readout of the latest candle, last-updated info, manual refresh and
     optional 30s auto-refresh.
-  - **EMA 20 + EMA 50** using CandleKit's built-in EMA `calculate` (registered as two
-    distinct named indicators). Because CandleKit keys indicators by name, the built-in
-    `EMA` is cloned into `EMA20`/`EMA50` reusing its exact calculation — no hand-rolled math.
-    EMAs recompute automatically whenever new candle data is delivered.
+  - **NO indicators by design** (no EMA 20/50/200, no crossovers) — indicators are a
+    separate future task. The chart renders pure candlesticks + tick volume.
 
 ---
 
@@ -89,7 +87,6 @@ IG Markets REST API
         ├── services/api.ts   # only talks to our Hono API
         └── components/TradingChart/
             ├── TradingChart.tsx
-            ├── indicators.ts  # EMA20/EMA50 via CandleKit registry
             └── OHLCReadout.tsx
 ```
 
@@ -164,12 +161,12 @@ GET /api/candles?epic=<EPIC>&resolution=MINUTE_5&limit=500
 | param        | required | notes                                                    |
 | ------------ | :------: | -------------------------------------------------------- |
 | `epic`       | no       | falls back to `IG_DAX_EPIC`                              |
-| `resolution` | yes      | IG resolution (`MINUTE_5`, `HOUR`, `DAY`, …)             |
+| `resolution` | yes      | chart resolution (`MINUTE` = 1m, `MINUTE_3` = aggregated 3m) |
 | `limit`      | no       | 1–500 candles (IG page-size cap, default 500)            |
 
 ```jsonc
 // 200
-{ "epic": "INDEX:DAX", "resolution": "MINUTE_5", "count": 500, "candles": [
+{ "epic": "INDEX:DAX", "resolution": "MINUTE", "count": 500, "candles": [
   { "ts": 1724745900000, "open": 18342.0, "high": 18365.0, "low": 18330.0, "close": 18358.5, "volume": 120 }
 ] }
 ```
@@ -180,16 +177,102 @@ Errors return `{ error, code }` with a useful HTTP status and never include secr
 
 ---
 
-## What remains for live streaming (next phase)
+## Real-time streaming (IG Lightstreamer)
+
+Live candles are streamed — **no REST polling for realtime**:
+
+```
+IG Live  →  IG Lightstreamer  →  Hono backend  →  tick/price stream
+        →  server-side candle aggregation  →  WebSocket /ws  →  React
+        →  CandleKit / Lightweight Charts  (series incremental updates)
+```
+
+- **`backend/src/streaming/igStream.ts`** — IG Lightstreamer client. Authenticates with
+  the `CST` / `X-SECURITY-TOKEN` obtained from the existing IG login (never hardcoded),
+  connects to the Lightstreamer endpoint IG returns in the `/session` body, and subscribes
+  to the `CHART:<EPIC>:TICK` item in DISTINCT mode (fields `BID OFR LTP LTV TTV UTM`).
+- **`backend/src/streaming/aggregator.ts`** — server-side candle aggregation into the
+  forming candle per timeframe (1m · 3m):
+  `high = max(high, price)`, `low = min(low, price)`, `close = latest price`; the candle
+  is rolled over automatically at each timeframe boundary.
+- **`backend/src/streaming/realtimeService.ts`** — one shared Lightstreamer connection,
+  fans every tick into all aggregators, and pushes `{ type: "candle", ... }` frames over
+  the `/ws` WebSocket. Status frames are truthful — they mirror the ACTUAL IG
+  Lightstreamer state (`LIVE` / `CONNECTING` / `RECONNECTING` / `DISCONNECTED`) and carry
+  `lastTickAt`; a connected socket with no fresh ticks is displayed as
+  **`CONNECTED · NO TICKS`**, never a faked "LIVE" (a 30 s status heartbeat keeps the
+  tick counters/ages fresh without polling IG).
+- **`frontend/src/services/realtime.ts`** — the browser WebSocket client (`ws://…/ws`,
+  proxied by Vite). It never sees IG credentials; the browser is a pure relay consumer.
+  Reconnects with capped exponential backoff.
+- **`TradingChart.tsx`** — initial history from the preserved REST endpoint
+  (`GET /api/candles`), then incremental updates only: `controller.updateBar(...)` per
+  candle frame (never a full series replacement). After every history `setData` the
+  latest live candle is re-applied (CandleKit bus `data` event) so the
+  historical→live handoff never drops the forming bar. No indicators attached.
+- **Reconnection & safety** — the backend self-heals on Lightstreamer disconnects and
+  expired sessions; auth retries are gated by the existing 90-second failure cooldown.
+  Secrets never reach the browser and never appear in logs.
+
+### Verify streaming without touching the chart
+
+```bash
+npm run ig:stream-check          # from the repo root
+# or: cd backend && npm run ig:stream-check
+```
+
+Prints a secret-free verdict like:
+
+```text
+gateway : api.ig.com
+authentication: PASS
+lightstreamer: CONNECTED
+subscription: CHART:IX.D.DAX.IGM.IP:TICK
+ticks received: 15
+latest price: 26325.8
+status: STREAMING
+RESULT  : SUCCESS
+```
+
+Env knobs: `IG_STREAM_CHECK_TICKS` (default 20), `IG_STREAM_CHECK_WAIT_MS` (default 20000).
+
+---
+
+## What remains (next phase)
 
 Not implemented yet, as requested:
 
-- **Live prices / real-time candles** — switch the data source from history-only polling to
-  IG's Lightstreamer streaming feed, or a shorter-poll subscription, and feed
-  `controller.updateBar(...)` / `onBar()` so candles + EMAs update tick-by-tick.
-- **EMA crossover detection** and more indicators (EMA 200 is a one-line config change:
-  add another clone in `frontend/src/components/TradingChart/indicators.ts`).
+- **Indicators** (EMA 20/50/200, crossovers) — deliberately excluded from the current
+  phase; the chart is pure candlesticks.
 - **Supabase/PostgreSQL historical storage**, backtesting, trading signals, multiple
   instruments/accounts.
 - No Docker, TimescaleDB, Redis, Kafka, auth system, or extra state management — kept small
   and easy to read on purpose.
+
+## Historical prices & IG pagination facts (verified 2026-08)
+
+- `GET /prices/{epic}` (v3) **requires `pageSize` alongside `max`**. With `max` alone IG
+  returns its default 20-point page **from the oldest end of the history window** — which
+  is exactly the "chart loads only 20 ancient candles" bug.
+- `pagenumber` and `to` are ignored by v3 → only **500 points per (epic,
+  resolution) per request** is the hard ceiling. The chart serves only **1m** (up to
+  500 native 1-minute candles) and **3m** (up to ~166 candles aggregated from the
+  single latest 500-point 1-minute fetch; IG cannot page further back, so 3m history
+  is the maximum IG exposes in one call and the realtime stream extends it forward).
+- Every historical response is charged against IG's **daily historical-data allowance**
+  (live accounts: 10,000 points/day). When exhausted IG returns 403
+  `error.public-api.exceeded-account-historical-data-allowance`, which the backend maps to
+  the truthful `429 IG_ALLOWANCE_EXHAUSTED` (NOT an auth failure) — the realtime stream is
+  unaffected by the allowance.
+
+## Verification scripts
+
+```bash
+node scripts/verify-timeframes.mjs   # count/order/gaps/freshness for both timeframes (~500 allowance points)
+node scripts/ws-check.mjs            # captures live WS frames: status/candle updates/rollovers (browser path, no allowance)
+cd backend && npx tsx src/scripts/agg-test.ts  # offline unit test of the 3m aggregation
+cd backend && npm run ig:prices-check  # probes IG /prices param behaviour
+cd backend && npm run ig:ts-check      # REST-vs-stream timestamp handshake check
+cd backend && npm run ig:stream-check  # Lightstreamer connectivity verdict
+cd backend && npx tsx src/scripts/raw-probe.ts  # raw IG status/errorCode/allowance for one /prices call
+```

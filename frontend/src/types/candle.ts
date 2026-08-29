@@ -1,7 +1,9 @@
 /**
  * The single normalized candle format used throughout the frontend.
- * `ts` is an epoch-millisecond UTC timestamp of the bar CLOSE — this is
- * exactly CandleKit's `Bar` input shape, so chart data needs no conversion.
+ * `ts` is an epoch-millisecond UTC timestamp of the bar's BUCKET START —
+ * identical to IG's snapshotTimeUTC boundary and to the realtime aggregator's
+ * `floor(tick/interval)*interval` bucket, so history and live share one time
+ * base and merge by exact timestamp in CandleKit's `Bar` shape.
  */
 export interface Candle {
   ts: number;

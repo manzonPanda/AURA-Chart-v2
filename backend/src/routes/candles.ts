@@ -2,14 +2,15 @@ import { Hono } from "hono";
 import type { IgClient } from "../ig/client.js";
 import { toHttpError } from "../ig/errors.js";
 import { fetchHistoricalCandles } from "../ig/historical.js";
-import { IG_RESOLUTIONS } from "../ig/types.js";
+import { CHART_RESOLUTIONS } from "../ig/types.js";
 
 /**
- * GET /api/candles?epic=<EPIC>&resolution=<IG_RESOLUTION>&limit=<1..500>
+ * GET /api/candles?epic=<EPIC>&resolution=<CHART_RESOLUTION>&limit=<1..500>
  *
- * `epic` is optional — when omitted the backend uses the configured
- * `IG_DAX_EPIC`. `resolution` is required and must be a supported IG
- * resolution (MINUTE, MINUTE_5, MINUTE_15, HOUR, HOUR_4, DAY, ...).
+ * `resolution` is an INTERNAL chart resolution — only `MINUTE` (native 1m) and
+ * `MINUTE_3` (backend-aggregated 3m from 1m) are accepted. IG-specific
+ * implementation details never leak to the UI; MINUTE_3 is produced server-side
+ * from 1-minute IG data, never requested from IG.
  */
 export function createCandlesRouter(ig: IgClient, defaultEpic: string): Hono {
   const app = new Hono();
@@ -27,7 +28,7 @@ export function createCandlesRouter(ig: IgClient, defaultEpic: string): Hono {
     }
 
     const resolution = (c.req.query("resolution") ?? "").trim().toUpperCase();
-    const supported = IG_RESOLUTIONS as readonly string[];
+    const supported = CHART_RESOLUTIONS as readonly string[];
     if (!supported.includes(resolution)) {
       return c.json(
         {
