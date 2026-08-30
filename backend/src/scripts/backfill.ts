@@ -2,8 +2,12 @@
  * Stage 3 — MANUAL IG historical backfill (never automatic: not on startup,
  * not on reconnect, not scheduled, not from the frontend).
  *
- *   npm run backfill -- --from="2026-08-28T12:00:00Z" --to="2026-08-28T15:00:00Z" [--dry-run] [--force] [--epic=EPIC]
+ *   npm run backfill -- --from="2026-08-28T12:00:00Z" --to="2026-08-28T15:00:00Z" [--dry-run] [--force] [--epic=EPIC] [--minutes=1|3|k]
  *   (--hours=N is a shorthand for --from = to − N hours; default window = 6h)
+ *
+ * `--minutes` selects the target candle width (default 3 for the legacy
+ * MINUTE_3 view; pass 1 to backfill the canonical MINUTE_1 frames — the grid
+ * the new 1m-only architecture persists).
  *
  * Policy — enforced at plan time AND re-enforced atomically per write:
  *   missing     → INSERT   (status=backfilled, source=ig_historical)
@@ -24,9 +28,7 @@ import { IgApiError } from "../ig/errors.js";
 import { planBackfill, type BackfillPlan } from "../backfill/planner.js";
 import { IG_GERMANY_40 } from "../market/calendar.js";
 import { detectGaps } from "../market/gapDetector.js";
-
-const TF = "MINUTE_3";
-const BUCKET_SEC = 180;
+import { timeframeForMinutes } from "../streaming/timeframes.js";
 
 function die(msg: string): never {
   console.error(`backfill: ${msg}`);
@@ -61,6 +63,8 @@ interface Args {
   dryRun: boolean;
   force: boolean;
   epic?: string;
+  /** Target candle width in whole minutes (1 = canonical MINUTE_1, 3 = legacy MINUTE_3). */
+  minutes: number;
 }
 
 function parseArgs(): Args {
@@ -70,12 +74,14 @@ function parseArgs(): Args {
   let dryRun = false;
   let force = false;
   let epic: string | undefined;
+  let minutes = 3;
   for (const raw of process.argv.slice(2)) {
     const [key, ...rest] = raw.replace(/^--/, "").split("=");
     const val = rest.join("=");
     if (key === "dry-run") dryRun = true;
     else if (key === "force") force = true;
     else if (key === "hours") hours = Number(val);
+    else if (key === "minutes") minutes = Number(val);
     else if (key === "epic") epic = val.trim();
     else if (key === "from") {
       const t = Date.parse(val);
@@ -90,11 +96,17 @@ function parseArgs(): Args {
   if (toMs === undefined) toMs = Date.now();
   if (fromMs === undefined) fromMs = toMs - hours * 3_600_000;
   if (fromMs > toMs) [fromMs, toMs] = [toMs, fromMs];
-  return { fromMs, toMs, dryRun, force, epic };
+  if (!Number.isInteger(minutes) || minutes < 1) die(`invalid --minutes=${minutes} (must be a positive whole number of minutes)`);
+  return { fromMs, toMs, dryRun, force, epic, minutes };
 }
 
 async function main(): Promise<void> {
   const args = parseArgs();
+  // Target candle width drives the timeframe key + bucket grid (1 → canonical
+  // MINUTE_1, 3 → legacy MINUTE_3, k → generic whole-minute frame).
+  const minutes = args.minutes;
+  const TF = timeframeForMinutes(minutes);
+  const BUCKET_SEC = minutes * 60;
   const config = loadConfig();
   const admin = createSupabaseAdmin(config.supabase);
   if (!admin) die("Supabase is not configured — set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY in backend/.env");
@@ -130,6 +142,7 @@ async function main(): Promise<void> {
     fromSec,
     toSec: Math.min(toSec, formingBucketSec), // exclusive bound — forming bucket never scanned
     calendar: IG_GERMANY_40,
+    bucketSec: BUCKET_SEC,
   });
   const list = (arr: number[]): string =>
     arr.length ? arr.map((b) => `  ${fmtDayBucket(b)}Z`).join("\n") : "  (none)";
@@ -162,6 +175,7 @@ async function main(): Promise<void> {
     formingBucketSec,
     oneMin,
     rows,
+    minutes,
     allowBackfilledRepair: args.force,
     calendar: IG_GERMANY_40,
   });

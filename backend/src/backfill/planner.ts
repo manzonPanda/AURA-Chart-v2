@@ -1,9 +1,9 @@
 /**
  * Stage 3 — backfill PLANNER (pure, no I/O, fully unit-testable).
  *
- * For every 3-minute bucket in [fromSec..toSec] (forming/live bucket always
- * excluded) it decides what — if anything — may be written from IG historical
- * 1-minute data:
+ * For every `minutes`-minute bucket in [fromSec..toSec] (forming/live bucket
+ * always excluded) it decides what — if anything — may be written from IG
+ * historical 1-minute data:
  *
  *   missing bucket     → INSERT candidate  (status=backfilled, source=ig_historical)
  *   partial bucket     → REPAIR candidate  (status=backfilled, source=ig_historical)
@@ -11,16 +11,22 @@
  *   backfilled bucket  → PROTECTED unless allowBackfilledRepair (--force)
  *   IG data insufficient → UNCOVERED — bucket left EXACTLY as it is
  *
- * Coverage rule (conservative, per design): a bucket is coverable only when IG
- * returned a 1-minute row for ALL THREE of its minutes (b, b+60, b+120). A
- * partial candle is never replaced with an incomplete historical result.
+ * Target minutes (input.minutes, default 3):
+ *   - minutes=1 → the canonical MINUTE_1 frame: each 1m bucket is covered by
+ *     its own single 1m row (this is the backfill the new 1m-only architecture
+ *     uses). Buckets are the 60 s grid.
+ *   - minutes=3 → MINUTE_3 (legacy view): buckets are the 180 s grid, covered
+ *     only when IG returned a 1-minute row for ALL THREE minutes (b, b+60,
+ *     b+120) — a partial candle is never replaced with an incomplete result.
+ *   - any future whole-minute frame (5/15/30/60) derives its coverage the same
+ *     way from `minutes` 1m rows.
  *
  * Price basis (recorded here, written to `source`): IG historical 1m candles
  * via midPrice() — midTraded preferred, else (bid+ask)/2, else single side —
- * aggregated on the exact floor(ts/180)*180 grid by aggregateToMinutes(), then
- * rounded to 1 decimal to match the live chart's MID convention. Deterministic:
- * identical IG rows → byte-identical plan. The LIVE MID calculation is not
- * involved anywhere in this module.
+ * aggregated on the exact floor(ts/(minutes*60))*grid by aggregateToMinutes(),
+ * then rounded to 1 decimal to match the live chart's MID convention.
+ * Deterministic: identical IG rows → byte-identical plan. The LIVE MID
+ * calculation is not involved anywhere in this module.
  */
 import { aggregateToMinutes } from "../ig/historical.js";
 import { isBucketExpected, type MarketCalendar } from "../market/calendar.js";
@@ -28,6 +34,7 @@ import type { PersistedCandle } from "../db/candleStore.js";
 import type { Candle } from "../types/candle.js";
 import type { CandleStatus } from "../streaming/types.js";
 
+/** Legacy alias: the MINUTE_3 bucket width (kept for historic callers/tests). */
 export const BACKFILL_BUCKET_SEC = 180;
 export const BACKFILL_SOURCE = "ig_historical";
 
@@ -42,6 +49,12 @@ export interface BackfillPlanInput {
   oneMin: readonly Candle[];
   /** Persisted rows for the same range (any subset — missing buckets simply absent). */
   rows: readonly PersistedCandle[];
+  /**
+   * Target candle width in whole minutes: 1 → canonical MINUTE_1 buckets (the
+   * default choice for the 1m-only architecture); 3 → legacy MINUTE_3 view;
+   * any whole minute → generic frame. Default 3 (historic behavior).
+   */
+  minutes?: number;
   /** --force: also plan repairs of `backfilled` rows (never of `completed`). */
   allowBackfilledRepair?: boolean;
   /** Market calendar — non-trading buckets (weekend/break/holiday) are never
@@ -92,14 +105,20 @@ export function planBackfill(input: BackfillPlanInput): BackfillPlan {
     stats: { oneMinRows: input.oneMin.length, expectedBuckets: 0 },
   };
 
-  const bucketSec = BACKFILL_BUCKET_SEC;
+  // Grid + coverage depend on the target candle width (whole minutes): 1 →
+  // canonical MINUTE_1 (60 s grid, one 1m row covers the bucket); 3 → legacy
+  // MINUTE_3 (180 s grid, three 1m rows); k → any future whole-minute frame.
+  const minutes = input.minutes ?? 3;
+  const bucketSec = minutes * 60;
   const fromSec = Math.floor(input.fromSec / bucketSec) * bucketSec;
   const toSec = Math.floor(input.toSec / bucketSec) * bucketSec;
 
   const byBucket = new Map<number, Candle>();
-  for (const c of aggregateToMinutes(input.oneMin, 3)) byBucket.set(c.ts, c);
+  for (const c of aggregateToMinutes(input.oneMin, minutes)) byBucket.set(c.ts, c);
   const oneMinTs = new Set<number>(input.oneMin.map((c) => c.ts));
   const rowsByBucket = new Map<number, PersistedCandle>(input.rows.map((r) => [r.time, r]));
+  // Minute offsets inside the target bucket: [0..minutes) on the 60 s grid.
+  const minuteOffsets = Array.from({ length: minutes }, (_, i) => i * 60);
 
   for (let b = fromSec; b <= toSec; b += bucketSec) {
     if (b >= input.formingBucketSec) break; // never touch the forming/live bucket
@@ -108,9 +127,10 @@ export function planBackfill(input: BackfillPlanInput): BackfillPlan {
 
     // byBucket/oneMinTs are keyed in epoch MS (Candle.ts is ms-based); b is epoch SECONDS.
     const ig = byBucket.get(b * 1000);
-    // Full coverage = a 1m row for ALL THREE minutes of the bucket.
+    // Full coverage = a 1m row for EVERY constituent minute of the bucket
+    // (minutes=1 → the single row itself; minutes=3 → all three).
     const covered =
-      ig !== undefined && [0, 60, 120].every((off) => oneMinTs.has((b + off) * 1000));
+      ig !== undefined && minuteOffsets.every((off) => oneMinTs.has((b + off) * 1000));
 
     const row = rowsByBucket.get(b);
     const status: CandleStatus = row?.status ?? "completed";

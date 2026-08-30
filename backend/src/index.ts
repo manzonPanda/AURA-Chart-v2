@@ -26,7 +26,7 @@ const config = loadConfig();
 const supabaseAdmin = createSupabaseAdmin(config.supabase);
 const candleStore = supabaseAdmin ? new CandleStore(supabaseAdmin, config.supabase.table) : null;
 if (candleStore) {
-  console.log("  [DB] Supabase candle persistence ENABLED (completed 3m candles will be upserted).");
+  console.log("  [DB] Supabase candle persistence ENABLED (completed 1m candles only will be upserted; 3m is derived live + aggregated on read).");
 } else {
   console.log("  [DB] Supabase not configured — completed candles will NOT be persisted (set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY).");
 }

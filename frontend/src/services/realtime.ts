@@ -40,6 +40,7 @@ export interface RealtimeStream {
 
 /** Mirrors the backend RESOLUTION_BUCKET_SEC map (single source of truth is the server). */
 const RESOLUTION_BUCKET_SEC: Record<string, number> = {
+  MINUTE_1: 60,
   MINUTE_3: 180,
 };
 

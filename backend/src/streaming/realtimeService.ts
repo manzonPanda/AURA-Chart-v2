@@ -4,16 +4,21 @@ import type { IgClient } from "../ig/client.js";
 import { CandleAggregatorSet } from "./aggregator.js";
 import { IgStreamClient } from "./igStream.js";
 import type { ClosedCandle, IngTick, RealtimeCandle, StreamState } from "./types.js";
+import {
+  TIMEFRAME_BUCKET_SEC as RESOLUTION_BUCKET_SEC,
+  STREAM_TIME_FRAMES,
+  isPersistedTimeframe,
+  timeframeLabel,
+} from "./timeframes.js";
 
 /**
- * The ONLY chart resolution → bucket seconds. AURA Chart is a single 3-minute
- * timeframe: bucket = floor(ts / 180) * 180 (pure epoch, no timezone).
+ * The chart timeframes → bucket seconds. The registry and its persistence
+ * rules live in ./timeframes.ts (MINUTE_1 is the ONLY persisted frame;
+ * MINUTE_3 is a live in-memory overlay + history derived from 1m). Re-exported
+ * under the historic `RESOLUTION_BUCKET_SEC` name so existing importers of
+ * ../realtime.js keep working unchanged.
  */
-export const RESOLUTION_BUCKET_SEC: Record<string, number> = {
-  MINUTE_3: 180,
-};
-
-export const STREAM_TIME_FRAMES = Object.keys(RESOLUTION_BUCKET_SEC);
+export { RESOLUTION_BUCKET_SEC, STREAM_TIME_FRAMES };
 
 /** "HH:MM:SS.mmm" (UTC) — shared by the temporary candle diagnostics below. */
 const fmtMs = (ms: number): string => new Date(ms).toISOString().slice(11, 23);
@@ -54,10 +59,11 @@ export class RealtimeService {
   private lastPrice: number | null = null;
   /** Arrival time (server clock) of the last REAL IG tick — 0 = none ever. */
   private lastTickAt = 0;
-  /** Previous 3-minute bucket, for rollover diagnostics. */
-  private lastBucketSec = 0;
-  /** One-shot flag: log how the first forming candle was anchored at stream start. */
-  private loggedFirstAnchor = false;
+  /** Previous bucket PER TIMEFRAME, for rollover diagnostics. */
+  private readonly lastBucketSec = new Map<string, number>();
+  /** One-shot flag per timeframe: log how the first forming candle was
+   *  anchored at stream start. */
+  private readonly loggedFirstAnchor = new Set<string>();
   private reconnectTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private started = false;
@@ -69,8 +75,8 @@ export class RealtimeService {
     private readonly candleStore: CandleStore | null = null,
   ) {
     this.aggregators = new CandleAggregatorSet(
-      Object.entries(RESOLUTION_BUCKET_SEC).map(([resolution, bucketSec]) => ({
-        timeframe: resolution,
+      Object.entries(RESOLUTION_BUCKET_SEC).map(([timeframe, bucketSec]) => ({
+        timeframe,
         bucketSec,
       })),
     );
@@ -85,7 +91,7 @@ export class RealtimeService {
     epic: string;
     resolution: string;
     bucketSec: number;
-    timeframes: string[];
+    timeframes: readonly string[];
     ticks: number;
     lastPrice: number | null;
     lastTickAt: number;
@@ -220,21 +226,26 @@ export class RealtimeService {
 
     const sec = (s: number) => new Date(s * 1000).toISOString();
 
-    // Build the 3-minute forming candle (single timeframe — MINUTE_3).
-    const bucketSec = RESOLUTION_BUCKET_SEC["MINUTE_3"];
-    const candle = this.aggregators.getCandleFor(bucketSec);
+    // One pass per timeframe. Every IG tick fans out to BOTH the canonical 1m
+    // aggregator (closed candles are persisted) and the in-memory 3m overlay
+    // (never persisted — formed purely for the live WS forming-candle UX).
+    for (const [timeframe, bucketSec] of Object.entries(RESOLUTION_BUCKET_SEC)) {
+      const candle = this.aggregators.getCandleFor(bucketSec);
+      if (!candle) continue;
 
-    if (candle) {
-      // TEMPORARY: one-shot anchor report for the FIRST bucket of this stream.
-      // If the backend started mid-bucket, our open is the first RECEIVED tick
-      // and will NOT match IG's bucket-boundary open — this flags that case.
-      if (!this.loggedFirstAnchor) {
-        this.loggedFirstAnchor = true;
+      const tag = timeframeLabel(timeframe).toUpperCase(); // "1M" | "3M"
+      const prevBucket = this.lastBucketSec.get(timeframe) ?? 0;
+
+      // TEMPORARY: one-shot anchor report for the FIRST bucket of this stream,
+      // per timeframe. If the backend started mid-bucket, our open is the first
+      // RECEIVED tick and will NOT match IG's bucket-boundary open.
+      if (!this.loggedFirstAnchor.has(timeframe)) {
         const stats = this.aggregators.getCurrentStatsFor(bucketSec);
         if (stats && stats.firstTickMs > 0) {
+          this.loggedFirstAnchor.add(timeframe);
           const delta = stats.firstTickMs - candle.time * 1000;
           console.log(
-            `[3M CANDLE SESSION-START]\n` +
+            `[${tag} CANDLE SESSION-START]\n` +
               `bucket=${fmtMs(candle.time * 1000).slice(0, 8)}\n` +
               `firstTick=${fmtMs(stats.firstTickMs)}\n` +
               `firstTickDeltaMs=${delta}\n` +
@@ -244,15 +255,15 @@ export class RealtimeService {
         }
       }
 
-      if (this.lastBucketSec === 0) this.lastBucketSec = candle.time;
-      if (candle.time > this.lastBucketSec) {
+      if (prevBucket === 0) this.lastBucketSec.set(timeframe, candle.time);
+      if (candle.time > (this.lastBucketSec.get(timeframe) ?? 0)) {
         // A bucket just CLOSED. Dump its full diagnostics: chart OHLC (rounded
         // MID), unrounded raw OHLC, tick count + first/last tick timestamps.
         const ls = this.stream?.getStats();
         const closed = this.aggregators.getClosedCandleFor(bucketSec);
         if (closed) {
           console.log(
-            `[3M CANDLE CLOSED]\n` +
+            `[${tag} CANDLE CLOSED]\n` +
               `bucket=${fmtMs(closed.time * 1000).slice(0, 8)}\n` +
               `O=${closed.open}\n` +
               `H=${closed.high}\n` +
@@ -266,36 +277,44 @@ export class RealtimeService {
               `rawO=${closed.rawOpen ?? "-"} rawH=${closed.rawHigh ?? "-"} rawL=${closed.rawLow ?? "-"} rawC=${closed.rawClose ?? "-"}\n` +
               `lsUpdates=${ls?.updatesReceived ?? "-"} lsNoPrice=${ls?.noPriceUpdates ?? "-"} ticksTotal=${this.ticksReceived} clients=${this.clients.size}`,
           );
-          // COMPLETED candle → Supabase upsert (fire-and-forget, idempotent —
-          // see persistClosedCandle; never touches the realtime path).
-          this.persistClosedCandle(closed);
+          // COMPLETED candle → Supabase upsert — ONLY for the canonical
+          // persisted timeframe (MINUTE_1). MINUTE_3 is an in-memory overlay
+          // and is deliberately NEVER written. Fire-and-forget, idempotent —
+          // see persistClosedCandle; never touches the realtime path.
+          if (isPersistedTimeframe(timeframe)) {
+            this.persistClosedCandle(closed, timeframe);
+          }
         }
         console.log(
-          `[3M] ROLLOVER oldBucket=${sec(this.lastBucketSec)} newBucket=${sec(candle.time)}`,
+          `[${tag}] ROLLOVER oldBucket=${sec(this.lastBucketSec.get(timeframe) ?? 0)} newBucket=${sec(candle.time)}`,
         );
-        this.lastBucketSec = candle.time;
-      } else if (candle.time < this.lastBucketSec) {
-        this.lastBucketSec = candle.time; // stream reset / stale tick safety
+        this.lastBucketSec.set(timeframe, candle.time);
+      } else if (candle.time < (this.lastBucketSec.get(timeframe) ?? 0)) {
+        this.lastBucketSec.set(timeframe, candle.time); // stream reset / stale tick safety
       }
 
+      // Per-client-resolution fan-out: only the clients subscribed to THIS
+      // timeframe receive its forming candle. (Previously every client got the
+      // single 3m frame regardless of the res it asked for.)
       for (const client of this.clients) {
-        if (!client.alive) continue;
-        this.sendCandle(client, { type: "candle", timeframe: "MINUTE_3", ...candle });
+        if (!client.alive || client.bucketSec !== bucketSec) continue;
+        this.sendCandle(client, { type: "candle", timeframe, ...candle });
       }
     }
   }
 
   /**
-   * Persist one COMPLETED candle to Supabase. Fire-and-forget: the promise is
-   * fully self-contained (CandleStore logs and swallows its own errors) so a
-   * DB outage can never reject into the tick path, slow the stream, or change
-   * live chart behavior. Duplicate-safe by upsert on
-   * (instrument, timeframe, bucket_time) — reconnects/restarts re-close the
-   * same bucket and converge on one row.
+   * Persist one COMPLETED candle to Supabase under the given timeframe (the
+   * canonical MINUTE_1 in practice — this method is never called for the 3m
+   * overlay). Fire-and-forget: the promise is fully self-contained (CandleStore
+   * logs and swallows its own errors) so a DB outage can never reject into the
+   * tick path, slow the stream, or change live chart behavior. Duplicate-safe
+   * by upsert on (instrument, timeframe, bucket_time) — reconnects/restarts
+   * re-close the same bucket and converge on one row.
    */
-  private persistClosedCandle(candle: ClosedCandle): void {
+  private persistClosedCandle(candle: ClosedCandle, timeframe: string): void {
     if (!this.candleStore) return;
-    void this.candleStore.saveClosedCandle(this.epic, "MINUTE_3", candle);
+    void this.candleStore.saveClosedCandle(this.epic, timeframe, candle);
   }
 
   private handleState(state: StreamState): void {

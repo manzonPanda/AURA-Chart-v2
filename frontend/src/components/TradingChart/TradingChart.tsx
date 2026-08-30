@@ -25,7 +25,7 @@ import { OHLCReadout } from "./OHLCReadout";
 
 interface Props {
   candles: readonly Candle[];
-  /** IG resolution id (MINUTE | MINUTE_3) — used for stream bucket alignment. */
+  /** Timeframe id (MINUTE_1 | MINUTE_3) — used for stream bucket alignment. */
   resolution?: string;
   /** Latest forming candle pushed by the backend (time = bucket start, epoch s). */
   liveCandle?: RealtimeCandleMsg | null;
@@ -52,7 +52,7 @@ function asBar(c: { ts: number; open: number; high: number; low: number; close: 
  * IG ticks arrive as discrete WS frames; without animation the candle's close
  * would SNAP between consecutive tick prices. Instead we glide the close from
  * where it currently sits toward the latest tick over `SMOOTH_DURATION_MS`
- * using requestAnimationFrame, so the current 3-minute bar "moves" up/down
+ * using requestAnimationFrame, so the current bar "moves" up/down
  * smoothly as ticks stream in. Wicks (high/low) are always painted at the
  * bucket's true running extremes — only the body close glides.
  */
@@ -493,8 +493,9 @@ export function TradingChart({
   // Data timestamps stay UTC epoch seconds everywhere (DB, IG UTM, live WS).
   // Only the RENDERED labels — time-axis ticks and the crosshair time label —
   // are formatted in Philippine time via Lightweight Charts formatters.
-  // PH is a fixed +8 whole-hour offset (no DST), so the 3-minute bucket grid
-  // (:00 / :03 / :36 …) is identical in UTC and PH — zero alignment risk.
+  // PH is a fixed +8 whole-hour offset (no DST), so any whole-minute bucket
+  // grid (1m / 3m — :00 / :03 / :06 …) is identical in UTC and PH — zero
+  // alignment risk.
   const manilaChartOptions = useMemo<DeepPartial<ChartOptions>>(
     () => ({
       timeScale: {

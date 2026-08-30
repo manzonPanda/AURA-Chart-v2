@@ -1,11 +1,17 @@
 /**
- * AURA Chart — single 3-minute realtime candlestick chart.
+ * AURA Chart — realtime candlestick chart with a 1m / 3m timeframe selector.
  * Priority: realtime stream (Lightstreamer → WS → chart) even if historical
- * REST is unavailable (e.g. IG_ALLOWANCE_EXHAUSTED). No timeframe selector.
+ * REST is unavailable (e.g. IG_ALLOWANCE_EXHAUSTED).
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { TradingChart } from "./components/TradingChart/TradingChart";
-import { CHART_RESOLUTION, HISTORY_LIMIT, INSTRUMENT_LABEL } from "./config/chart";
+import {
+  DEFAULT_TIME_FRAME,
+  HISTORY_LIMIT,
+  INSTRUMENT_LABEL,
+  TIMEFRAMES,
+  type TimeFrameKey,
+} from "./config/chart";
 import { ApiError, fetchCandlesDb, fetchHealth } from "./services/api";
 import { useRealtimeStream } from "./services/realtime";
 import { iso } from "./services/diagnostics";
@@ -44,11 +50,14 @@ export default function App() {
   const [health, setHealth] = useState<{ configured: boolean; environment: string } | null>(null);
   const [streamEpoch, setStreamEpoch] = useState(0);
   const [nowTick, setNowTick] = useState(() => Date.now());
+  const [timeframe, setTimeframe] = useState<TimeFrameKey>(DEFAULT_TIME_FRAME);
   const requestSeq = useRef(0);
 
-  // The single 3-minute realtime stream (backend /ws relay). Independent of
-  // historical REST — realtime is the priority and always starts.
-  const realtime = useRealtimeStream(CHART_RESOLUTION, epic || undefined, streamEpoch);
+  // Realtime stream for the SELECTED timeframe (backend /ws relay). Switching
+  // the selector drops the socket and re-subscribes with the new `res=` — the
+  // backend re-seeds the forming candle for that timeframe automatically.
+  // Independent of historical REST — realtime is the priority and always starts.
+  const realtime = useRealtimeStream(timeframe, epic || undefined, streamEpoch);
 
   // Clock ticker so tick-age ("CONNECTED · NO TICKS") stays truthful.
   useEffect(() => {
@@ -64,7 +73,7 @@ export default function App() {
     const seq = ++requestSeq.current;
     setLoading(true);
     try {
-      const data = await fetchCandlesDb(CHART_RESOLUTION, HISTORY_LIMIT);
+      const data = await fetchCandlesDb(timeframe, HISTORY_LIMIT);
       if (seq !== requestSeq.current) return;
       setEpic(data.epic);
       setCandles(data.candles);
@@ -78,7 +87,7 @@ export default function App() {
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
-  }, []);
+  }, [timeframe]);
 
   // Initial load + page health.
   useEffect(() => {
@@ -117,9 +126,22 @@ export default function App() {
           <span className="instrument-name">{INSTRUMENT_LABEL}</span>
           <span className="instrument-epic">{epic || "…"}</span>
         </div>
-<div className="topbar-actions">
-          {/* Single timeframe — no selector. */}
-          <span className="meta-chip">3m</span>
+        <div className="topbar-actions">
+          {/* Timeframe selector — 1m (canonical persisted) | 3m (derived) */}
+          <div className="timeframes" role="tablist" aria-label="Chart timeframe">
+            {TIMEFRAMES.map((tf) => (
+              <button
+                key={tf.key}
+                role="tab"
+                aria-selected={timeframe === tf.key}
+                className={`tf-btn ${timeframe === tf.key ? "active" : ""}`}
+                title={`${tf.label} timeframe (${tf.bucketSec}s buckets)`}
+                onClick={() => setTimeframe(tf.key)}
+              >
+                {tf.label}
+              </button>
+            ))}
+          </div>
           {(() => {
             const sl = streamLabel(realtime.status, realtime.lastTickAt, nowTick);
             const cls = sl.live ? "live" : sl.noTicks ? "noticks" : realtime.status.toLowerCase();
@@ -170,7 +192,7 @@ export default function App() {
       <main className="chart-area">
         <TradingChart
           candles={candles}
-          resolution={CHART_RESOLUTION}
+          resolution={timeframe}
           liveCandle={realtime.candle}
           streamStatus={realtime.status}
           loading={loading}

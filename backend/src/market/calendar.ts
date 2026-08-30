@@ -100,19 +100,21 @@ const inAnyWindow = (parts: LondonParts, cal: MarketCalendar): boolean => {
 };
 
 /**
- * True when the 3-minute bucket starting at `bucketSec` overlaps any trading
+ * True when the timeframe bucket starting at `bucketSec` overlaps any trading
  * window: a bucket is expected if its START or its LAST instant falls inside a
  * window of a non-closed trading day. This naturally admits the bucket that
  * contains a mid-grid session open (e.g. 01:10 London opens inside the
- * 01:09–01:12 bucket) and rejects everything inside the daily break, weekends
- * and holidays. All instants are UTC epoch; conversion is display-only.
+ * 01:09–01:12 3m bucket) and rejects everything inside the daily break,
+ * weekends and holidays. All instants are UTC epoch; conversion is display-only.
+ * The bucket width is taken from the given start instant (parameterized per
+ * timeframe — the canonical persisted frame is 1m, so 180 is never hardcoded).
  */
 export function isBucketExpected(bucketSec: number, cal: MarketCalendar): boolean {
   const startMs = bucketSec * 1000;
   const start = londonParts(startMs);
-  // Last instant of the bucket (start+180s−1ms) so window opens INSIDE the
-  // bucket count as expected.
-  const last = londonParts(startMs + 179_999);
+  // Last instant of the bucket (start + bucketSec − 1 ms) so a window opening
+  // INSIDE the bucket still counts as expected.
+  const last = londonParts(startMs + bucketSec * 1000 - 1);
   if (cal.closedDates.includes(start.date) || cal.closedDates.includes(last.date)) return false;
   return inAnyWindow(start, cal) || inAnyWindow(last, cal);
 }

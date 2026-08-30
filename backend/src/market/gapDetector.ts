@@ -2,7 +2,7 @@ import type { CandleStatus } from "../streaming/types.js";
 import { isBucketExpected, type MarketCalendar } from "./calendar.js";
 
 /**
- * Pure gap detection over the 180-second bucket grid (Stage 2 — read-only).
+ * Pure gap detection over an epoch bucket grid (Stage 2 — read-only).
  *
  * Consumes persisted candle rows (bucket start epoch-seconds + status) for ONE
  * (instrument, timeframe) and classifies every EXPECTED market bucket in
@@ -17,6 +17,10 @@ import { isBucketExpected, type MarketCalendar } from "./calendar.js";
  * (informational only — never treated as errors). The forming bucket is
  * excluded by the caller via `toSec`. Weekend/break/holiday buckets are simply
  * never expected (see calendar.ts) — legitimate closures are invisible.
+ *
+ * `bucketSec` is now explicit (the caller passes the timeframe grid: 60 for the
+ * canonical MINUTE_1 rows, 180 for the MINUTE_3 view). The 180 default is kept
+ * only as a legacy fallback for existing offline tests.
  */
 export interface GapRow {
   time: number;

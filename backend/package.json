@@ -16,6 +16,7 @@
     "ig:ohlc-compare": "tsx src/scripts/ohlc-compare.ts",
     "db:migrate": "tsx src/scripts/db-migrate.ts",
     "db:candle-check": "tsx src/scripts/db-candle-check.ts",
+    "db:timeframe-verify": "tsx src/scripts/db-timeframe-verify.ts",
     "db:tz-verify": "tsx src/scripts/db-tz-verify.ts",
     "gap:test": "tsx src/scripts/gap-test.ts",
     "lifecycle:test": "tsx src/scripts/shutdown-test.ts",
