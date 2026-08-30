@@ -2,6 +2,9 @@
 // Construction mirrors backend/src/ig/auth.ts exactly:
 //   cipher = base64( RSA_PKCS1v1.5( utf8( base64(password + "|" + timeStamp) ) ) )
 import "dotenv/config";
+// Node's crypto MODULE is required for createPublicKey/publicEncrypt — the bare
+// `crypto` global in an ES module is the WebCrypto object, which has neither.
+import crypto from "node:crypto";
 
 const apiKey = process.env.IG_API_KEY ?? "";
 const username = process.env.IG_USERNAME ?? "";
@@ -73,7 +76,11 @@ try {
     console.log(`login   : FAIL (${code})`);
     console.log("RESULT  : FAIL — credentials rejected");
   }
-} catch {
-  console.log("login   : FAIL (network error)");
-  console.log("RESULT  : FAIL — could not reach gateway");
+} catch (err) {
+  // A throw here is NOT necessarily a network error — it can come from the
+  // crypto steps or response parsing too. Report the real error class/message
+  // (never secret-bearing; truncated defensively).
+  const reason = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  console.log(`login   : FAIL (${reason.slice(0, 160)})`);
+  console.log("RESULT  : FAIL — login could not be completed (see reason above)");
 }
