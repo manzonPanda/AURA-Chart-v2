@@ -21,19 +21,21 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 Group=ubuntu
-WorkingDirectory=/opt/aura/backend
+WorkingDirectory=/home/ubuntu/apps/AURA-Chart-v2/backend
 
 # Runs the compiled output (npm --prefix backend run build → dist/).
 # `which node` on the VM to confirm the binary path (nvm installs differ).
 ExecStart=/usr/bin/node dist/index.js
 
-# Secrets come from backend/.env (IG_*, SUPABASE_*, PORT). This file's
-# Environment= values are applied first, so backend/.env can override them
-# (e.g. HOST). Keep HOST=127.0.0.1 in production — nginx is the only caller;
+# Secrets come from backend/.env (IG_*, SUPABASE_*, PORT). systemd applies
+# Environment=/EnvironmentFile= directives in file order, so these lines are
+# deliberately placed AFTER EnvironmentFile=: the values below always WIN,
+# guaranteeing the production loopback binding regardless of what .env
+# contains. Keep HOST=127.0.0.1 in production — nginx is the only caller;
 # the raw API must not be reachable from the internet.
+EnvironmentFile=/home/ubuntu/apps/AURA-Chart-v2/backend/.env
 Environment=NODE_ENV=production
 Environment=HOST=127.0.0.1
-EnvironmentFile=/opt/aura/backend/.env
 
 # The backend exits 0 on SIGTERM (graceful shutdown) — restarts are safe.
 Restart=always
