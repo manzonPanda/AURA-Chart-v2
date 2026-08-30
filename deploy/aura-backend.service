@@ -1,0 +1,49 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AURA-Chart — systemd unit for the Hono backend (production)
+#
+# The backend already handles SIGTERM gracefully (disconnects Lightstreamer,
+# stops timers, closes the WS relay + HTTP server, exit 0), so systemd
+# restarts are clean.
+#
+# Install (adjust /opt/aura and the User to your VM layout):
+#   sudo cp deploy/aura-backend.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now aura-backend
+#
+# Logs:   journalctl -u aura-backend -f
+# ─────────────────────────────────────────────────────────────────────────────
+[Unit]
+Description=AURA Chart backend (Hono + IG Lightstreamer relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/aura/backend
+
+# Runs the compiled output (npm --prefix backend run build → dist/).
+# `which node` on the VM to confirm the binary path (nvm installs differ).
+ExecStart=/usr/bin/node dist/index.js
+
+# Secrets come from backend/.env (IG_*, SUPABASE_*, PORT). This file's
+# Environment= values are applied first, so backend/.env can override them
+# (e.g. HOST). Keep HOST=127.0.0.1 in production — nginx is the only caller;
+# the raw API must not be reachable from the internet.
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+EnvironmentFile=/opt/aura/backend/.env
+
+# The backend exits 0 on SIGTERM (graceful shutdown) — restarts are safe.
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Light hardening.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
