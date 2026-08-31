@@ -22,7 +22,9 @@ import {
 } from "../../services/realtime";
 import { diag, iso, logUpdateBar, maybeLogChartBlock } from "../../services/diagnostics";
 import { planLiveUpdate, type LiveBar } from "../../services/liveCandle";
+import { defaultEmaSettings, type EmaSettings } from "../../config/emaSettings";
 import { CandleCountdown } from "./CandleCountdown";
+import { EmaBridge } from "./EmaBridge";
 import { OHLCReadout } from "./OHLCReadout";
 
 interface Props {
@@ -35,6 +37,8 @@ interface Props {
   loading?: boolean;
   /** When true the viewport follows the latest bar; when false the user's pan is respected. */
   autoFollow?: boolean;
+  /** EMA overlay configuration (localStorage-persisted in App). */
+  emaSettings?: EmaSettings;
 }
 
 function asBar(c: { ts: number; open: number; high: number; low: number; close: number; volume?: number }): Bar {
@@ -447,6 +451,7 @@ export function TradingChart({
   streamStatus = "DISCONNECTED",
   loading = false,
   autoFollow = true,
+  emaSettings = defaultEmaSettings(),
 }: Props) {
   const [crosshairCandle, setCrosshairCandle] = useState<Candle | null>(null);
   // When history is empty (e.g. IG allowance exhausted), ChartView still needs
@@ -566,7 +571,7 @@ export function TradingChart({
           data={data}
           seriesType="candlestick"
           theme="dark"
-          showVolume
+          showVolume={false}
           autoFit={false}
           chartOptions={manilaChartOptions}
         >
@@ -578,14 +583,19 @@ export function TradingChart({
             autoFollow={autoFollow}
             onCrosshairCandle={setCrosshairCandle}
           />
+          {/* TradingView-style countdown ON the right price scale, pinned to
+              the forming candle's price level (native LWC price line; renders
+              no DOM). Stays attached to the live price on 1m and 3m. */}
+          <CandleCountdown liveCandle={liveCandle} candles={candles} bucketSec={bucketSec} />
+          {/* EMA 9 / EMA 20 overlays — plain LWC line series on the price
+              pane, recalculated from the SELECTED timeframe's candles with the
+              forming candle's server truth (see services/ema.ts). */}
+          <EmaBridge bars={data} liveCandle={liveCandle} bucketSec={bucketSec} settings={emaSettings} />
         </ChartView>
         {loading && <div className="chart-spinner">…</div>}
       </div>
       <div className="chart-footer">
         <OHLCReadout candle={crosshairCandle ?? last} />
-        {/* TradingView-style countdown for the FORMING candle — hidden while
-            the crosshair inspects a historical candle. */}
-        {!crosshairCandle && <CandleCountdown liveCandle={liveCandle} bucketSec={bucketSec} />}
       </div>
     </div>
   );

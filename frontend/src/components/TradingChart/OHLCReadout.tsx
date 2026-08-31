@@ -8,9 +8,6 @@ interface Props {
 const fmtPrice = (v: number | undefined): string =>
   v == null || Number.isNaN(v) ? "—" : v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-const fmtVolume = (v: number | undefined): string =>
-  v == null ? "—" : Math.round(v).toLocaleString("en-US");
-
 /** Compact OHLC/quote strip fed by the most recent candle. */
 export function OHLCReadout({ candle }: Props) {
   const last = candle;
@@ -36,9 +33,6 @@ export function OHLCReadout({ candle }: Props) {
       </span>
       <span className="ohlc-item c">
         C&nbsp;{fmtPrice(last?.close)}
-      </span>
-      <span className="ohlc-item v">
-        V&nbsp;{fmtVolume(last?.volume)}
       </span>
       {last && (
         <>

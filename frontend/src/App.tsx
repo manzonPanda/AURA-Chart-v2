@@ -5,6 +5,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { TradingChart } from "./components/TradingChart/TradingChart";
+import { IndicatorsMenu } from "./components/Indicators/IndicatorsMenu";
 import {
   DEFAULT_TIME_FRAME,
   HISTORY_LIMIT,
@@ -12,6 +13,7 @@ import {
   TIMEFRAMES,
   type TimeFrameKey,
 } from "./config/chart";
+import { loadEmaSettings, saveEmaSettings, type EmaSettings } from "./config/emaSettings";
 import { ApiError, fetchCandlesDb, fetchHealth } from "./services/api";
 import { useRealtimeStream } from "./services/realtime";
 import { iso } from "./services/diagnostics";
@@ -51,6 +53,9 @@ export default function App() {
   const [streamEpoch, setStreamEpoch] = useState(0);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [timeframe, setTimeframe] = useState<TimeFrameKey>(DEFAULT_TIME_FRAME);
+  // EMA overlay configuration — localStorage-persisted, frontend-only (never
+  // Supabase; EMA VALUES are always derived client-side from the candles).
+  const [emaSettings, setEmaSettings] = useState<EmaSettings>(loadEmaSettings);
   const requestSeq = useRef(0);
 
   // Realtime stream for the SELECTED timeframe (backend /ws relay). Switching
@@ -64,6 +69,11 @@ export default function App() {
     const id = window.setInterval(() => setNowTick(Date.now()), NOW_TICK_MS);
     return () => window.clearInterval(id);
   }, []);
+
+  // Persist EMA configuration to localStorage on every change (guarded write).
+  useEffect(() => {
+    saveEmaSettings(emaSettings);
+  }, [emaSettings]);
 
   // Optional, non-blocking history load from OUR Supabase persistence
   // (GET /api/candles/db). If it fails (Supabase unconfigured / unreachable) we
@@ -157,6 +167,8 @@ export default function App() {
           <span className="instrument-epic">{epic || "…"}</span>
         </div>
         <div className="topbar-actions">
+          {/* EMA indicator slots (9/20) — localStorage-persisted config */}
+          <IndicatorsMenu settings={emaSettings} onChange={setEmaSettings} />
           {/* Timeframe selector — 1m (canonical persisted) | 3m (derived) */}
           <div className="timeframes" role="tablist" aria-label="Chart timeframe">
             {TIMEFRAMES.map((tf) => (
@@ -227,6 +239,7 @@ export default function App() {
           streamStatus={realtime.status}
           loading={loading}
           autoFollow={autoFollow}
+          emaSettings={emaSettings}
         />
       </main>
 
