@@ -21,6 +21,8 @@ import {
   resolutionToBucketSec,
 } from "../../services/realtime";
 import { diag, iso, logUpdateBar, maybeLogChartBlock } from "../../services/diagnostics";
+import { planLiveUpdate, type LiveBar } from "../../services/liveCandle";
+import { CandleCountdown } from "./CandleCountdown";
 import { OHLCReadout } from "./OHLCReadout";
 
 interface Props {
@@ -90,11 +92,12 @@ function toCandle(
 
 /**
  * Consumes the ChartView context and pushes each backend candle into the chart
- * through `controller.updateBar(...)` — the incremental, non-destructive update
- * path. CandleKit compares the bar's `ts` (epoch-ms) against the last bar:
- * equal → updates the forming candle in place, newer → appends (bucket
- * rollover), older → discarded. So the rightmost candle moves with every live
- * tick and rolls over cleanly at the timeframe boundary.
+ * through `controller.updateBar(...)` — the incremental update path. CandleKit
+ * compares the bar's `ts` (epoch-ms) against the last bar: equal → REPLACES the
+ * forming candle in place (no OHLC merging!), newer → appends (bucket
+ * rollover), older → discarded. Those REPLACE semantics are why the paint plan
+ * (liveCandle.ts) must always carry true, merged OHLC: whatever we paint last
+ * is exactly what the bar keeps.
  *
  * Handoff guarantee: CandleKit's `setData` (fired by ChartView on every history
  * load / timeframe switch / Refresh) REPLACES the whole bar array. We re-apply
@@ -102,6 +105,21 @@ function toCandle(
  * is never lost between a history snapshot and the next tick — and because IG's
  * last historical row IS the forming bucket, equal-ts frames merge into it (no
  * duplicate 11:00 candle).
+ *
+ * BACKGROUND-TAB SAFETY (the doji fix): browsers fully pause
+ * requestAnimationFrame while the tab is hidden. The old implementation let the
+ * rAF "glide" own the painted close, so a tab hidden mid-bucket froze the
+ * displayed close and the bucket rolled over committed with close ≈ open — a
+ * doji with real wicks. Now:
+ *   - `truthRef` holds the authoritative OHLC merged from every WS frame
+ *     (open = first price of the bucket, high = max, low = min, close = latest);
+ *   - hidden tabs commit truth DIRECTLY (no rAF) on every frame — each WS frame
+ *     is a full server snapshot, so batched/delayed delivery converges by
+ *     last-write-wins;
+ *   - a bucket rollover re-commits the closing bucket's true final OHLC before
+ *     appending the next bar (a frozen glide can never be a candle's last word);
+ *   - becoming visible again flushes the truth immediately.
+ * The glide survives only as a ≤300 ms cosmetic layer on visible tabs.
  *
   * Price source note: backend builds candles from MID (bid+offer)/2 for
  * CFD parity with the IG platform chart; BID → OFR → LTP as fallback.
@@ -116,6 +134,8 @@ function LiveBarBridge({
   const api = useChartApi();
   const liveRef = useRef(liveCandle);
   liveRef.current = liveCandle;
+  /** Authoritative merged OHLC of the forming bucket (see liveCandle.ts). */
+  const truthRef = useRef<LiveBar | null>(null);
 
   // Animation state — kept in a ref (never re-renders). `ts`/`open` are fixed
   // for the whole bucket; `close` is the currently-displayed body tip that we
@@ -157,105 +177,105 @@ function LiveBarBridge({
       }
     };
 
-    const apply = (msg: RealtimeCandleMsg | null): void => {
-      if (!msg) return;
-      const ts = alignToBucketStart(msg.time * 1000, bucketSec);
-      const bars = controller.getBars();
-      const lastTs = bars.length > 0 ? bars[bars.length - 1].ts : 0;
+    const cancelGlide = (): void => {
+      const a = anim.current;
+      if (a.raf) {
+        cancelAnimationFrame(a.raf);
+        a.raf = 0;
+      }
+      a.running = false;
+    };
 
-      // Guard against out-of-order timestamps (stale stream frames after a
-      // timeframe switch). Equal ts merges into the forming candle.
-      if (ts < lastTs) {
+    /** Point the glide at a bar's truth (baseline = its true close). */
+    const syncAnim = (bar: LiveBar): void => {
+      const a = anim.current;
+      a.ts = bar.ts;
+      a.open = bar.open;
+      a.close = bar.close;
+      a.startClose = bar.close;
+      a.startTs = performance.now();
+      a.tHigh = bar.high;
+      a.tLow = bar.low;
+      a.tClose = bar.close;
+      a.volume = bar.volume ?? 0;
+    };
+
+    const paintBar = (bar: LiveBar): void => {
+      controller.updateBar(asBar(bar));
+      diag.updateBarCalls += 1;
+    };
+
+    const applyFrame = (msg: RealtimeCandleMsg | null): void => {
+      if (!msg) return;
+      // rAF is PAUSED while the tab is hidden — never plan an animation there.
+      const hidden = document.visibilityState === "hidden";
+      const plan = planLiveUpdate(truthRef.current, msg, bucketSec, { hidden });
+
+      if (plan.skipped || !plan.truth) {
         diag.updateBarSkipped += 1;
         console.info(
-          `[CHART] updateBar SKIPPED (out of order): frame ${iso(ts)} < last bar ${iso(lastTs)}`,
+          `[CHART] updateBar SKIPPED (stale/unsound): frame ${iso(alignToBucketStart(msg.time * 1000, bucketSec))}` +
+            ` vs forming bucket ${iso(truthRef.current?.ts ?? 0)}`,
         );
         return;
       }
+      truthRef.current = plan.truth;
+      const bars = controller.getBars();
 
-      // LIGHTWEIGHT CHARTS FIX: series.update() silently drops the FIRST bar
-      // when the series is empty (e.g. history REST was 429 / allowance
-      // exhausted). Seed the series with a one-row setData so the forming
-      // candle is actually visible; after this updateBar is the incremental path.
-      if (bars.length === 0) {
-        controller.setData([
-          asBar({
-            ts,
-            open: msg.open,
-            high: msg.high,
-            low: msg.low,
-            close: msg.close,
-            volume: msg.volume,
-          }),
-        ]);
-        diag.dataSeeded += 1;
-        console.info(
-          `[CHART] SEEDED empty series with first live candle ts=${iso(ts)} close=${msg.close}`,
-        );
-        const a = anim.current;
-        if (a.raf) {
-          cancelAnimationFrame(a.raf);
-          a.raf = 0;
+      if (plan.rollover) {
+        // Bucket rollover (or first frame). The plan's commits are ordered:
+        // [prevTruth?] re-commits the just-closed bucket with its TRUE final
+        // OHLC — a frozen/mid-glide close can never be a closed candle's last
+        // word — then the new bucket's truth is appended. No glide across a
+        // boundary: the open must not animate.
+        let seededEmpty = bars.length === 0;
+        for (const bar of plan.commits) {
+          if (seededEmpty) {
+            // LIGHTWEIGHT CHARTS FIX: series.update() silently drops the FIRST
+            // bar when the series is empty (e.g. history unavailable) — seed
+            // with a one-row setData instead.
+            controller.setData([asBar(bar)]);
+            diag.dataSeeded += 1;
+            seededEmpty = false;
+          } else {
+            paintBar(bar);
+          }
         }
-        a.ts = ts;
-        a.open = msg.open;
-        a.close = msg.close;
-        a.volume = msg.volume ?? 0;
-        a.tHigh = msg.high;
-        a.tLow = msg.low;
-        a.tClose = msg.close;
-        a.running = false;
-        a.startClose = msg.close;
-        return;
-      }
-
-      const a = anim.current;
-
-      // New bucket (rollover) OR full-history re-sync: commit instantly rather
-      // than gliding across a candle boundary (open must not animate).
-      if (a.ts !== ts) {
-        if (a.raf) {
-          cancelAnimationFrame(a.raf);
-          a.raf = 0;
-        }
-        a.running = false;
-        a.ts = ts;
-        a.open = msg.open;
-        a.close = msg.close;
-        a.volume = msg.volume ?? 0;
-        a.tHigh = msg.high;
-        a.tLow = msg.low;
-        a.tClose = msg.close;
-        a.startClose = msg.close;
-        controller.updateBar(
-          asBar({
-            ts,
-            open: msg.open,
-            high: msg.high,
-            low: msg.low,
-            close: msg.close,
-            volume: msg.volume,
-          }),
-        );
-        diag.updateBarCalls += 1;
-        const rollover = ts > lastTs;
-        logUpdateBar(ts / 1000, msg.close);
-        if (rollover) {
+        cancelGlide();
+        syncAnim(plan.truth);
+        const closed = plan.commits.length > 1 ? plan.commits[0] : null;
+        if (closed) {
           console.info(
-            `[CHART] new bucket ${iso(ts)} (previous candle closed) timeframe bucket=${bucketSec}s — updateBar #${diag.updateBarCalls}`,
+            `[CHART] ROLLOVER closed ${iso(closed.ts)} O=${closed.open} H=${closed.high} L=${closed.low} C=${closed.close}` +
+              ` → new bucket ${iso(plan.truth.ts)} bucket=${bucketSec}s`,
           );
         }
-        maybeLogChartBlock(bars.length + (rollover ? 1 : 0), bars[0].ts, ts);
+        logUpdateBar(plan.truth.ts / 1000, plan.truth.close);
+        maybeLogChartBlock(bars.length + (closed ? 1 : 0), bars[0]?.ts ?? null, plan.truth.ts);
         return;
       }
 
-      // Same bucket — a fresh IG tick. Re-target the glide toward it, animating
-      // FROM where the candle currently sits so consecutive ticks blend into a
-      // smooth up/down curve (rather than snapping on every frame).
-      a.tHigh = msg.high;
-      a.tLow = msg.low;
-      a.tClose = msg.close;
-      a.volume = msg.volume ?? a.volume;
+      if (hidden) {
+        // BACKGROUND TAB: rAF never fires, so a glide-owned close would freeze
+        // (the doji bug). Commit the merged truth DIRECTLY — every WS frame is
+        // a full server snapshot, so batched/delayed delivery still converges
+        // on the correct OHLC via last-write-wins.
+        cancelGlide();
+        syncAnim(plan.truth);
+        paintBar(plan.truth);
+        return;
+      }
+
+      // Visible, same bucket — re-target the cosmetic glide toward the truth,
+      // animating FROM where the candle currently sits so consecutive ticks
+      // blend into a smooth curve. Wicks always paint the true extremes; the
+      // truth itself is re-committed at rollover and on tab focus (below).
+      const a = anim.current;
+      if (a.ts !== plan.truth.ts) syncAnim(plan.truth); // rebase if anim lagged
+      a.tHigh = plan.truth.high;
+      a.tLow = plan.truth.low;
+      a.tClose = plan.truth.close;
+      a.volume = plan.truth.volume ?? a.volume;
       a.startTs = performance.now();
       a.startClose = a.close;
       if (!a.running) {
@@ -264,20 +284,33 @@ function LiveBarBridge({
       }
     };
 
-    apply(liveCandle);
+    applyFrame(liveCandle);
     // Re-apply the newest live candle AFTER every full-history setData
     // (initial load, timeframe switch, Refresh). Child effects run before the
     // parent's setData effect, so this must go through the bus "data" event,
     // which CandleKit emits at the end of setData.
-    const offData = controller.bus.on("data", () => apply(liveRef.current));
+    const offData = controller.bus.on("data", () => applyFrame(liveRef.current));
+
+    // Tab-focus reconciliation: repaint the bucket truth immediately when the
+    // tab becomes visible again so a close frozen mid-glide while hidden can
+    // never survive past the focus event.
+    const onVisibility = (): void => {
+      if (document.visibilityState !== "visible") return;
+      const truth = truthRef.current;
+      if (!truth) return;
+      cancelGlide();
+      syncAnim(truth);
+      paintBar(truth);
+      console.info(
+        `[CHART] visibilitychange → visible: forming candle reconciled bucket=${iso(truth.ts)} C=${truth.close}`,
+      );
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
     return () => {
       offData();
-      const a = anim.current;
-      if (a.raf) {
-        cancelAnimationFrame(a.raf);
-        a.raf = 0;
-        a.running = false;
-      }
+      document.removeEventListener("visibilitychange", onVisibility);
+      cancelGlide();
     };
   }, [liveCandle, bucketSec, api]);
 
@@ -437,36 +470,37 @@ export function TradingChart({
       return;
     }
     if (!liveCandle) return;
-    const ts = alignToBucketStart(liveCandle.time * 1000, bucketSec);
-    const bar = asBar({
-      ts,
-      open: liveCandle.open,
-      high: liveCandle.high,
-      low: liveCandle.low,
-      close: liveCandle.close,
-      volume: liveCandle.volume,
-    });
+    // Live-only mode (no history): reconcile through the SAME planner as
+    // LiveBarBridge — stale frames skipped, OHLC merged per contract
+    // (open immutable, high=max, low=min, close=latest, volume=server
+    // cumulative, NOT additive), hidden tabs get direct truth commits.
     setLiveCandles((prev) => {
-      const last = prev[prev.length - 1];
-      if (last && last.ts === ts) {
-        // Same bucket — update the last bar's high/low/close in place.
-        // ChartView's ChartView will NOT see a new data prop reference (we
-        // return the *same* array), so no setData fires — the incremental
-        // LiveBarBridge.updateBar path owns this.
-        last.high = Math.max(last.high, bar.high);
-        last.low = Math.min(last.low, bar.low);
-        last.close = bar.close;
-        last.volume = (last.volume ?? 0) + (bar.volume ?? 0);
-        return prev; // same array reference → no re-render of ChartView
+      const last = prev.length > 0 ? prev[prev.length - 1] : null;
+      const plan = planLiveUpdate(last, liveCandle, bucketSec, {
+        hidden: document.visibilityState === "hidden",
+      });
+      if (plan.skipped || !plan.truth) return prev;
+      if (plan.rollover) {
+        const next = [...prev];
+        if (last && plan.commits.length > 1) next[next.length - 1] = asBar(plan.commits[0]);
+        next.push(asBar(plan.truth));
+        console.info(
+          `[CHART] ROLLOVER prevBucket=${last ? iso(last.ts) : "(seed)"} ` +
+            `newBucket=${iso(plan.truth.ts)} barsBefore=${prev.length} barsAfter=${next.length} ` +
+            `setData=${prev.length === 0 ? true : false} updateBar=${prev.length > 0 ? true : false}`,
+        );
+        return next; // new array reference → ChartView setData once per rollover
       }
-      // New bucket — append. This creates a NEW array reference so ChartView
-      // calls setData once for the new bar (not per tick, only on rollover).
-      console.info(
-        `[CHART] ROLLOVER prevBucket=${prev.length > 0 ? iso(prev[prev.length - 1].ts) : "(seed)"} ` +
-          `newBucket=${iso(ts)} barsBefore=${prev.length} barsAfter=${prev.length + 1} ` +
-          `setData=${prev.length === 0 ? true : false} updateBar=${prev.length > 0 ? true : false}`,
-      );
-      return [...prev, bar];
+      if (last) {
+        // Same bucket — merge into the last bar in place. We return the *same*
+        // array reference so no setData fires (LiveBarBridge owns the paint).
+        last.high = plan.truth.high;
+        last.low = plan.truth.low;
+        last.close = plan.truth.close;
+        if (plan.truth.volume !== undefined) last.volume = plan.truth.volume;
+        return prev;
+      }
+      return prev;
     });
   }, [candles.length, liveCandle, bucketSec]);
 
@@ -549,6 +583,9 @@ export function TradingChart({
       </div>
       <div className="chart-footer">
         <OHLCReadout candle={crosshairCandle ?? last} />
+        {/* TradingView-style countdown for the FORMING candle — hidden while
+            the crosshair inspects a historical candle. */}
+        {!crosshairCandle && <CandleCountdown liveCandle={liveCandle} bucketSec={bucketSec} />}
       </div>
     </div>
   );

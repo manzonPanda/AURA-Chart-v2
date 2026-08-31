@@ -97,6 +97,36 @@ export default function App() {
       .catch(() => setHealth(null));
   }, [loadHistory]);
 
+  // Background-tab re-sync. WS frames keep flowing while the tab is merely
+  // hidden (they are merged correctly by LiveBarBridge even when rAF is
+  // paused), but a suspended/sleeping device can miss BUCKETS entirely. On
+  // return, if we were hidden longer than a candle, force a fresh WS
+  // subscription (the backend re-seeds the forming candle for the selected
+  // timeframe) and reload persisted history (the missed closed buckets) so the
+  // chart reconciles without a manual refresh. No duplicate candles are
+  // possible — bucket-ts guards discard/remerge frames.
+  const RESYNC_AFTER_HIDDEN_MS = 60_000;
+  useEffect(() => {
+    let hiddenAt = 0;
+    const onVisibility = (): void => {
+      if (document.visibilityState === "hidden") {
+        hiddenAt = Date.now();
+        return;
+      }
+      if (!hiddenAt) return;
+      const awayMs = Date.now() - hiddenAt;
+      hiddenAt = 0;
+      if (awayMs < RESYNC_AFTER_HIDDEN_MS) return;
+      console.info(
+        `[APP] tab was hidden ${Math.round(awayMs / 1000)}s → re-syncing history + live stream`,
+      );
+      setStreamEpoch((x) => x + 1); // drops + reopens the socket → server re-seed
+      void loadHistory();           // pulls any buckets missed while hidden
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [loadHistory]);
+
   // TEMPORARY safe diagnostics: [CHART TIME] on every history set.
   useEffect(() => {
     if (candles.length === 0) return;

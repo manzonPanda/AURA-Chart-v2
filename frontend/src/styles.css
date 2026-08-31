@@ -112,7 +112,7 @@ body {
 @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
 
 /* ── OHLC strip ──────────────────────────────────────────── */
-.chart-footer { border-top: 1px solid var(--border); background: var(--panel); padding: 8px 1rem; flex-shrink: 0; }
+.chart-footer { border-top: 1px solid var(--border); background: var(--panel); padding: 8px 1rem; flex-shrink: 0; display: flex; align-items: center; gap: 1rem; }
 .ohlc { display: flex; flex-wrap: wrap; gap: 1.1rem; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
 .ohlc-item { color: var(--muted); }
 .ohlc-item.o { color: #64b5f6; }
@@ -122,6 +122,13 @@ body {
 .ohlc-item.up { color: var(--up); }
 .ohlc-item.down { color: var(--down); }
 .ohlc-item.chg, .ohlc-item.chg-pct { font-weight: 600; }
+
+/* ── Candle-close countdown (TradingView-style) ───────────── */
+.candle-countdown { margin-left: auto; display: inline-flex; align-items: baseline; gap: 0.45rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cc-label { font-size: 0.62rem; letter-spacing: 0.09em; color: var(--muted); }
+.cc-value { font-size: 0.92rem; font-weight: 700; color: var(--text); min-width: 3.1rem; text-align: right; }
+.cc-at { font-size: 0.72rem; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; background: rgba(127, 127, 127, 0.08); }
+.candle-countdown.held .cc-value { color: var(--muted); }
 
 /* ── Status bar ──────────────────────────────────────────── */
 .statusbar {
