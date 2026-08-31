@@ -45,6 +45,11 @@ IG Markets REST API
     window (CandleKit's built-in ResizeObserver handling).
   - Timeframe selector: **1m · 3m** — 1m is IG's native minute resolution; 3m is
     aggregated server-side from 1-minute candles (epoch bucket floor(t/180)*180).
+  - **EMA 9 / EMA 20 overlays computed by the PineTS engine** (Pine Script
+    `ta.ema()`) — see "PineTS indicator engine" below. Overlay styling
+    (period/color/width/enabled) is frontend-only and persisted in
+    `localStorage` under `aura.ema.settings`; nothing indicator-related is
+    written to the database.
   - OHLC/change/volume readout of the latest candle, last-updated info, manual refresh and
     optional 30s auto-refresh.
   - **NO indicators by design** (no EMA 20/50/200, no crossovers) — indicators are a
@@ -242,12 +247,77 @@ Env knobs: `IG_STREAM_CHECK_TICKS` (default 20), `IG_STREAM_CHECK_WAIT_MS` (defa
 
 Not implemented yet, as requested:
 
-- **Indicators** (EMA 20/50/200, crossovers) — deliberately excluded from the current
-  phase; the chart is pure candlesticks.
+- **Further indicators** (SMA/RSI/MACD/ATR, crossovers, plotshapes) — the
+  PineTS engine is in place for them, but only the EMA use case is wired in
+  this phase. The user-facing Pine Script editor / paste-an-indicator flow is
+  a later phase too.
 - **Supabase/PostgreSQL historical storage**, backtesting, trading signals, multiple
   instruments/accounts.
 - No Docker, TimescaleDB, Redis, Kafka, auth system, or extra state management — kept small
   and easy to read on purpose.
+
+## PineTS indicator engine
+
+EMA 9/20 are computed by **PineTS** (`pinets`), LuxAlgo's Pine Script® v6
+runtime, through a thin generic adapter:
+
+```
+IG Lightstreamer
+      ↓
+1m canonical candles          (unchanged backend persistence)
+      ↓
+Supabase
+      ↓
+AURA selected timeframe       (1m native / 3m aggregation — unchanged rules)
+      ↓
+PineIndicatorEngine           frontend/src/services/pineEngine.ts
+      ↓
+PineTS                        npm pinets — Pine Script ta.ema()
+      ↓
+EmaBridge                     frontend/src/components/TradingChart/EmaBridge.tsx
+      ↓
+Lightweight Charts / CandleKit
+```
+
+Key properties:
+
+- **Authoritative truth only.** The engine's input is built by the same
+  `effectiveCloseSeries(...)` reconciliation the chart already uses — the WS
+  server-truth candle REPLACES the forming bucket's close. The cosmetic
+  rAF/glide price is never an input. On bucket rollover the closed candle
+  lands in the series, PineTS recomputes the whole history, and the new forming
+  candle continues from there. Background tabs stay safe: a stale snapshot is
+  re-anchored by the next full server snapshot, and an unchanged authoritative
+  close stream short-circuits (data-signature guard) instead of recomputing.
+- **3m is calculated from 3m candles.** The engine receives the SELECTED
+  timeframe's bars — never the 1m EMA.
+- **Generic, not EMA-specific.** Indicators are registry entries in
+  `frontend/src/services/pineIndicators.ts` (Pine source + `plot()` key +
+  `input.*` bindings). Future `ta.sma/rsi/macd/atr/crossover/crossunder`,
+  `plotshape`, `hline` support is a registry change, not an engine change.
+  Only `ta.ema()` is wired in this phase.
+- **Equivalence oracle.** `services/ema.ts` is kept as the permanent
+  reference/fallback implementation. `frontend/tests/pineEquivalence.test.mjs`
+  proves PineTS `ta.ema()` == `ema.ts` for EMA 9/20, 1m/3m, insufficient
+  history, forming candle, rollover, timeframe switching, period switching and
+  background-tab reconciliation (max Δ ≈ 5e-11, tolerance 5e-9 — PineTS rounds
+  to 10 decimals internally).
+- **Performance.** Each distinct parameter set compiles exactly once (PineTS
+  bakes `input.*` at transpile time); runs reuse the compiled artifact and a
+  memoized result keyed by (indicator, params, data-signature); the PineTS
+  runtime is rebuilt only when the authoritative candle series actually
+  changes; nothing runs from rAF. Measured ≈ 10–12 ms per full recompute at
+  500 bars per EMA.
+- **No server/DB footprint.** No EMA columns, no EMA tables, no backend
+  changes; settings stay in `localStorage` (`aura.ema.settings`).
+
+### License
+
+PineTS is dual-licensed: **AGPL-3.0-only** or a paid LuxAlgo commercial
+license. AURA uses it under AGPL-3.0 within its current personal/internal
+usage scope — see `THIRD-PARTY-NOTICES.md` for the exact obligations and when
+a commercial license (or AGPL source release) would become mandatory. Nothing
+in this integration modifies or works around PineTS or its licensing.
 
 ## Historical prices & IG pagination facts (verified 2026-08)
 
