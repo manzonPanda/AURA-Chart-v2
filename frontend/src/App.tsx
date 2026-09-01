@@ -15,7 +15,16 @@ import {
 } from "./config/chart";
 import { loadEmaSettings, saveEmaSettings, type EmaSettings } from "./config/emaSettings";
 import { ApiError, fetchCandlesDb, fetchHealth } from "./services/api";
-import { useRealtimeStream } from "./services/realtime";
+import {
+  compileImportedPine,
+  loadImportedPineIndicators,
+  MAX_IMPORTED_INDICATORS,
+  saveImportedPineIndicators,
+  type ImportedPineIndicator,
+  type PineImportOutcome,
+  type PineRunStatus,
+} from "./services/pineImport";
+import { useRealtimeStream, resolutionToBucketSec } from "./services/realtime";
 import { iso } from "./services/diagnostics";
 import type { Candle } from "./types/candle";
 
@@ -56,6 +65,12 @@ export default function App() {
   // EMA overlay configuration — localStorage-persisted, frontend-only (never
   // Supabase; EMA VALUES are always derived client-side from the candles).
   const [emaSettings, setEmaSettings] = useState<EmaSettings>(loadEmaSettings);
+  // Imported Pine indicators — script source + settings ONLY (localStorage,
+  // versioned `aura.pine.indicators`). Values are always recomputed by the
+  // PineTS engine against the selected timeframe's candles.
+  const [importedPine, setImportedPine] = useState<ImportedPineIndicator[]>(loadImportedPineIndicators);
+  // Session runtime status per imported indicator (never persisted).
+  const [pineStatuses, setPineStatuses] = useState<Record<string, PineRunStatus>>({});
   const requestSeq = useRef(0);
 
   // Realtime stream for the SELECTED timeframe (backend /ws relay). Switching
@@ -74,6 +89,63 @@ export default function App() {
   useEffect(() => {
     saveEmaSettings(emaSettings);
   }, [emaSettings]);
+
+  // Persist imported Pine indicators (source + settings) on every change.
+  useEffect(() => {
+    saveImportedPineIndicators(importedPine);
+  }, [importedPine]);
+
+  /** Compile pipeline for the import modal — runs against the CURRENT chart candles. */
+  const handlePineImport = useCallback(
+    async (name: string, source: string): Promise<PineImportOutcome> => {
+      if (importedPine.length >= MAX_IMPORTED_INDICATORS) {
+        return {
+          ok: false,
+          issue: {
+            kind: "limit",
+            message: `At most ${MAX_IMPORTED_INDICATORS} imported indicators are supported. Remove one first.`,
+          },
+        };
+      }
+      const outcome = await compileImportedPine({
+        name,
+        source,
+        bars: candles,
+        liveCandle: realtime.candle,
+        bucketSec: resolutionToBucketSec(timeframe),
+      });
+      if (outcome.ok && outcome.indicator) {
+        setImportedPine((prev) => {
+          if (prev.length >= MAX_IMPORTED_INDICATORS) return prev;
+          return [...prev, outcome.indicator!];
+        });
+      }
+      return outcome;
+    },
+    [importedPine.length, candles, realtime.candle, timeframe],
+  );
+
+  /** Runtime status reporter — change-guarded so per-frame calls are cheap. */
+  const handlePineStatus = useCallback((id: string, status: PineRunStatus) => {
+    setPineStatuses((prev) => {
+      const cur = prev[id];
+      if (cur && cur.ok === status.ok && cur.message === status.message) return prev;
+      return { ...prev, [id]: status };
+    });
+  }, []);
+
+  /** Remove an imported indicator and drop its session status. */
+  const handlePineChange = useCallback((next: ImportedPineIndicator[]) => {
+    setImportedPine(next);
+    setPineStatuses((prev) => {
+      const ids = new Set(next.map((ind) => ind.id));
+      const out: Record<string, PineRunStatus> = {};
+      for (const [id, status] of Object.entries(prev)) {
+        if (ids.has(id)) out[id] = status;
+      }
+      return out;
+    });
+  }, []);
 
   // Optional, non-blocking history load from OUR Supabase persistence
   // (GET /api/candles/db). If it fails (Supabase unconfigured / unreachable) we
@@ -167,8 +239,16 @@ export default function App() {
           <span className="instrument-epic">{epic || "…"}</span>
         </div>
         <div className="topbar-actions">
-          {/* EMA indicator slots (9/20) — localStorage-persisted config */}
-          <IndicatorsMenu settings={emaSettings} onChange={setEmaSettings} />
+          {/* EMA indicator slots (9/20) + Imported Pine Script section —
+              localStorage-persisted config */}
+          <IndicatorsMenu
+            settings={emaSettings}
+            onChange={setEmaSettings}
+            imported={importedPine}
+            pineStatuses={pineStatuses}
+            onImportedChange={handlePineChange}
+            onCompile={handlePineImport}
+          />
           {/* Timeframe selector — 1m (canonical persisted) | 3m (derived) */}
           <div className="timeframes" role="tablist" aria-label="Chart timeframe">
             {TIMEFRAMES.map((tf) => (
@@ -240,6 +320,8 @@ export default function App() {
           loading={loading}
           autoFollow={autoFollow}
           emaSettings={emaSettings}
+          pineIndicators={importedPine}
+          onPineStatus={handlePineStatus}
         />
       </main>
 

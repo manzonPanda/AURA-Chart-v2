@@ -23,9 +23,11 @@ import {
 import { diag, iso, logUpdateBar, maybeLogChartBlock } from "../../services/diagnostics";
 import { planLiveUpdate, type LiveBar } from "../../services/liveCandle";
 import { defaultEmaSettings, type EmaSettings } from "../../config/emaSettings";
+import type { ImportedPineIndicator, PineRunStatus } from "../../services/pineImport";
 import { CandleCountdown } from "./CandleCountdown";
 import { EmaBridge } from "./EmaBridge";
 import { OHLCReadout } from "./OHLCReadout";
+import { PineBridge } from "./PineBridge";
 
 interface Props {
   candles: readonly Candle[];
@@ -39,6 +41,10 @@ interface Props {
   autoFollow?: boolean;
   /** EMA overlay configuration (localStorage-persisted in App). */
   emaSettings?: EmaSettings;
+  /** Imported Pine indicators (localStorage-persisted in App). */
+  pineIndicators?: ImportedPineIndicator[];
+  /** Runtime status reporter for imported Pine indicators. */
+  onPineStatus?: (id: string, status: PineRunStatus) => void;
 }
 
 function asBar(c: { ts: number; open: number; high: number; low: number; close: number; volume?: number }): Bar {
@@ -452,6 +458,8 @@ export function TradingChart({
   loading = false,
   autoFollow = true,
   emaSettings = defaultEmaSettings(),
+  pineIndicators = [],
+  onPineStatus,
 }: Props) {
   const [crosshairCandle, setCrosshairCandle] = useState<Candle | null>(null);
   // When history is empty (e.g. IG allowance exhausted), ChartView still needs
@@ -591,6 +599,15 @@ export function TradingChart({
               pane, recalculated from the SELECTED timeframe's candles with the
               forming candle's server truth (see services/ema.ts). */}
           <EmaBridge bars={data} liveCandle={liveCandle} bucketSec={bucketSec} settings={emaSettings} />
+          {/* Imported Pine indicators — same generic PineTS engine path as the
+              EMAs, rendered via native LWC panes when overlay=false. */}
+          <PineBridge
+            bars={data}
+            liveCandle={liveCandle}
+            bucketSec={bucketSec}
+            indicators={pineIndicators}
+            onStatus={onPineStatus}
+          />
         </ChartView>
         {loading && <div className="chart-spinner">…</div>}
       </div>

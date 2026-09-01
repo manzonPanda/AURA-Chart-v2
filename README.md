@@ -311,6 +311,90 @@ Key properties:
 - **No server/DB footprint.** No EMA columns, no EMA tables, no backend
   changes; settings stay in `localStorage` (`aura.ema.settings`).
 
+## Import Pine Script (indicators)
+
+AURA can import **Pine Script v5/v6 chart indicators** and run them through the
+same PineTS engine that powers EMA 9/20. Indicators → **+ Import Pine Script**
+past a script, AURA compiles it against the currently selected timeframe's
+candles, extracts its `plot()` series and renders them on the chart.
+
+```
+Indicators
+  ├── Built-in        EMA 9 · EMA 20 (registry: services/pineIndicators.ts)
+  └── Imported        user Pine scripts (localStorage: aura.pine.indicators)
+```
+
+- **One engine, two entry points.** `PineIndicatorEngine` (`services/pineEngine.ts`)
+  gains a second, fully generic `computeScript()` path: it compiles any
+  indicator `source`, extracts **all** plain `plot()` lines from a single
+  PineTS run, preserves per-bar dynamic colors (Pine exposes the color per
+  point as `options.color`) and script-declared `linewidth`/color. The built-in
+  EMA registry path is unchanged and still uses the same engine.
+- **Authoritative data only.** Imported indicators run through the identical
+  `effectiveCloseSeries()` truth pipeline as the EMAs — WS server-truth candle
+  replaces the forming bucket, the rAF/glide price is never an input, and
+  background-tab behavior is identical. Shares the engine's memoization: an
+  unchanged close stream never re-runs PineTS.
+- **Timeframes.** The engine always receives the SELECTED timeframe's candles
+  (1m native / 3m aggregated), so a 3m indicator is recomputed from 3m candles
+  — never resampled from a 1m indicator.
+- **Inputs.** `input.int/float/bool/string/color` are exposed as editable
+  settings (metadata from PineTS `getInputsMeta()`); `input.source` and other
+  exotic types are shown read-only. Editing an input re-runs the script.
+- **Inputs are persisted, values are not.** Script source + input config live
+  in a versioned localStorage envelope (`aura.pine.indicators`, schema version
+  1); indicator VALUES are always recomputed client-side and never stored.
+- **Runtime safety.** User scripts are untrusted. AURA never `eval()`s them —
+  PineTS is the sandboxed transpile/runtime boundary. Static pre-checks reject
+  oversized scripts (>20k chars), non-indicator declarations, `strategy()*`,
+  `request.*` and Pine v<5; failures surface as human-readable messages (raw
+  stacks go to the console only). One bad indicator can never break the chart.
+- **Performance** (500 × 1m bars, this machine):
+
+  | Imported indicators | Warm recompute (close unchanged) | Fresh runtime (new candles) |
+  | --- | --- | --- |
+  | 1 | 0 ms (memoized) | ≈ 9 ms |
+  | 5 | 0 ms (memoized) | ≈ 29 ms |
+  | 10 | 0 ms (memoized) | ≈ 50 ms |
+
+  `tests/pinePerf.mjs` reproduces these numbers.
+
+### AURA Pine Script Support
+
+> **"Pine Script powered by PineTS, with AURA-supported features."**
+
+AURA is **not** a TradingView/Pine Script clone. Compatibility with pinets 0.9.33
+(verified by probing the installed runtime):
+
+**Supported**
+- `indicator(title, overlay=true|false)` — v5/v6. `overlay=false` renders in a
+  native Lightweight Charts pane (`addSeries(…, paneIndex)`).
+- `plot(value, title, color=…, linewidth=…)` — line plots; `color` hex and
+  `linewidth` map to the LWC series. Dynamically computed per-bar colors are
+  rendered per point.
+- `ta.*` built-ins implemented by PineTS (ema, sma, rsi, macd, atr, crossover,
+  crossunder, …), core math/array/map, conditionals, functions, `var`/`let`.
+- `input.int/float/bool/string/color` (editable), `input.source` (read-only
+  display in v1), plus full `getInputsMeta` kind detection.
+- Multiple `plot()` lines per script → multiple LWC line series.
+
+**Partial / unsupported**
+- `study()` (Pine v4) — PineTS only supports v5+, so v4 scripts are rejected
+  with "Unsupported Pine Script version 4".
+- `plotshape` / `plotchar` / `plotbar` / `plotcandle` / `hline` / `bgcolor` /
+  `fill` / drawings (`line.new`, `label.new`, `box.new`, `table.new`) — their
+  values exist in `ctx.plots` but AURA does **not** fake them; non-line plots
+  are simply ignored (the import reports when nothing renderable remains).
+- Scripts without a `//@version` comment — PineTS silently drops their
+  `indicator()` args (overlay defaults to a separate pane); AURA warns on
+  import and falls back to a static `overlay=true` hint.
+
+**Rejected**
+- `strategy(...)` and `strategy.*` — order/position execution is a future phase.
+- `request.*` — external market-data requests (future phase).
+- `alertcondition()` / `alert()` — alerting is a future phase.
+- Any `input.*` type outside the editable set is display-only.
+
 ### License
 
 PineTS is dual-licensed: **AGPL-3.0-only** or a paid LuxAlgo commercial

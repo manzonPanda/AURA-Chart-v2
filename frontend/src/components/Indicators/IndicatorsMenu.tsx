@@ -2,15 +2,30 @@ import { useEffect, useRef, useState } from "react";
 
 import {
   EMA_SLOTS,
-  hexToRrggbb,
   type EmaSlotId,
   type EmaSettings,
 } from "../../config/emaSettings";
 import { MAX_EMA_PERIOD, MIN_EMA_PERIOD } from "../../services/ema";
+import {
+  MAX_IMPORTED_INDICATORS,
+  isEditableInputType,
+  type ImportedPineIndicator,
+  type PineImportOutcome,
+  type PineInputMetaSnapshot,
+  type PineRunStatus,
+} from "../../services/pineImport";
+import { PineImportModal } from "./PineImportModal";
 
 interface Props {
   settings: EmaSettings;
   onChange: (next: EmaSettings) => void;
+  /** Imported Pine indicators (localStorage-persisted in App). */
+  imported: ImportedPineIndicator[];
+  /** Session runtime status per imported indicator id. */
+  pineStatuses: Record<string, PineRunStatus>;
+  onImportedChange: (next: ImportedPineIndicator[]) => void;
+  /** Full compile pipeline against the current chart candles (App-owned). */
+  onCompile: (name: string, source: string) => Promise<PineImportOutcome>;
 }
 
 const WIDTHS = [1, 2, 3, 4] as const;
@@ -24,14 +39,151 @@ function patchSlot(
   return { ...settings, [id]: { ...settings[id], ...patch } };
 }
 
+function clampNum(n: number, min?: number, max?: number): number {
+  if (typeof min === "number" && Number.isFinite(min)) n = Math.max(min, n);
+  if (typeof max === "number" && Number.isFinite(max)) n = Math.min(max, n);
+  return n;
+}
+
+/** Any hex (#rgb/#rgba/#rrggbb/#rrggbbaa) → #rrggbb for <input type="color">. */
+function toPickerHex(color: unknown): string {
+  if (typeof color !== "string") return "#000000";
+  const c = color.trim().toLowerCase();
+  const m3 = /^#([0-9a-f]{3})$/.exec(c);
+  if (m3) {
+    const [a, b, d] = m3[1].split("");
+    return `#${a}${a}${b}${b}${d}${d}`;
+  }
+  const m4 = /^#([0-9a-f]{4})$/.exec(c);
+  if (m4) {
+    const [a, b, d] = m4[1].split("");
+    return `#${a}${a}${b}${b}${d}${d}`;
+  }
+  if (/^#[0-9a-f]{6,8}$/.test(c)) return c.slice(0, 7);
+  return "#000000";
+}
+
+/** One imported-indicator input editor, driven by the compile-time metadata. */
+function PineInputField({
+  meta,
+  value,
+  onValue,
+}: {
+  meta: PineInputMetaSnapshot;
+  value: unknown;
+  onValue: (next: unknown) => void;
+}) {
+  const label = meta.title || meta.varId;
+  if (!isEditableInputType(meta.type)) {
+    return (
+      <label className="ind-field" title={`${meta.type} inputs are read-only in this version`}>
+        <span>{label}</span>
+        <input type="text" value={String(value ?? "")} readOnly disabled />
+      </label>
+    );
+  }
+  switch (meta.type) {
+    case "int": {
+      const v = typeof value === "number" && Number.isInteger(value) ? value : meta.defval;
+      return (
+        <label className="ind-field">
+          <span>{label}</span>
+          <input
+            type="number"
+            inputMode="numeric"
+            step={1}
+            min={meta.minval}
+            max={meta.maxval}
+            value={typeof v === "number" ? v : 0}
+            onChange={(e) => {
+              // Commit only valid integers — clamped into the script's range.
+              const n = Math.floor(Number(e.target.value));
+              if (e.target.value !== "" && Number.isFinite(n)) onValue(clampNum(n, meta.minval, meta.maxval));
+            }}
+          />
+        </label>
+      );
+    }
+    case "float": {
+      const v = typeof value === "number" && Number.isFinite(value) ? value : meta.defval;
+      return (
+        <label className="ind-field">
+          <span>{label}</span>
+          <input
+            type="number"
+            inputMode="decimal"
+            step={meta.step ?? 0.1}
+            min={meta.minval}
+            max={meta.maxval}
+            value={typeof v === "number" ? v : 0}
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              if (e.target.value !== "" && Number.isFinite(n)) onValue(clampNum(n, meta.minval, meta.maxval));
+            }}
+          />
+        </label>
+      );
+    }
+    case "bool":
+      return (
+        <label className="ind-field ind-enabled">
+          <span>{label}</span>
+          <input type="checkbox" checked={value === true} onChange={(e) => onValue(e.target.checked)} />
+        </label>
+      );
+    case "color":
+      return (
+        <label className="ind-field">
+          <span>{label}</span>
+          <input
+            type="color"
+            value={toPickerHex(value ?? meta.defval)}
+            onChange={(e) => onValue(e.target.value)}
+          />
+        </label>
+      );
+    case "string":
+      return meta.options ? (
+        <label className="ind-field">
+          <span>{label}</span>
+          <select value={String(value ?? meta.options[0])} onChange={(e) => onValue(e.target.value)}>
+            {meta.options.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : (
+        <label className="ind-field">
+          <span>{label}</span>
+          <input
+            type="text"
+            maxLength={200}
+            value={String(value ?? "")}
+            onChange={(e) => onValue(e.target.value)}
+          />
+        </label>
+      );
+    default:
+      return null;
+  }
+}
+
 /**
- * Compact, trading-chart-style indicator control for the topbar — exactly the
- * two fixed EMA slots (no generic indicator system). The configuration state
- * lives in App (localStorage-persisted via emaSettings.ts).
+ * Compact, trading-chart-style indicator control for the topbar.
+ *
+ *   Built-in  — the two fixed EMA slots (unchanged, first-class AURA indicators)
+ *   Imported  — user Pine Scripts executed by the PineTS engine, with a
+ *               "+ Import Pine Script" entry point and per-script input editors
+ *
+ * Configuration state lives in App (localStorage-persisted via emaSettings.ts
+ * and services/pineImport.ts).
  */
-export function IndicatorsMenu({ settings, onChange }: Props) {
+export function IndicatorsMenu({ settings, onChange, imported, pineStatuses, onImportedChange, onCompile }: Props) {
   const [open, setOpen] = useState(false);
-  const [expanded, setExpanded] = useState<EmaSlotId | null>(null);
+  const [expanded, setExpanded] = useState<EmaSlotId | string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   // Close on outside click / Escape.
@@ -125,7 +277,7 @@ export function IndicatorsMenu({ settings, onChange }: Props) {
                       <span>Color</span>
                       <input
                         type="color"
-                        value={hexToRrggbb(cfg.color)}
+                        value={toPickerHex(cfg.color)}
                         onChange={(e) => onChange(patchSlot(settings, slot.id, { color: e.target.value }))}
                       />
                     </label>
@@ -155,8 +307,114 @@ export function IndicatorsMenu({ settings, onChange }: Props) {
               </div>
             );
           })}
+
+          {/* ── Imported Pine indicators ─────────────────────────────────── */}
+          {imported.length > 0 && (
+            <>
+              <div className="ind-divider" role="separator" />
+              <div className="ind-section">Imported</div>
+              {imported.map((ind) => {
+                const isExpanded = expanded === ind.id;
+                const status = pineStatuses[ind.id];
+                const swatch = ind.plotMeta.find((p) => p.color)?.color ?? "var(--accent)";
+                return (
+                  <div className={`ind-slot${isExpanded ? " expanded" : ""}`} key={ind.id}>
+                    <div className="ind-row">
+                      <label className="ind-toggle" title={`${ind.name} (imported Pine Script)`}>
+                        <input
+                          type="checkbox"
+                          checked={ind.enabled}
+                          onChange={(e) =>
+                            onImportedChange(
+                              imported.map((x) => (x.id === ind.id ? { ...x, enabled: e.target.checked } : x)),
+                            )
+                          }
+                        />
+                        <span className="ind-swatch" style={{ background: swatch }} aria-hidden="true" />
+                        <span className="ind-name">{ind.name}</span>
+                      </label>
+                      {status && !status.ok && (
+                        <span
+                          className="pine-chip-err"
+                          title={status.message ?? "Runtime error"}
+                          aria-label={`${ind.name} runtime error`}
+                        >
+                          ⚠
+                        </span>
+                      )}
+                      {!ind.overlay && (
+                        <span className="ind-pane-tag" title="Renders in its own chart pane (overlay=false)">
+                          pane
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        className="ind-gear"
+                        aria-label={`Configure ${ind.name}`}
+                        aria-expanded={isExpanded}
+                        onClick={() => setExpanded(isExpanded ? null : ind.id)}
+                      >
+                        {isExpanded ? "▾" : "▸"}
+                      </button>
+                    </div>
+                    {isExpanded && (
+                      <div className="ind-config">
+                        <div className="ind-meta-note">
+                          {ind.plotMeta.length} plot{ind.plotMeta.length === 1 ? "" : "s"}
+                          {ind.inputMeta.length > 0 ? ` · ${ind.inputMeta.length} input${ind.inputMeta.length === 1 ? "" : "s"}` : ""}
+                          {" · "}
+                          {ind.overlay ? "overlay" : "separate pane"}
+                        </div>
+                        {ind.inputMeta.map((m) => (
+                          <PineInputField
+                            key={m.varId}
+                            meta={m}
+                            value={ind.inputs[m.varId]}
+                            onValue={(v) =>
+                              onImportedChange(
+                                imported.map((x) =>
+                                  x.id === ind.id ? { ...x, inputs: { ...x.inputs, [m.varId]: v } } : x,
+                                ),
+                              )
+                            }
+                          />
+                        ))}
+                        <button
+                          type="button"
+                          className="ind-remove"
+                          onClick={() => {
+                            onImportedChange(imported.filter((x) => x.id !== ind.id));
+                            if (expanded === ind.id) setExpanded(null);
+                          }}
+                        >
+                          Remove indicator
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </>
+          )}
+
+          <div className="ind-divider" role="separator" />
+          <button
+            type="button"
+            className="ind-import-btn"
+            onClick={() => setImportOpen(true)}
+            disabled={imported.length >= MAX_IMPORTED_INDICATORS}
+            title={
+              imported.length >= MAX_IMPORTED_INDICATORS
+                ? `Limit reached — at most ${MAX_IMPORTED_INDICATORS} imported indicators`
+                : "Compile a Pine Script indicator through the PineTS engine"
+            }
+          >
+            + Import Pine Script
+          </button>
         </div>
       )}
+      {importOpen && <PineImportModal onCompile={onCompile} onClose={() => setImportOpen(false)} />}
     </div>
   );
 }
+

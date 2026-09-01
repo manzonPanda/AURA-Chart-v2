@@ -80,10 +80,37 @@ export interface PineLiveCandle {
   volume?: number;
 }
 
-/** One engine-produced point — structurally identical to `EmaPoint` in ema.ts. */
+/** One engine-produced point — structurally identical to `EmaPoint` in ema.ts.
+ *  `color` is present only when the script's plot color varies per bar. */
 export interface PinePoint {
   ts: number;
   value: number;
+  color?: string;
+}
+
+/** One extracted plot series (imported-indicator path). */
+export interface PineSeries {
+  /** `ctx.plots` key (the plot title, or "#N" for untitled plots). */
+  key: string;
+  /** Display title reported by PineTS. */
+  title: string;
+  points: PinePoint[];
+  /** Script-declared linewidth when statically declared (undefined = default). */
+  linewidth?: number;
+  /** Uniform color when every point shares one (hex); per-point colors otherwise. */
+  color?: string;
+}
+
+/** Ad-hoc indicator spec — the generic entry point for imported Pine scripts. */
+export interface PineScriptSpec {
+  /** Stable key used in cache identities (imported indicator id). */
+  id: string;
+  /** Raw Pine Script v5/v6 source. */
+  source: string;
+  /** `input.*` bindings: input title → key on the params object. */
+  bindings: PineInputBinding[];
+  /** Extract only these plot keys; omit/empty = extract every plain-line plot. */
+  plotKeys?: string[];
 }
 
 /** A PineScript-compatible candle — the Kline shape PineTS expects for an array source. */
@@ -103,9 +130,13 @@ export const PINE_EQUIVALENCE_TOL = 5e-9;
 type PineParams = Record<string, unknown>;
 
 interface CompiledIndicator {
-  spec: PineIndicatorSpec;
+  id: string;
+  source: string;
   indicator: Indicator;
 }
+
+/** Extraction cap for the imported-script path (mirrors MAX_PLOT_SERIES_PER_INDICATOR). */
+const MAX_SCRIPT_SERIES = 8;
 
 /** A Pine `input.*()` binding resolved to its runtime `varId`. */
 interface ResolvedInput {
@@ -184,6 +215,15 @@ function paramsSignature(params: PineParams): string {
   return JSON.stringify(params ?? {});
 }
 
+/** FNV-1a fingerprint of the source text — distinguishes edited scripts in cache keys. */
+function sourceSignature(source: string): string {
+  let h = 2166111748;
+  for (let i = 0; i < source.length; i++) {
+    h = Math.imul(h ^ source.charCodeAt(i), 16777619);
+  }
+  return (h >>> 0).toString(36) + ":" + source.length.toString(36);
+}
+
 function resolveInputMeta(indicator: Indicator, bindings: PineInputBinding[]): ResolvedInput[] {
   const meta = (indicator.getInputsMeta() as Array<{ varId?: string; title?: string }>) ?? [];
   return bindings.map((b) => {
@@ -192,19 +232,85 @@ function resolveInputMeta(indicator: Indicator, bindings: PineInputBinding[]): R
   });
 }
 
+/** Internal PineTS bookkeeping plots (`__labels__`, `__lines__`, …) — never rendered. */
+function isInternalPlotKey(key: string): boolean {
+  return key.startsWith("__");
+}
+
 /**
- * Read back one plot series from a PineTS context, stripping warmup `na()`
- * rows (PineTS emits `null`/`NaN` for history bars before the first seed).
- * Returns points aligned to candle `openTime` (epoch ms).
+ * Read back plot series from a PineTS context, keeping ONLY plain `plot()`
+ * lines: internal `__`-prefixed plots and styled non-line plots (plotshape →
+ * "shape", hline → "hline", bgcolor → "background", …) are skipped — AURA
+ * renders plot() lines only and never fakes the rest.
+ *
+ * Warmup `na()` rows are stripped (PineTS emits `null`/`NaN` before the first
+ * seed). Per-point colors are preserved when the script computes them
+ * dynamically; a uniform color collapses into `series.color`.
+ * Returns series aligned to candle `openTime` (epoch ms).
  */
-function extractPoints(ctx: { plots?: Record<string, { data?: any[] }> } | undefined, plotKey: string): PinePoint[] {
+function extractSeries(
+  ctx: { plots?: Record<string, { title?: string; options?: { style?: unknown; linewidth?: unknown }; data?: unknown[] }> } | undefined,
+  plotKeys: readonly string[] | undefined,
+  maxSeries: number,
+): Map<string, PineSeries> {
+  const out = new Map<string, PineSeries>();
+  const wanted = plotKeys && plotKeys.length > 0 ? new Set(plotKeys) : null;
+  if (!ctx?.plots) return out;
+  for (const [key, plot] of Object.entries(ctx.plots)) {
+    if (out.size >= maxSeries) break;
+    if (isInternalPlotKey(key)) continue;
+    if (wanted && !wanted.has(key)) continue;
+    // Only plain line plots (style undefined) — documented AURA limitation.
+    const style = plot?.options?.style;
+    if (style !== undefined && style !== null) continue;
+    const data = plot?.data;
+    if (!Array.isArray(data)) continue;
+
+    const points: PinePoint[] = [];
+    let uniformColor: string | undefined;
+    let dynamicColor = false;
+    for (const d of data) {
+      const v = (d as { value?: unknown; time?: unknown; options?: { color?: unknown } } | null)?.value;
+      if (typeof v !== "number" || !Number.isFinite(v)) continue;
+      const rawColor = (d as { options?: { color?: unknown } })?.options?.color;
+      const color = typeof rawColor === "string" && rawColor.length > 0 ? rawColor : undefined;
+      if (color) {
+        if (uniformColor === undefined) uniformColor = color;
+        else if (uniformColor !== color) dynamicColor = true;
+      }
+      points.push(dynamicColor ? { ts: (d as { time: number }).time, value: v, color } : { ts: (d as { time: number }).time, value: v });
+    }
+    if (points.length === 0 && wanted) continue; // requested key produced nothing
+    const linewidthRaw = plot?.options?.linewidth;
+    out.set(key, {
+      key,
+      title: typeof plot?.title === "string" && plot.title.length > 0 ? plot.title : key,
+      points,
+      ...(typeof linewidthRaw === "number" && Number.isInteger(linewidthRaw) ? { linewidth: clampLinewidth(linewidthRaw) } : {}),
+      ...(!dynamicColor && uniformColor ? { color: uniformColor } : {}),
+    });
+  }
+  return out;
+}
+
+/** LWC LineWidth domain (1–4). */
+function clampLinewidth(w: number): number {
+  return Math.max(1, Math.min(4, Math.round(w)));
+}
+
+/**
+ * Registry-path extraction (single plot key) — the EMA 9/20 compatibility
+ * shim. Returns colorless points so the equivalence oracle contract is
+ * byte-identical to the pre-import engine.
+ */
+function extractPoints(ctx: { plots?: Record<string, { data?: unknown[] }> } | undefined, plotKey: string): PinePoint[] {
   const data = ctx?.plots?.[plotKey]?.data;
   if (!Array.isArray(data)) return [];
   const out: PinePoint[] = [];
   for (const d of data) {
-    const v = d?.value;
+    const v = (d as { value?: unknown } | null)?.value;
     if (typeof v === "number" && Number.isFinite(v)) {
-      out.push({ ts: d.time, value: v });
+      out.push({ ts: (d as { time: number }).time, value: v });
     }
   }
   return out;
@@ -227,6 +333,7 @@ export class PineIndicatorEngine {
   private dataSig: string | null = null;
   private readonly compiled = new Map<string, CompiledIndicator>();
   private readonly resultCache = new Map<string, PinePoint[]>();
+  private readonly scriptCache = new Map<string, Map<string, PineSeries>>();
   private warned = false;
 
   /**
@@ -253,10 +360,11 @@ export class PineIndicatorEngine {
     // instances — only the runtime data view changes here.
     this.pine = new PineTS(this.klines as unknown as PineCandle[], undefined, undefined);
     this.resultCache.clear();
+    this.scriptCache.clear();
   }
 
   /**
-   * Compute one indicator/parameters combination.
+   * Compute one REGISTRY indicator/parameters combination (EMA 9/20 built-ins).
    *
    * Returns `{ts, value}` points with warmup rows stripped. Returns `null` for
    * insufficient history or engine failure so the caller can fall back to the
@@ -273,7 +381,7 @@ export class PineIndicatorEngine {
       return null;
     }
 
-    const cacheKey = `${indicatorId}|${this.dataSig}|${paramsSignature(params)}`;
+    const cacheKey = `${indicatorId}|${sourceSignature(spec.source)}|${this.dataSig}|${paramsSignature(params)}`;
     const cached = this.resultCache.get(cacheKey);
     if (cached) return cached;
 
@@ -293,7 +401,60 @@ export class PineIndicatorEngine {
   }
 
   /**
-   * Lazily compile + cache a PineScript `Indicator` per (indicator, params)
+   * Compute an AD-HOC script (imported Pine indicator) and extract ALL of its
+   * plain-line `plot()` series in ONE runtime pass.
+   *
+   * Same caching/compilation discipline as `compute` — compiled artifacts are
+   * keyed by (id, source fingerprint, params) and results by (…, data
+   * signature) — so an unchanged candle stream never re-runs and unchanged
+   * inputs never re-transpile.
+   *
+   * Returns `null` for "no data yet" (not an error) or a run failure. Failures
+   * are reported via `onError` with the RAW message (callers map it through
+   * friendlyPineError for the UI; stack traces stay in the console).
+   * `onContext` reports the resolved `indicator()` declaration info.
+   */
+  async computeScript(
+    spec: PineScriptSpec,
+    params: PineParams = {},
+    onError?: (message: string) => void,
+    onContext?: (info: { overlay?: boolean; title?: string }) => void,
+  ): Promise<Map<string, PineSeries> | null> {
+    if (this.pine === null || this.klines.length === 0 || this.dataSig === null) {
+      return null;
+    }
+
+    const cacheKey = `${spec.id}|${sourceSignature(spec.source)}|${this.dataSig}|${paramsSignature(params)}`;
+    const cached = this.scriptCache.get(cacheKey);
+    if (cached) return cached;
+
+    const compiled = this.getCompiled(spec, params);
+
+    let ctx: any;
+    try {
+      ctx = await this.pine.run(compiled.indicator, this.klines.length);
+    } catch (e: any) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(`[PineIndicatorEngine] imported script "${spec.id}" failed:`, e);
+      onError?.(msg);
+      return null;
+    }
+
+    try {
+      if (onContext && ctx?.indicator) {
+        onContext({ overlay: ctx.indicator.overlay, title: ctx.indicator.title });
+      }
+    } catch {
+      /* context info is best-effort only */
+    }
+
+    const series = extractSeries(ctx, spec.plotKeys, MAX_SCRIPT_SERIES);
+    this.scriptCache.set(cacheKey, series);
+    return series;
+  }
+
+  /**
+   * Lazily compile + cache a PineScript `Indicator` per (id, source, params)
    * combination. PineTS bakes `input.*` overrides into the transpiled
    * artifact at `prepare()` time, so parameters are bound BEFORE the first
    * transpile — after which the artifact is immutable. Each distinct
@@ -301,15 +462,17 @@ export class PineIndicatorEngine {
    * forever (a period switch flips to the other cached instance; per-frame
    * runs never re-transpile).
    */
-  private getCompiled(spec: PineIndicatorSpec, params: PineParams): CompiledIndicator {
-    // Keyed by the full params signature: a param the script does not bind
-    // (e.g. a future color param handled by the renderer) would produce a
-    // second, identical compiled instance — wasteful but always CORRECT.
-    const key = `${spec.id}|${paramsSignature(params)}`;
+  private getCompiled(
+    identity: { id: string; source: string; bindings: PineInputBinding[] },
+    params: PineParams,
+  ): CompiledIndicator {
+    // Keyed by id + source fingerprint + params signature: an edited script
+    // (same id) maps to a fresh compile instead of a stale artifact.
+    const key = `${identity.id}|${sourceSignature(identity.source)}|${paramsSignature(params)}`;
     let c = this.compiled.get(key);
     if (!c) {
-      const indicator = new Indicator(spec.source);
-      for (const m of resolveInputMeta(indicator, spec.bindings)) {
+      const indicator = new Indicator(identity.source);
+      for (const m of resolveInputMeta(indicator, identity.bindings)) {
         const value = params[m.paramKey];
         if (value === undefined) continue;
         try {
@@ -321,7 +484,7 @@ export class PineIndicatorEngine {
         }
       }
       indicator.prepare(); // idempotent transpile — bakes the bound inputs
-      c = { spec, indicator };
+      c = { id: identity.id, source: identity.source, indicator };
       this.compiled.set(key, c);
     }
     return c;
@@ -337,6 +500,7 @@ export class PineIndicatorEngine {
   dispose(): void {
     this.compiled.clear();
     this.resultCache.clear();
+    this.scriptCache.clear();
     this.pine = null;
     this.klines = [];
     this.dataSig = null;
