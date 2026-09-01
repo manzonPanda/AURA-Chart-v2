@@ -26,9 +26,28 @@ interface Props {
   onImportedChange: (next: ImportedPineIndicator[]) => void;
   /** Full compile pipeline against the current chart candles (App-owned). */
   onCompile: (name: string, source: string) => Promise<PineImportOutcome>;
+  /** Confirm-import AFTER the user reviews the diagnostics panel. */
+  onImportConfirm: (indicator: ImportedPineIndicator) => void;
 }
 
 const WIDTHS = [1, 2, 3, 4] as const;
+
+/** Human label per visual type for the imported-indicator summary. */
+const VISUAL_LABEL: Record<string, string> = {
+  line: "line",
+  histogram: "hist",
+  area: "area",
+  horizontal: "hline",
+  marker: "markers",
+};
+
+/** "2 lines · 4 markers" style summary (or a no-output notice). */
+function plotTypeSummary(plotMeta: ImportedPineIndicator["plotMeta"]): string {
+  if (plotMeta.length === 0) return "no renderable outputs";
+  const counts = new Map<string, number>();
+  for (const p of plotMeta) counts.set(p.type, (counts.get(p.type) ?? 0) + 1);
+  return [...counts.entries()].map(([t, n]) => `${n} ${VISUAL_LABEL[t] ?? t}`).join(" · ");
+}
 
 /** Return settings with one slot patched (immutable update). */
 function patchSlot(
@@ -180,7 +199,7 @@ function PineInputField({
  * Configuration state lives in App (localStorage-persisted via emaSettings.ts
  * and services/pineImport.ts).
  */
-export function IndicatorsMenu({ settings, onChange, imported, pineStatuses, onImportedChange, onCompile }: Props) {
+export function IndicatorsMenu({ settings, onChange, imported, pineStatuses, onImportedChange, onCompile, onImportConfirm }: Props) {
   const [open, setOpen] = useState(false);
   const [expanded, setExpanded] = useState<EmaSlotId | string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
@@ -342,6 +361,17 @@ export function IndicatorsMenu({ settings, onChange, imported, pineStatuses, onI
                           ⚠
                         </span>
                       )}
+                      {ind.diagnostics && ind.diagnostics.unsupported.length > 0 && (
+                        <span
+                          className="pine-chip-compat"
+                          title={`Script uses outputs AURA doesn't render yet: ${ind.diagnostics.unsupported
+                            .map((u) => `${u.kind} ×${u.count}`)
+                            .join(", ")}`}
+                          aria-label={`${ind.name} partial compatibility`}
+                        >
+                          ◆
+                        </span>
+                      )}
                       {!ind.overlay && (
                         <span className="ind-pane-tag" title="Renders in its own chart pane (overlay=false)">
                           pane
@@ -360,11 +390,17 @@ export function IndicatorsMenu({ settings, onChange, imported, pineStatuses, onI
                     {isExpanded && (
                       <div className="ind-config">
                         <div className="ind-meta-note">
-                          {ind.plotMeta.length} plot{ind.plotMeta.length === 1 ? "" : "s"}
+                          {plotTypeSummary(ind.plotMeta)}
                           {ind.inputMeta.length > 0 ? ` · ${ind.inputMeta.length} input${ind.inputMeta.length === 1 ? "" : "s"}` : ""}
                           {" · "}
                           {ind.overlay ? "overlay" : "separate pane"}
                         </div>
+                        {ind.diagnostics && ind.diagnostics.unsupported.length > 0 && (
+                          <div className="ind-meta-note ind-meta-warn">
+                            Not rendered:{" "}
+                            {ind.diagnostics.unsupported.map((u) => `${u.kind} ×${u.count}`).join(", ")}
+                          </div>
+                        )}
                         {ind.inputMeta.map((m) => (
                           <PineInputField
                             key={m.varId}
@@ -413,7 +449,13 @@ export function IndicatorsMenu({ settings, onChange, imported, pineStatuses, onI
           </button>
         </div>
       )}
-      {importOpen && <PineImportModal onCompile={onCompile} onClose={() => setImportOpen(false)} />}
+      {importOpen && (
+        <PineImportModal
+          onCompile={onCompile}
+          onImportConfirm={onImportConfirm}
+          onClose={() => setImportOpen(false)}
+        />
+      )}
     </div>
   );
 }

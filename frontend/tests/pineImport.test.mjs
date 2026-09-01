@@ -47,19 +47,19 @@ function rng(seed = 1) {
 
 function make1m(n, startTs = 1_704_153_600_000, seed = 7) {
   const r = rng(seed);
-  let acc = 100;
+  let prevClose = 100;
   const out = [];
   for (let i = 0; i < n; i++) {
-    const c = acc + r();
-    acc = c;
+    const c = prevClose + r();
     out.push({
       ts: startTs + i * 60_000,
-      open: acc,
-      high: Math.max(acc, acc + 1),
-      low: Math.min(acc, acc - 1),
+      open: prevClose,
+      high: Math.max(prevClose, c) + 1,
+      low: Math.min(prevClose, c) - 1,
       close: c,
       volume: 1000 + i,
     });
+    prevClose = c;
   }
   return out;
 }
@@ -261,16 +261,17 @@ plot(request.security(syminfo.tickerid, "D", close), "d")`);
   assert.equal(issue.kind, "unsupported");
 });
 
-test("basic: plotshape-only scripts report 'nothing to render'", async () => {
+test("basic: plotshape-only scripts import as markers (never 'nothing to render')", async () => {
   const outcome = await compile(`//@version=6
 indicator("shapes")
-plotshape(close > open, style=shape.triangleup, color=color.lime)`);
-  assert.equal(outcome.ok, false);
-  assert.equal(outcome.issue.kind, "plot");
-  assert.match(outcome.issue.message, /plot\(\) lines only/);
+plotshape(close > open, "sig", style=shape.triangleup, color=color.lime)`);
+  assert.equal(outcome.ok, true, outcome.issue?.message);
+  assert.equal(outcome.indicator.plotMeta.length, 1);
+  assert.equal(outcome.indicator.plotMeta[0].type, "marker");
+  assert.equal(outcome.indicator.plotMeta[0].key, "sig");
 });
 
-test("basic: styled non-line plots are filtered, line plots survive", async () => {
+test("basic: styled non-line plots are filtered, line plots survive (computeScript compat path)", async () => {
   const bars = make1m(80);
   const map = await runScript(`//@version=6
 indicator("mixed", overlay=true)

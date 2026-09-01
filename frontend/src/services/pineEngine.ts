@@ -101,6 +101,113 @@ export interface PineSeries {
   color?: string;
 }
 
+// ── Normalized AURA visual outputs (imported-script path) ───────────────────
+//
+// PineTS 0.9.33 exposes far more than plain lines in `ctx.plots` (verified by
+// runtime probes — see README "AURA Pine Script Support"):
+//
+//   plot(x)                          → options {}                      (line)
+//   plot(x, style=plot.style_line)   → options { style: "style_line" } (line)
+//   plot(x, style=…stepline)         → options { style: "style_stepline" }
+//   plot(x, style=…histogram/columns)→ options { style: "style_histogram" | "style_columns" }
+//   plot(x, style=…area)             → options { style: "style_area" }
+//   hline(price, …)                  → options { style: "hline", color, linestyle, linewidth }
+//                                      with CONSTANT {time, value} rows
+//   plotshape(cond, …)               → options { style: "shape", shape, location, color, text?, size? }
+//                                      with per-bar boolean/numeric `value`
+//   plotchar(cond, char="…")         → options { style: "char", char, location, color }
+//   label.new / line.new / fill()    → internal `__labels__` / `__lines__` / `__linefills__` …
+//                                      collectors whose rows carry drawing arrays
+//   display=display.none             → plot options { display: "none" } (data still present)
+//
+// Every supported construct maps to one normalized `PineVisual`; everything
+// else is reported in `PineRuntimeDiagnostics.unsupported` instead of being
+// faked or silently dropped.
+
+/** Visual kinds AURA can currently render for imported Pine scripts. */
+export type PineVisualType = "line" | "histogram" | "area" | "horizontal" | "marker";
+
+/** LWC-marker domain for Pine shapes/chars. */
+export interface PineMarkerPoint {
+  ts: number;
+  position: "aboveBar" | "belowBar" | "inBar";
+  shape: "arrowUp" | "arrowDown" | "circle" | "square";
+  color?: string;
+  /** Short label text (plotshape `text=` or plotchar `char=`), ≤ 24 chars. */
+  text?: string;
+}
+
+/**
+ * One normalized renderable output extracted from a PineTS run. `key` matches
+ * the `ctx.plots` key so plot metadata (persisted) can be reconciled with
+ * fresh runtime results.
+ */
+export type PineVisual =
+  | {
+      type: "line";
+      key: string;
+      title: string;
+      color?: string;
+      lineWidth?: number;
+      /** `plot.style_stepline` → stepped rendering (LWC `LineType.WithSteps`). */
+      stepLine: boolean;
+      data: PinePoint[];
+    }
+  | { type: "histogram"; key: string; title: string; color?: string; data: PinePoint[] }
+  | { type: "area"; key: string; title: string; color?: string; lineWidth?: number; data: PinePoint[] }
+  | {
+      type: "horizontal";
+      key: string;
+      title: string;
+      /** Constant hline price. */
+      price: number;
+      color?: string;
+      lineWidth?: number;
+      lineStyle: "solid" | "dashed" | "dotted";
+    }
+  | { type: "marker"; key: string; title: string; data: PineMarkerPoint[] };
+
+/** What one PineTS run produced / could NOT produce (runtime half of the import diagnostics). */
+export interface PineRuntimeDiagnostics {
+  rendered: { key: string; title: string; type: PineVisualType }[];
+  /** Detected-but-unrenderable outputs (circles/cross styles, drawings, …). */
+  unsupported: { kind: string; count: number }[];
+  /** Plots the script itself hides via `display=display.none`. */
+  hidden: number;
+}
+
+/** Pine shape ids → LWC marker shapes (unmapped shapes fall back to "circle"). */
+const PINE_SHAPE_TO_MARKER: Record<string, PineMarkerPoint["shape"]> = {
+  shape_triangleup: "arrowUp",
+  shape_triangle_up: "arrowUp",
+  shape_triangledown: "arrowDown",
+  shape_triangle_down: "arrowDown",
+  shape_arrowup: "arrowUp",
+  shape_arrow_up: "arrowUp",
+  shape_arrowdown: "arrowDown",
+  shape_arrow_down: "arrowDown",
+  shape_circle: "circle",
+  shape_square: "square",
+  shape_diamond: "square",
+  shape_flag: "square",
+  shape_labelup: "square",
+  shape_label_up: "square",
+  shape_labeldown: "square",
+  shape_label_down: "square",
+  shape_xcross: "square",
+  shape_cross: "square",
+};
+
+/** Internal PineTS drawing-collector keys → human-readable unsupported kinds. */
+const INTERNAL_PLOT_KIND: Record<string, string> = {
+  __labels__: "label.new drawings",
+  __lines__: "line.new drawings",
+  __boxes__: "box.new drawings",
+  __polylines__: "polyline drawings",
+  __linefills__: "fill() fills",
+  __tables__: "table drawings",
+};
+
 /** Ad-hoc indicator spec — the generic entry point for imported Pine scripts. */
 export interface PineScriptSpec {
   /** Stable key used in cache identities (imported indicator id). */
@@ -298,6 +405,257 @@ function clampLinewidth(w: number): number {
   return Math.max(1, Math.min(4, Math.round(w)));
 }
 
+/** Raw `ctx.plots` row: `{ title?, time, value, options?: { color? } }`. */
+interface RawPlotRow {
+  time?: unknown;
+  value?: unknown;
+  options?: { color?: unknown };
+}
+
+/** Raw `ctx.plots` entry options, as observed from PineTS 0.9.33. */
+interface RawPlotOptions {
+  style?: unknown;
+  display?: unknown;
+  color?: unknown;
+  linewidth?: unknown;
+  linestyle?: unknown;
+  shape?: unknown;
+  location?: unknown;
+  text?: unknown;
+  char?: unknown;
+}
+
+/**
+ * Extract finite numeric values + per-point colors from raw plot rows.
+ * `dynamic` is true when rows carry VARYING colors — in that case the caller
+ * must NOT collapse anything into a uniform color (PineTS also stores the last
+ * evaluated ternary color on plot-level `options.color`, which would lie).
+ */
+function rawRowsToPoints(data: unknown[]): { points: PinePoint[]; uniformColor?: string; dynamic: boolean } {
+  const points: PinePoint[] = [];
+  let uniformColor: string | undefined;
+  let dynamicColor = false;
+  for (const d of data as RawPlotRow[]) {
+    const v = d?.value;
+    if (typeof v !== "number" || !Number.isFinite(v)) continue; // warmup na() rows
+    const rawColor = d?.options?.color;
+    const color = typeof rawColor === "string" && rawColor.length > 0 ? rawColor : undefined;
+    if (color) {
+      if (uniformColor === undefined) uniformColor = color;
+      else if (uniformColor !== color) dynamicColor = true;
+    }
+    points.push(dynamicColor ? { ts: d.time as number, value: v, color } : { ts: d.time as number, value: v });
+  }
+  return { points, uniformColor: dynamicColor ? undefined : uniformColor, dynamic: dynamicColor };
+}
+
+/** Map Pine location ids to LWC marker positions. */
+function pineLocationToPosition(location: unknown): PineMarkerPoint["position"] {
+  if (location === "AboveBar" || location === "abovebar") return "aboveBar";
+  if (location === "BelowBar" || location === "belowbar") return "belowBar";
+  return "inBar";
+}
+
+/** Shared option plumbing for data-driven visuals (line family). */
+function lineFamilyColor(opts: RawPlotOptions, uniformColor?: string): { color?: string } | undefined {
+  const c = uniformColor ?? (typeof opts.color === "string" && opts.color.length > 0 ? opts.color : undefined);
+  return c ? { color: c } : {};
+}
+
+function clampOptionLinewidth(opts: RawPlotOptions): number | undefined {
+  const w = opts.linewidth;
+  return typeof w === "number" && Number.isInteger(w) ? clampLinewidth(w) : undefined;
+}
+
+/** Build a line/histogram/area visual from raw rows; null when no finite values. */
+function buildDataVisual(
+  style: "line" | "stepline" | "histogram" | "area",
+  key: string,
+  title: string,
+  opts: RawPlotOptions,
+  data: unknown[],
+): PineVisual | null {
+  const { points, uniformColor, dynamic } = rawRowsToPoints(data);
+  if (points.length === 0) return null;
+  // Dynamic per-row colors win; the plot-level options.color of a dynamic
+  // plot only holds PineTS's last-evaluated ternary result — never use it.
+  const color = dynamic ? undefined : lineFamilyColor(opts, uniformColor)?.color;
+  const lineWidth = clampOptionLinewidth(opts);
+  if (style === "histogram") {
+    return { type: "histogram", key, title, ...(color ? { color } : {}), data: points };
+  }
+  if (style === "area") {
+    return { type: "area", key, title, ...(color ? { color } : {}), ...(lineWidth ? { lineWidth } : {}), data: points };
+  }
+  return { type: "line", key, title, ...(color ? { color } : {}), ...(lineWidth ? { lineWidth } : {}), stepLine: style === "stepline", data: points };
+}
+
+/** Build a horizontal (hline) visual from raw rows; null when no finite price. */
+function buildHorizontalVisual(
+  key: string,
+  title: string,
+  opts: RawPlotOptions,
+  data: unknown[],
+): PineVisual | null {
+  let price: number | null = null;
+  let rowColor: string | undefined;
+  for (const d of data as RawPlotRow[]) {
+    const v = d?.value;
+    if (typeof v === "number" && Number.isFinite(v)) {
+      price = v; // hline rows repeat the constant price — the first wins
+      const c = d?.options?.color;
+      rowColor = typeof c === "string" && c.length > 0 ? c : undefined;
+      break;
+    }
+  }
+  if (price === null) return null;
+  const color = lineFamilyColor(opts, rowColor);
+  const lineWidth = clampOptionLinewidth(opts);
+  const ls = typeof opts.linestyle === "string" ? opts.linestyle : "solid";
+  return {
+    type: "horizontal",
+    key,
+    title,
+    price,
+    ...color,
+    ...(lineWidth ? { lineWidth } : {}),
+    lineStyle: ls === "dotted" ? "dotted" : ls === "dashed" ? "dashed" : "solid",
+  };
+}
+
+/** Build a marker visual (plotshape/plotchar) from raw rows; null when no signal bars. */
+function buildMarkerVisual(
+  key: string,
+  title: string,
+  opts: RawPlotOptions,
+  data: unknown[],
+  isChar: boolean,
+): PineVisual | null {
+  const shape: PineMarkerPoint["shape"] = isChar
+    ? "circle"
+    : PINE_SHAPE_TO_MARKER[typeof opts.shape === "string" ? opts.shape : ""] ?? "circle";
+  const rawText = isChar ? opts.char : opts.text;
+  const text = typeof rawText === "string" && rawText.length > 0 ? rawText.slice(0, 24) : undefined;
+  const position = pineLocationToPosition(opts.location);
+  const points: PineMarkerPoint[] = [];
+  for (const d of data as RawPlotRow[]) {
+    const v = d?.value;
+    // plotshape emits boolean (true → show) or numeric/na; only truthy finite
+    // values become markers — false/na bars stay clean.
+    const on = v === true || (typeof v === "number" && Number.isFinite(v) && v !== 0);
+    if (!on) continue;
+    const c = d?.options?.color;
+    const rowColor = typeof c === "string" && c.length > 0 ? c : undefined;
+    const color = lineFamilyColor(opts, rowColor);
+    points.push({ ts: d.time as number, position, shape, ...color, ...(text ? { text } : {}) });
+  }
+  if (points.length === 0) return null;
+  return { type: "marker", key, title, data: points };
+}
+
+/**
+ * Extract ALL renderable `PineVisual`s from one PineTS context plus runtime
+ * diagnostics. Used by the imported-script path (the registry path keeps
+ * `extractSeries`/`extractPoints` untouched).
+ *
+ * Supported → line / stepline / histogram / columns / area / hline /
+ * plotshape / plotchar. Explicit `plot.style_line` IS a plain line (an earlier
+ * filter incorrectly dropped styled plots — real-world scripts declare
+ * styles). `display=display.none` plots are skipped as "hidden" (the author's
+ * choice, not an incompatibility). Internal `__`-collectors surface as
+ * unsupported kinds ONLY when they actually carry drawings. Nothing valid is
+ * ever dropped silently — unrecognized constructs land in
+ * `diagnostics.unsupported`.
+ */
+export function extractVisuals(
+  ctx: { plots?: Record<string, { title?: unknown; options?: RawPlotOptions; data?: unknown[] }> } | undefined,
+  maxVisuals: number,
+): { visuals: PineVisual[]; diagnostics: PineRuntimeDiagnostics } {
+  const visuals: PineVisual[] = [];
+  const diagnostics: PineRuntimeDiagnostics = { rendered: [], unsupported: [], hidden: 0 };
+  const unsupportedFor = (kind: string): void => {
+    const found = diagnostics.unsupported.find((u) => u.kind === kind);
+    if (found) found.count += 1;
+    else diagnostics.unsupported.push({ kind, count: 1 });
+  };
+  if (!ctx?.plots) return { visuals, diagnostics };
+
+  for (const [key, plot] of Object.entries(ctx.plots)) {
+    // Internal drawing collectors — count only when drawings were actually used.
+    if (isInternalPlotKey(key)) {
+      const rows = Array.isArray(plot?.data) ? plot.data : [];
+      let used = 0;
+      for (const r of rows as Array<{ value?: unknown } | null>) {
+        const v = r?.value;
+        if (Array.isArray(v)) used += v.length;
+        else if (v !== null && v !== undefined && typeof v !== "boolean") used += 1;
+      }
+      if (used > 0) unsupportedFor(INTERNAL_PLOT_KIND[key] ?? "drawings");
+      continue;
+    }
+    if (visuals.length >= maxVisuals) break;
+
+    const opts: RawPlotOptions = plot?.options ?? {};
+    const data = Array.isArray(plot?.data) ? plot.data : [];
+    const title = typeof plot?.title === "string" && plot.title.length > 0 ? plot.title : key;
+
+    // The author explicitly hid this plot — respect it, note it, render nothing.
+    if (opts.display === "none") {
+      diagnostics.hidden += 1;
+      continue;
+    }
+
+    const style = typeof opts.style === "string" ? opts.style : undefined;
+    let built: PineVisual | null = null;
+    switch (style) {
+      case undefined:
+      case "style_line":
+      case "line":
+        built = buildDataVisual("line", key, title, opts, data);
+        break;
+      case "style_stepline":
+      case "stepline":
+        built = buildDataVisual("stepline", key, title, opts, data);
+        break;
+      case "style_histogram":
+      case "style_columns":
+      case "histogram":
+      case "columns":
+        built = buildDataVisual("histogram", key, title, opts, data);
+        break;
+      case "style_area":
+      case "area":
+        built = buildDataVisual("area", key, title, opts, data);
+        break;
+      case "hline":
+        built = buildHorizontalVisual(key, title, opts, data);
+        break;
+      case "shape":
+        built = buildMarkerVisual(key, title, opts, data, false);
+        break;
+      case "char":
+        built = buildMarkerVisual(key, title, opts, data, true);
+        break;
+      case "background":
+        unsupportedFor("bgcolor()");
+        break;
+      case "label":
+      case "table":
+      case "linefill":
+        // Internal-collector equivalents — counted under their `__` keys instead.
+        break;
+      default:
+        // plot.style_circles / plot.style_cross / anything new — never faked.
+        unsupportedFor(`plot style "${style}"`);
+        break;
+    }
+    if (built) visuals.push(built);
+  }
+
+  for (const v of visuals) diagnostics.rendered.push({ key: v.key, title: v.title, type: v.type });
+  return { visuals, diagnostics };
+}
+
 /**
  * Registry-path extraction (single plot key) — the EMA 9/20 compatibility
  * shim. Returns colorless points so the equivalence oracle contract is
@@ -334,6 +692,7 @@ export class PineIndicatorEngine {
   private readonly compiled = new Map<string, CompiledIndicator>();
   private readonly resultCache = new Map<string, PinePoint[]>();
   private readonly scriptCache = new Map<string, Map<string, PineSeries>>();
+  private readonly scriptVisualsCache = new Map<string, { visuals: PineVisual[]; diagnostics: PineRuntimeDiagnostics }>();
   private warned = false;
 
   /**
@@ -361,6 +720,7 @@ export class PineIndicatorEngine {
     this.pine = new PineTS(this.klines as unknown as PineCandle[], undefined, undefined);
     this.resultCache.clear();
     this.scriptCache.clear();
+    this.scriptVisualsCache.clear();
   }
 
   /**
@@ -454,6 +814,59 @@ export class PineIndicatorEngine {
   }
 
   /**
+   * Compute an AD-HOC script (imported Pine indicator) and extract ALL of its
+   * renderable `PineVisual`s (lines, histograms, areas, hlines, plotshape/
+   * plotchar markers) in ONE runtime pass — the generalized successor of the
+   * line-only `computeScript`, sharing the exact same compilation + caching
+   * discipline (compiled artifacts keyed by (id, source, params); results by
+   * (…, data signature)). `computeScript` remains for compatibility with the
+   * existing line-path callers/tests.
+   *
+   * Returns `null` for "no data yet" (not an error) or a run failure. Failures
+   * are reported via `onError` with the RAW message (callers map it through
+   * friendlyPineError for the UI; stack traces stay in the console).
+   * `onContext` reports the resolved `indicator()` declaration info.
+   */
+  async computeScriptVisuals(
+    spec: PineScriptSpec,
+    params: PineParams = {},
+    onError?: (message: string) => void,
+    onContext?: (info: { overlay?: boolean; title?: string }) => void,
+  ): Promise<{ visuals: PineVisual[]; diagnostics: PineRuntimeDiagnostics } | null> {
+    if (this.pine === null || this.klines.length === 0 || this.dataSig === null) {
+      return null;
+    }
+
+    const cacheKey = `${spec.id}|${sourceSignature(spec.source)}|${this.dataSig}|${paramsSignature(params)}`;
+    const cached = this.scriptVisualsCache.get(cacheKey);
+    if (cached) return cached;
+
+    const compiled = this.getCompiled(spec, params);
+
+    let ctx: any;
+    try {
+      ctx = await this.pine.run(compiled.indicator, this.klines.length);
+    } catch (e: any) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(`[PineIndicatorEngine] imported script "${spec.id}" failed:`, e);
+      onError?.(msg);
+      return null;
+    }
+
+    try {
+      if (onContext && ctx?.indicator) {
+        onContext({ overlay: ctx.indicator.overlay, title: ctx.indicator.title });
+      }
+    } catch {
+      /* context info is best-effort only */
+    }
+
+    const result = extractVisuals(ctx, MAX_SCRIPT_SERIES);
+    this.scriptVisualsCache.set(cacheKey, result);
+    return result;
+  }
+
+  /**
    * Lazily compile + cache a PineScript `Indicator` per (id, source, params)
    * combination. PineTS bakes `input.*` overrides into the transpiled
    * artifact at `prepare()` time, so parameters are bound BEFORE the first
@@ -501,6 +914,7 @@ export class PineIndicatorEngine {
     this.compiled.clear();
     this.resultCache.clear();
     this.scriptCache.clear();
+    this.scriptVisualsCache.clear();
     this.pine = null;
     this.klines = [];
     this.dataSig = null;

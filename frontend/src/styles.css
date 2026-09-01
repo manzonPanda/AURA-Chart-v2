@@ -117,6 +117,7 @@ body {
   color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px;
 }
 .pine-chip-err { color: #ff8a80; font-size: 0.78rem; line-height: 1; cursor: help; }
+.pine-chip-compat { color: #ffd54f; font-size: 0.72rem; line-height: 1; cursor: help; opacity: 0.9; }
 .ind-meta-note { grid-column: 1 / -1; font-size: 0.68rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 .ind-remove {
   grid-column: 1 / -1; border: 1px solid var(--border); background: transparent; color: var(--muted);
@@ -133,6 +134,8 @@ body {
 .ind-import-btn:disabled { opacity: 0.5; cursor: default; }
 
 /* ── Import Pine Script modal ───────────────────────────────── */
+.ind-meta-note.ind-meta-warn { color: #ffd54f; }
+
 .pine-modal-backdrop {
   position: fixed; inset: 0; z-index: 100; background: rgba(4, 8, 14, 0.66);
   display: flex; align-items: center; justify-content: center; padding: 16px;
@@ -168,7 +171,28 @@ body {
   margin: 0; font-family: ui-monospace, Consolas, monospace; font-size: 0.74rem; line-height: 1.45;
   color: var(--text); white-space: pre-wrap; word-break: break-word;
 }
+/* Import diagnostics review panel (Compile result in the modal). */
+.pine-diag {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 8px;
+  background: rgba(56, 189, 248, 0.06);
+  font-size: 0.72rem;
+}
+.pine-diag-title { font-size: 0.8rem; font-weight: 700; color: #7ee787; }
+.pine-diag-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.pine-diag-label { color: var(--muted); font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; font-size: 0.62rem; }
+.pine-diag-item { color: var(--text); }
+.pine-diag-item em { color: var(--muted); font-style: normal; font-size: 0.66rem; }
+.pine-diag-item.ok { color: #7ee787; }
+.pine-diag-item.warn { color: #ffd54f; }
+.pine-diag-note { color: var(--muted); font-size: 0.7rem; line-height: 1.45; }
+
 .pine-warning {
+
   background: rgba(251, 140, 0, 0.1); border: 1px solid rgba(251, 140, 0, 0.35);
   border-radius: 8px; padding: 8px 12px; font-size: 0.74rem; color: #ffb74d;
 }

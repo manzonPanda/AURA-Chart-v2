@@ -26,6 +26,9 @@ import {
   PineIndicatorEngine,
   type PineBar,
   type PineLiveCandle,
+  type PineRuntimeDiagnostics,
+  type PineVisual,
+  type PineVisualType,
 } from "./pineEngine.ts";
 
 // ── Limits (robustness — one bad import must never hurt the chart) ─────────
@@ -44,7 +47,7 @@ export const MAX_PINE_INPUTS = 32;
 /** localStorage key — Pine source + settings ONLY (never calculated data). */
 export const PINE_STORAGE_KEY = "aura.pine.indicators";
 /** Versioned envelope so future migrations are possible. */
-export const PINE_STORAGE_VERSION = 1;
+export const PINE_STORAGE_VERSION = 2;
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -63,16 +66,34 @@ export interface PineInputMetaSnapshot {
   options?: string[];
 }
 
-/** Snapshot of one renderable `plot()` series discovered at compile time. */
+/** Snapshot of one renderable output discovered at compile time. */
 export interface PinePlotMetaSnapshot {
   /** `ctx.plots` key (plot title, or "#N" for untitled plots). */
   key: string;
   /** Display title. */
   title: string;
+  /** Normalized visual kind (drives series creation in PineBridge). */
+  type: PineVisualType;
   /** Script-declared linewidth (1–4 after clamp). */
   linewidth?: number;
   /** Uniform script color when every point shares one (hex). */
   color?: string;
+}
+
+/**
+ * Full import diagnostics — WHAT the script uses vs what AURA renders.
+ * Persisted with the indicator so the UI can always explain the difference
+ * ("Compiled successfully, but …") instead of a bare "Nothing to render".
+ */
+export interface PineImportDiagnostics {
+  /** Static source scan: construct → occurrence count (plot/hline/plotshape/…). */
+  staticCounts: Record<string, number>;
+  /** Outputs AURA actually renders (from the compile-time PineTS run). */
+  rendered: { key: string; title: string; type: PineVisualType }[];
+  /** Detected-but-unrenderable outputs (drawings, exotic styles, …). */
+  unsupported: { kind: string; count: number }[];
+  /** Plots hidden by the script itself (`display=display.none`). */
+  hidden: number;
 }
 
 /**
@@ -92,6 +113,8 @@ export interface ImportedPineIndicator {
   inputMeta: PineInputMetaSnapshot[];
   /** Plot metadata snapshot captured at compile time (drives series creation). */
   plotMeta: PinePlotMetaSnapshot[];
+  /** Import-time diagnostics (what the script uses vs what AURA renders). */
+  diagnostics?: PineImportDiagnostics;
   createdAt: number;
 }
 
@@ -157,6 +180,40 @@ export function staticOverlayHint(source: string): boolean {
 export function guessPineTitle(source: string): string | null {
   const m = TITLE_RE.exec(source);
   return m ? m[1] : null;
+}
+
+// ── Static visual-construct scan (import diagnostics "Detected" section) ────
+
+/** Visual constructs AURA's import diagnostics report (label → display name). */
+const SCAN_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
+  ["plot()", /\bplot\s*\(/g],
+  ["hline()", /\bhline\s*\(/g],
+  ["plotshape()", /\bplotshape\s*\(/g],
+  ["plotchar()", /\bplotchar\s*\(/g],
+  ["label.new", /\blabel\s*\.\s*new\s*\(/g],
+  ["bgcolor()", /\bbgcolor\s*\(/g],
+  ["fill()", /\bfill\s*\(/g],
+  ["table.new", /\btable\s*\.\s*new\s*\(/g],
+];
+
+/**
+ * Cheap static scan of the Pine source for visual constructs — powers the
+ * "Detected" section of the import diagnostics. Comments and string literals
+ * are stripped first so a title like "plot()" doesn't inflate the counts.
+ * Purely informational; the authoritative supported/unsupported split comes
+ * from the PineTS runtime run.
+ */
+export function staticScanCounts(source: string): Record<string, number> {
+  const counts: Record<string, number> = {};
+  if (typeof source !== "string" || source.length === 0) return counts;
+  const stripped = source
+    .replace(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, '""')
+    .replace(/\/\/[^\n]*/g, "");
+  for (const [label, re] of SCAN_PATTERNS) {
+    const n = stripped.match(re)?.length ?? 0;
+    if (n > 0) counts[label] = n;
+  }
+  return counts;
 }
 
 /**
@@ -318,18 +375,61 @@ export function isEditableInputType(type: string): boolean {
 
 // ── Record sanitization (localStorage can contain anything) ────────────────
 
+const VISUAL_TYPES: ReadonlySet<string> = new Set(["line", "histogram", "area", "horizontal", "marker"]);
+
 function sanitizePlotMeta(raw: unknown): PinePlotMetaSnapshot | null {
   if (!isPlainObject(raw)) return null;
   if (typeof raw.key !== "string" || raw.key.length === 0 || raw.key.startsWith("__")) return null;
   const meta: PinePlotMetaSnapshot = {
     key: raw.key.slice(0, 120),
     title: typeof raw.title === "string" && raw.title.length > 0 ? raw.title.slice(0, 120) : raw.key,
+    // v1 envelopes predate the type field — they contained plain lines only.
+    type: typeof raw.type === "string" && VISUAL_TYPES.has(raw.type) ? (raw.type as PineVisualType) : "line",
   };
   if (typeof raw.linewidth === "number" && Number.isInteger(raw.linewidth)) {
     meta.linewidth = clamp(raw.linewidth, 1, 4);
   }
   if (typeof raw.color === "string" && HEX_COLOR_RE.test(raw.color)) meta.color = raw.color.toLowerCase();
   return meta;
+}
+
+/** Best-effort sanitization of persisted import diagnostics (v1 records lack them). */
+function sanitizeDiagnostics(raw: unknown): PineImportDiagnostics | null {
+  if (!isPlainObject(raw)) return null;
+  const staticCounts: Record<string, number> = {};
+  if (isPlainObject(raw.staticCounts)) {
+    for (const [k, v] of Object.entries(raw.staticCounts)) {
+      if (typeof v === "number" && Number.isFinite(v) && v >= 0) staticCounts[k.slice(0, 40)] = Math.floor(v);
+    }
+  }
+  const rendered = Array.isArray(raw.rendered)
+    ? raw.rendered
+        .map((r) => {
+          if (!isPlainObject(r) || typeof r.key !== "string") return null;
+          return {
+            key: r.key.slice(0, 120),
+            title: typeof r.title === "string" ? r.title.slice(0, 120) : r.key,
+            type: typeof r.type === "string" && VISUAL_TYPES.has(r.type) ? (r.type as PineVisualType) : ("line" as PineVisualType),
+          };
+        })
+        .filter((r): r is { key: string; title: string; type: PineVisualType } => r !== null)
+        .slice(0, MAX_PLOT_SERIES_PER_INDICATOR)
+    : [];
+  const unsupported = Array.isArray(raw.unsupported)
+    ? raw.unsupported
+        .map((u) => {
+          if (!isPlainObject(u) || typeof u.kind !== "string") return null;
+          return { kind: u.kind.slice(0, 80), count: typeof u.count === "number" && Number.isFinite(u.count) ? Math.max(0, Math.floor(u.count)) : 1 };
+        })
+        .filter((u): u is { kind: string; count: number } => u !== null)
+        .slice(0, 16)
+    : [];
+  return {
+    staticCounts,
+    rendered,
+    unsupported,
+    hidden: typeof raw.hidden === "number" && Number.isFinite(raw.hidden) ? Math.max(0, Math.floor(raw.hidden)) : 0,
+  };
 }
 
 /** Validate one stored imported indicator. Returns null for records to DROP. */
@@ -347,6 +447,7 @@ export function sanitizeImportedIndicator(raw: unknown): ImportedPineIndicator |
   const plotMeta = Array.isArray(raw.plotMeta)
     ? raw.plotMeta.map(sanitizePlotMeta).filter((m): m is PinePlotMetaSnapshot => m !== null).slice(0, MAX_PLOT_SERIES_PER_INDICATOR)
     : [];
+  const diagnostics = sanitizeDiagnostics(raw.diagnostics);
   return {
     id: typeof raw.id === "string" && raw.id.length > 0 ? raw.id.slice(0, 64) : newImportedPineId(),
     name:
@@ -359,6 +460,7 @@ export function sanitizeImportedIndicator(raw: unknown): ImportedPineIndicator |
     inputs,
     inputMeta,
     plotMeta,
+    ...(diagnostics ? { diagnostics } : {}),
     createdAt: typeof raw.createdAt === "number" && Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),
   };
 }
@@ -373,6 +475,16 @@ export function sanitizeImportedList(raw: unknown): ImportedPineIndicator[] {
     if (out.length >= MAX_IMPORTED_INDICATORS) break;
   }
   return out;
+}
+
+/** Snapshot one runtime visual into a persistable plot-meta record. */
+function plotMetaFromVisual(v: PineVisual): PinePlotMetaSnapshot {
+  const meta: PinePlotMetaSnapshot = { key: v.key, title: v.title, type: v.type };
+  if (v.type === "line" || v.type === "area" || v.type === "horizontal") {
+    if (typeof v.lineWidth === "number") meta.linewidth = v.lineWidth;
+  }
+  if (v.type !== "marker" && typeof v.color === "string") meta.color = v.color;
+  return meta;
 }
 
 // ── localStorage load/save (guarded, injectable for tests) ─────────────────
@@ -406,7 +518,10 @@ export function loadImportedPineIndicators(
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!isPlainObject(parsed)) return [];
-    if (parsed.version !== PINE_STORAGE_VERSION) return []; // unknown future version → start fresh
+    // v1 records predate typed plotMeta — sanitizePlotMeta defaults their
+    // type to "line" (v1 rendered lines only), so they migrate losslessly.
+    // Unknown FUTURE versions still start fresh.
+    if (parsed.version !== PINE_STORAGE_VERSION && parsed.version !== 1) return [];
     return sanitizeImportedList(parsed.indicators);
   } catch (e) {
     console.warn("[pineImport] corrupted localStorage entry — starting fresh", e);
@@ -479,15 +594,18 @@ export async function compileImportedPine(args: CompileImportedPineArgs): Promis
     };
   }
 
-  // 3. Run against the current candles and extract every plain-line plot.
-  const plots = new Map<string, PinePlotMetaSnapshot>();
+  // 3. Run against the current candles and extract every RENDERABLE visual
+  //    (lines, histograms, areas, hlines, plotshape/plotchar markers) plus a
+  //    runtime report of what the script uses but AURA cannot render.
+  const visuals: PineVisual[] = [];
+  let runtimeDiagnostics: PineRuntimeDiagnostics | null = null;
   let runtimeOverlay: boolean | null = null;
   if (bars.length > 0) {
     const engine = new PineIndicatorEngine();
     try {
       engine.setCandles(bars, liveCandle, bucketSec);
       let runError: string | null = null;
-      const seriesMap = await engine.computeScript(
+      const run = await engine.computeScriptVisuals(
         {
           id: "pine-import-preview",
           source,
@@ -501,40 +619,39 @@ export async function compileImportedPine(args: CompileImportedPineArgs): Promis
           if (typeof info?.overlay === "boolean") runtimeOverlay = info.overlay;
         },
       );
-      if (seriesMap === null) {
+      if (run === null) {
         console.error(`[pineImport] PineTS run failed: ${runError}`);
         return {
           ok: false,
           issue: { kind: "run", message: friendlyPineError(runError ?? "Pine Script execution failed") },
         };
       }
-      if (seriesMap.size === 0) {
-        return {
-          ok: false,
-          issue: {
-            kind: "plot",
-            message:
-              "No renderable plots found. AURA currently renders plot() lines only — plotshape/plotchar/labels/hlines are not supported yet.",
-          },
-        };
-      }
-      for (const [key, series] of seriesMap) {
-        plots.set(key, {
-          key,
-          title: series.title || key,
-          ...(typeof series.linewidth === "number" ? { linewidth: series.linewidth } : {}),
-          ...(series.color ? { color: series.color } : {}),
-        });
-      }
+      visuals.push(...run.visuals);
+      runtimeDiagnostics = run.diagnostics;
     } finally {
       engine.dispose();
     }
   }
 
-  const truncated = plots.size > MAX_PLOT_SERIES_PER_INDICATOR;
-  if (truncated) {
-    warning = `${warning ?? ""}${warning ? " " : ""}Only the first ${MAX_PLOT_SERIES_PER_INDICATOR} plots are rendered.`;
+  const truncated = visuals.length > MAX_PLOT_SERIES_PER_INDICATOR;
+  const diagnostics: PineImportDiagnostics = {
+    staticCounts: staticScanCounts(source),
+    rendered: (runtimeDiagnostics?.rendered ?? []).slice(0, MAX_PLOT_SERIES_PER_INDICATOR),
+    unsupported: runtimeDiagnostics?.unsupported ?? [],
+    hidden: runtimeDiagnostics?.hidden ?? 0,
+  };
+
+  // A script that compiles but exposes nothing AURA can render STILL imports —
+  // the diagnostics panel and the menu chip explain exactly why nothing draws.
+  // A valid script must never surface as a bare "Nothing to render" failure.
+  const notes: string[] = [];
+  if (warning) notes.push(warning);
+  if (visuals.length === 0) {
+    notes.push("Compiled successfully, but AURA could not render any supported visual outputs — see the diagnostics.");
+  } else if (truncated) {
+    notes.push(`Only the first ${MAX_PLOT_SERIES_PER_INDICATOR} outputs are rendered.`);
   }
+  warning = notes.length > 0 ? notes.join(" ") : undefined;
   const overlay = runtimeOverlay ?? staticOverlayHint(source);
   const name = (args.name ?? "").trim().slice(0, 80) || guessPineTitle(source) || "Imported indicator";
 
@@ -552,7 +669,8 @@ export async function compileImportedPine(args: CompileImportedPineArgs): Promis
       overlay,
       inputs: inputs0,
       inputMeta: inputs,
-      plotMeta: [...plots.values()].slice(0, MAX_PLOT_SERIES_PER_INDICATOR),
+      plotMeta: visuals.slice(0, MAX_PLOT_SERIES_PER_INDICATOR).map(plotMetaFromVisual),
+      diagnostics,
       createdAt: Date.now(),
     },
   };

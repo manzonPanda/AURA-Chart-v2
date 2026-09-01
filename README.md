@@ -371,20 +371,48 @@ AURA is **not** a TradingView/Pine Script clone. Compatibility with pinets 0.9.3
   native Lightweight Charts pane (`addSeries(…, paneIndex)`).
 - `plot(value, title, color=…, linewidth=…)` — line plots; `color` hex and
   `linewidth` map to the LWC series. Dynamically computed per-bar colors are
-  rendered per point.
+  rendered per point (PineTS also stores the last-evaluated ternary color on
+  the plot level — AURA ignores it when rows vary, so dynamic colors are exact).
+- `plot(…, style=plot.style_line)` — explicit plain-line style (an early
+  filter incorrectly dropped it; regression-tested).
+- `plot(…, style=plot.style_stepline)` — rendered with LWC `LineType.WithSteps`.
+- `plot(…, style=plot.style_histogram | plot.style_columns)` — LWC
+  `HistogramSeries` with per-bar colors.
+- `plot(…, style=plot.style_area)` — LWC `AreaSeries` (semi-transparent fill).
+- `hline(price, title, color=…, linestyle=…, linewidth=…)` — LWC price line on
+  the pane's anchor series (candle series for overlays), axis label included.
+- `plotshape(cond, title, style=…, location=…, color=…, text=…)` — LWC series
+  markers: triangles/arrows → `arrowUp`/`arrowDown`, circles → `circle`,
+  squares/diamonds/flags/labels → `square`; `location.abovebar/belowbar` map
+  to `aboveBar`/`belowBar`; marker text is rendered.
+- `plotchar(cond, char="…")` — marker with the character as its text (LWC
+  cannot draw arbitrary glyphs — the char is shown as text, never faked as a
+  line).
+- `display=display.none` — hidden plots are skipped and counted in the
+  diagnostics (the author's choice, not an incompatibility).
 - `ta.*` built-ins implemented by PineTS (ema, sma, rsi, macd, atr, crossover,
   crossunder, …), core math/array/map, conditionals, functions, `var`/`let`.
 - `input.int/float/bool/string/color` (editable), `input.source` (read-only
   display in v1), plus full `getInputsMeta` kind detection.
-- Multiple `plot()` lines per script → multiple LWC line series.
+- Import diagnostics: a static source scan (Detected) + a runtime report of
+  what was rendered vs unsupported, shown in the import dialog and the
+  indicator menu. A valid script that compiles always imports — even when
+  nothing is renderable, the UI explains exactly why.
 
-**Partial / unsupported**
+**Partial / unsupported** (detected and reported — never faked)
 - `study()` (Pine v4) — PineTS only supports v5+, so v4 scripts are rejected
   with "Unsupported Pine Script version 4".
-- `plotshape` / `plotchar` / `plotbar` / `plotcandle` / `hline` / `bgcolor` /
-  `fill` / drawings (`line.new`, `label.new`, `box.new`, `table.new`) — their
-  values exist in `ctx.plots` but AURA does **not** fake them; non-line plots
-  are simply ignored (the import reports when nothing renderable remains).
+- `plot(…, style=plot.style_circles | plot.style_cross)` — no faithful LWC
+  representation; reported as unsupported in the diagnostics.
+- `fill()` — PineTS emits it as a `style:"fill"` plot; reported unsupported.
+- `bgcolor()` — not exposed by PineTS as a plot; only visible in the static
+  source scan.
+- Drawings (`line.new`, `label.new`, `box.new`, `polyline`, `table.new`) —
+  reported unsupported when used (PineTS collects them in `__`-prefixed
+  internal plots, which AURA inspects but never fakes).
+- plotshape/plotchar **dynamic per-bar colors**: PineTS only exposes the
+  plot-level color (the last-evaluated ternary result) for shapes/chars, so a
+  uniform color is used — lines/histograms/areas get exact per-bar colors.
 - Scripts without a `//@version` comment — PineTS silently drops their
   `indicator()` args (overlay defaults to a separate pane); AURA warns on
   import and falls back to a static `overlay=true` hint.

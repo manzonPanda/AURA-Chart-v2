@@ -114,16 +114,19 @@ export default function App() {
         liveCandle: realtime.candle,
         bucketSec: resolutionToBucketSec(timeframe),
       });
-      if (outcome.ok && outcome.indicator) {
-        setImportedPine((prev) => {
-          if (prev.length >= MAX_IMPORTED_INDICATORS) return prev;
-          return [...prev, outcome.indicator!];
-        });
-      }
       return outcome;
     },
-    [importedPine.length, candles, realtime.candle, timeframe],
+    [candles, realtime.candle, timeframe],
   );
+
+  /** Confirm-import: called by the modal AFTER the user reviews the
+   *  diagnostics panel (or immediately when nothing needs reviewing). */
+  const handlePineImportConfirm = useCallback((indicator: ImportedPineIndicator) => {
+    setImportedPine((prev) => {
+      if (prev.length >= MAX_IMPORTED_INDICATORS) return prev;
+      return [...prev, indicator];
+    });
+  }, []);
 
   /** Runtime status reporter — change-guarded so per-frame calls are cheap. */
   const handlePineStatus = useCallback((id: string, status: PineRunStatus) => {
@@ -248,6 +251,7 @@ export default function App() {
             pineStatuses={pineStatuses}
             onImportedChange={handlePineChange}
             onCompile={handlePineImport}
+            onImportConfirm={handlePineImportConfirm}
           />
           {/* Timeframe selector — 1m (canonical persisted) | 3m (derived) */}
           <div className="timeframes" role="tablist" aria-label="Chart timeframe">
