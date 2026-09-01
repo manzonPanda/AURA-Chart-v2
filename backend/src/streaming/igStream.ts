@@ -117,6 +117,11 @@ export class IgStreamClient {
     client.addListener({
       onStatusChange: (status: string) => {
         const state = mapStatus(status);
+        // Surface the RAW Lightstreamer status for terminal disconnects —
+        // mapStatus collapses e.g. "DISCONNECTED:UNEXPECTED ERROR" (auth
+        // rejected) and "DISCONNECTED:LOST-CONNECTION" into one word, hiding
+        // the actual cause from the logs.
+        if (state === "DISCONNECTED") console.warn(`[IG STREAM] Lightstreamer status: ${status}`);
         this.setState(state);
       },
     });

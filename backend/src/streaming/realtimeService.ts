@@ -43,9 +43,11 @@ interface WsClient {
   framesSent: number;
 }
 
-/** How long to wait before retrying the Lightstreamer connection. Auth failures
- *  stay gated by IgClient's own 90 s cooldown — this only paces socket retries. */
+/** How long to wait before the FIRST retry of a Lightstreamer connection. */
 const STREAM_RECONNECT_DELAY_MS = 5_000;
+/** Backoff cap for consecutive never-live reconnects (IG-outage friendliness):
+ *  5s → 10s → 20s → 40s → 60s, reset to 5s by every LIVE. */
+const STREAM_RECONNECT_MAX_DELAY_MS = 60_000;
 /** Periodic truthful-status heartbeat so the UI's tick counters/ages stay fresh
  *  without any polling of IG (frames only travel over OUR websocket). */
 const STATUS_HEARTBEAT_MS = 30_000;
@@ -79,8 +81,19 @@ export class RealtimeService {
   private readonly clients = new Set<WsClient>();
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private started = false;
+<<<<<<< HEAD
   /** The constructor epic — snapshot()/stateNow()/closed-candle listeners. */
   private readonly defaultEpic: string;
+=======
+  /** One in-flight connect attempt at a time (auth awaits can overlap timers;
+   *  the loser must never tear down the winner's fresh stream). */
+  private connecting = false;
+  /** Consecutive connect attempts that ended WITHOUT ever reaching LIVE —
+   *  drives the reconnect backoff. Reset by every LIVE state. */
+  private failedAttempts = 0;
+  /** Whether the CURRENT stream reached LIVE (reset on stream replacement). */
+  private currentStreamReachedLive = false;
+>>>>>>> b98a58e (fix(backend): fresh IG auth on every stream reconnect — end CONNECTING/DISCONNECTED flap, restore live candles)
 
   constructor(
     private readonly ig: IgClient,
@@ -218,8 +231,13 @@ export class RealtimeService {
 
   stop(): void {
     this.started = false;
+<<<<<<< HEAD
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();
+=======
+    this.connecting = false;
+    this.clearReconnectTimer();
+>>>>>>> b98a58e (fix(backend): fresh IG auth on every stream reconnect — end CONNECTING/DISCONNECTED flap, restore live candles)
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
@@ -288,6 +306,7 @@ export class RealtimeService {
     }
   }
 
+<<<<<<< HEAD
   private async connectStream(epic: string): Promise<void> {
     let session;
     try {
@@ -298,12 +317,37 @@ export class RealtimeService {
     } catch {
       this.setStreamState(epic, "DISCONNECTED");
       this.scheduleReconnect(epic);
+=======
+  private async connectStream(): Promise<void> {
+    if (this.connecting || !this.started) return;
+    this.connecting = true;
+    // A fresh attempt supersedes any pending reconnect timer — it must never
+    // fire later and tear down the stream this attempt is about to open.
+    this.clearReconnectTimer();
+
+    let session;
+    try {
+      // ALWAYS a fresh IG login on (re)connect: IG invalidates the CST/XST
+      // once the Lightstreamer session terminates, so retrying cached tokens
+      // earns an instant server rejection — the CONNECTING→DISCONNECTED flap.
+      // (IgClient's SESSION_REUSE_WINDOW_MS + 90s failure cooldown keep the
+      // login rate safe even when this fires every few seconds.)
+      session = await this.ig.getStreamSession({ forceNew: true });
+    } catch (err) {
+      this.connecting = false;
+      console.warn(
+        `[STREAM] IG session unavailable — ${err instanceof Error ? err.message : "unknown error"}; ` +
+          `retrying in ${Math.round(this.nextReconnectDelayMs() / 1000)}s`,
+      );
+      this.handleState("DISCONNECTED");
+>>>>>>> b98a58e (fix(backend): fresh IG auth on every stream reconnect — end CONNECTING/DISCONNECTED flap, restore live candles)
       return;
     }
 
     // A shutdown raced this in-flight auth (stop() ran while we were awaiting
     // the session). NEVER open a new IG connection after shutdown — reconnect
     // stays permanently disabled for the remainder of the process lifetime.
+<<<<<<< HEAD
     if (!this.started || !this.units.has(epic)) return;
 
     this.streams.get(epic)?.disconnect();
@@ -319,16 +363,52 @@ export class RealtimeService {
       unit.decimals, // per-instrument quoting precision (DAX 1 / Gold 2)
     );
     this.streams.set(epic, stream);
+=======
+    if (!this.started) {
+      this.connecting = false;
+      return;
+    }
+
+    // Detach the previous stream BEFORE disconnecting it: its teardown events
+    // (and any in-flight ticks) belong to a dead stream and must not be read
+    // as a NEW outage — that mistake scheduled a reconnect on every teardown
+    // and churned LIVE→DISCONNECTED→CONNECTING even when tokens were healthy.
+    const previous = this.stream;
+    this.stream = null;
+    previous?.disconnect();
+
+    this.currentStreamReachedLive = false;
+    const stream = new IgStreamClient(session, this.epic, {
+      onTick: (tick) => {
+        // Events from a replaced (stale) stream are dropped here — only the
+        // CURRENT stream feeds the aggregators.
+        if (this.stream === stream) this.handleTick(tick);
+      },
+      onState: (state) => {
+        if (this.stream !== stream) return; // stale/teardown event — ignore
+        this.handleState(state);
+      },
+    });
+    this.stream = stream;
+>>>>>>> b98a58e (fix(backend): fresh IG auth on every stream reconnect — end CONNECTING/DISCONNECTED flap, restore live candles)
     try {
       stream.connect();
     } catch {
       // connect() throws synchronously when the session is unusable (e.g. no
       // Lightstreamer endpoint). Swallow it here so the async caller never
       // produces an unhandled rejection that would kill the whole server.
+<<<<<<< HEAD
       this.streams.delete(epic);
       this.setStreamState(epic, "DISCONNECTED");
       this.scheduleReconnect(epic);
+=======
+      this.stream = null;
+      this.connecting = false;
+      this.handleState("DISCONNECTED");
+      return;
+>>>>>>> b98a58e (fix(backend): fresh IG auth on every stream reconnect — end CONNECTING/DISCONNECTED flap, restore live candles)
     }
+    this.connecting = false;
   }
 
   private handleTick(epic: string, tick: IngTick): void {
@@ -440,6 +520,7 @@ export class RealtimeService {
     void this.candleStore.saveClosedCandle(instrument, timeframe, candle);
   }
 
+<<<<<<< HEAD
   private setStreamState(epic: string, state: StreamState): void {
     if (this.streamStates.get(epic) === state) return;
     this.streamStates.set(epic, state);
@@ -452,6 +533,25 @@ export class RealtimeService {
       })`,
     );
     this.broadcastStatus(epic);
+=======
+  private handleState(state: StreamState): void {
+    if (state === "LIVE") {
+      // This stream is healthy: reset the failure backoff and cancel any
+      // pending reconnect timer so a stale timer can never tear it down.
+      this.failedAttempts = 0;
+      this.currentStreamReachedLive = true;
+      this.clearReconnectTimer();
+    } else if (state === "DISCONNECTED") {
+      this.failedAttempts = this.currentStreamReachedLive
+        ? 0 // a healthy session ended (IG kick/maintenance) — reconnect promptly
+        : Math.min(this.failedAttempts + 1, 8); // never-live attempt → back off
+      this.currentStreamReachedLive = false;
+    }
+    this.state = state;
+    this.lastStateChange = Date.now();
+    console.log(`[STREAM] IG state -> ${state} (ticks=${this.ticksReceived}${this.lastTickAt ? `, lastTickAge=${Math.round((Date.now() - this.lastTickAt) / 1000)}s` : ", no ticks yet"})`);
+    this.broadcastStatus();
+>>>>>>> b98a58e (fix(backend): fresh IG auth on every stream reconnect — end CONNECTING/DISCONNECTED flap, restore live candles)
 
     if (state === "DISCONNECTED" && this.started) {
       this.scheduleReconnect(epic);
@@ -465,6 +565,7 @@ export class RealtimeService {
     }
   }
 
+<<<<<<< HEAD
   /** Heartbeat: every alive client is refreshed with ITS OWN instrument status. */
   private heartbeat(): void {
     for (const client of this.clients) if (client.alive) this.sendStatus(client);
@@ -477,6 +578,34 @@ export class RealtimeService {
       void this.connectStream(epic);
     }, STREAM_RECONNECT_DELAY_MS);
     this.reconnectTimers.set(epic, timer);
+=======
+  private nextReconnectDelayMs(): number {
+    return Math.min(
+      STREAM_RECONNECT_DELAY_MS * 2 ** this.failedAttempts,
+      STREAM_RECONNECT_MAX_DELAY_MS,
+    );
+  }
+
+  private scheduleReconnect(): void {
+    if (!this.started || this.reconnectTimer) return;
+    const delay = this.nextReconnectDelayMs();
+    console.log(`[STREAM] reconnect scheduled in ${Math.round(delay / 1000)}s (failedAttempts=${this.failedAttempts})`);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.connectStream();
+    }, delay);
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  private sendCandle(client: WsClient, candle: RealtimeCandle & { type: string; timeframe: string }): void {
+    this.send(client, candle);
+>>>>>>> b98a58e (fix(backend): fresh IG auth on every stream reconnect — end CONNECTING/DISCONNECTED flap, restore live candles)
   }
 
   private sendStatus(client: WsClient): void {

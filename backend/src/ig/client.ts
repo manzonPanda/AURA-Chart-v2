@@ -36,6 +36,9 @@ export class IgClient {
   private lastAuthFailureAt = 0;
 
   private static readonly AUTH_FAILURE_COOLDOWN_MS = 90_000;
+  /** Forced re-logins closer together than this REUSE the brand-new session
+   *  instead (protects IG's login endpoint from reconnect-loop storms). */
+  private static readonly SESSION_REUSE_WINDOW_MS = 15_000;
 
   constructor(private readonly creds: IgCredentials) {}
 
@@ -60,7 +63,17 @@ export class IgClient {
    * if no live session is held yet we authenticate lazily here. No tokens are
    * ever returned to the frontend — this stays entirely backend-internal.
    */
-  async getStreamSession(): Promise<StreamSessionInfo> {
+  async getStreamSession(opts: { forceNew?: boolean } = {}): Promise<StreamSessionInfo> {
+    if (opts.forceNew) {
+      // A Lightstreamer session death INVALIDATES its CST/XST on IG's side, so
+      // a reconnect must never re-present them — the server rejects them
+      // instantly and the relay flaps CONNECTING→DISCONNECTED forever. Drop
+      // the cached session and log in fresh; but reuse a session created
+      // moments ago so a pathological reconnect loop cannot storm the login
+      // endpoint (hard failures stay gated by AUTH_FAILURE_COOLDOWN_MS too).
+      const sessionIsBrandNew = Date.now() - this.lastAuthAt < IgClient.SESSION_REUSE_WINDOW_MS;
+      if (!sessionIsBrandNew) this.invalidateSession();
+    }
     await this.ensureSession();
     // Prefer the endpoint IG returned at login; fall back to the REST gateway
     // host (same authority daisy-chains for some gateways).
