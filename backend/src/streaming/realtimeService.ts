@@ -2,6 +2,7 @@ import { WebSocket } from "ws";
 import type { CandleStore } from "../db/candleStore.js";
 import type { IgClient } from "../ig/client.js";
 import { CandleAggregatorSet } from "./aggregator.js";
+import { ClientSeeders } from "./clientSeed.js";
 import { IgStreamClient } from "./igStream.js";
 import type { ClosedCandle, IngTick, RealtimeCandle, StreamState } from "./types.js";
 import {
@@ -86,6 +87,40 @@ export class RealtimeService {
     return this.state;
   }
 
+  /** Closed-candle listeners — alert-engine hook (any streamed timeframe). */
+  private readonly closedCandleListeners = new Set<(candle: ClosedCandle, timeframe: string) => void>();
+
+  /**
+   * Client-seed hooks — extra first frames for EVERY freshly-added client.
+   * Used by index.ts to seed the current EMA-alert snapshot so a reconnect
+   * (e.g. after a backend restart) immediately restores UI state instead of
+   * waiting for the next closed candle to trigger a broadcast.
+   */
+  private readonly clientSeeders = new ClientSeeders();
+
+  /** Register a hook returning one auxiliary frame to send to new clients. */
+  onClientSeed(seeder: () => Record<string, unknown> | null): void {
+    this.clientSeeders.add(seeder);
+  }
+
+  /**
+   * Register a listener invoked once per COMPLETED candle, immediately after
+   * the WS fanout and persistence attempt. Listeners must never throw into
+   * the tick path — the engine wraps its own work; this call site is
+   * fire-and-forget by contract.
+   */
+  onClosedCandle(listener: (candle: ClosedCandle, timeframe: string) => void): void {
+    this.closedCandleListeners.add(listener);
+  }
+
+  /** Send an auxiliary frame to EVERY alive client regardless of timeframe. */
+  broadcastAuxiliary(payload: unknown): void {
+    for (const client of this.clients) {
+      if (!client.alive) continue;
+      this.send(client, payload);
+    }
+  }
+
   snapshot(): {
     state: StreamState;
     epic: string;
@@ -162,6 +197,11 @@ export class RealtimeService {
     // merge it into the last historical bucket even before the next tick).
     const candle = this.aggregators.getCandleFor(bucketSec);
     if (candle) this.send(client, { type: "candle", timeframe: resolution, ...candle });
+        // Auxiliary seed frames (e.g. the EMA-alert snapshot) — a seeder must
+    // never break the connect path (ClientSeeders already isolates throwers).
+    for (const frame of this.clientSeeders.frames()) {
+      this.sendRaw(ws, frame);
+    }
     console.log(`[WS] client added res=${resolution} (clients=${this.clients.size}, state=${this.state}, ticks=${this.ticksReceived})`);
     return true;
   }
@@ -277,12 +317,21 @@ export class RealtimeService {
               `rawO=${closed.rawOpen ?? "-"} rawH=${closed.rawHigh ?? "-"} rawL=${closed.rawLow ?? "-"} rawC=${closed.rawClose ?? "-"}\n` +
               `lsUpdates=${ls?.updatesReceived ?? "-"} lsNoPrice=${ls?.noPriceUpdates ?? "-"} ticksTotal=${this.ticksReceived} clients=${this.clients.size}`,
           );
-          // COMPLETED candle → Supabase upsert — ONLY for the canonical
+                    // COMPLETED candle → Supabase upsert — ONLY for the canonical
           // persisted timeframe (MINUTE_1). MINUTE_3 is an in-memory overlay
           // and is deliberately NEVER written. Fire-and-forget, idempotent —
           // see persistClosedCandle; never touches the realtime path.
           if (isPersistedTimeframe(timeframe)) {
             this.persistClosedCandle(closed, timeframe);
+          }
+          // EMA alert engine hook — BOTH 1m and 3m closed candles reach the
+          // engine (fire-and-forget); the engine filters by `alertTimeframes`.
+          for (const listener of this.closedCandleListeners) {
+            try {
+              listener(closed, timeframe);
+            } catch {
+              /* a listener must never break the realtime path */
+            }
           }
         }
         console.log(

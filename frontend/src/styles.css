@@ -284,3 +284,67 @@ body {
   .topbar { gap: 0.75rem; }
   .ohlc { gap: 0.75rem; }
 }
+
+/* ── EMA Reversal Alerts ─────────────────────────────────── */
+.ema-alert { position: relative; }
+.ema-alert-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--muted);
+  border-radius: 8px; padding: 6px 10px; font-weight: 600; font-size: 0.78rem; cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s; white-space: nowrap;
+}
+.ema-alert-btn:hover { color: var(--text); }
+.ema-alert-btn.on { color: var(--accent); border-color: rgba(56, 189, 248, 0.5); }
+.ema-alert-btn.off { opacity: 0.75; }
+.ema-alert-btn.pending { color: #ffb74d; border-color: rgba(255, 183, 77, 0.5); }
+.ema-alert-btn.pending .ema-bell { animation: pulse 1.6s ease-in-out infinite; }
+.ema-bell { font-size: 0.9rem; line-height: 1; }
+.ema-badge {
+  font-size: 0.68rem; font-weight: 800; font-variant-numeric: tabular-nums;
+  background: rgba(255, 183, 77, 0.18); color: #ffb74d; border-radius: 999px; padding: 1px 6px;
+}
+.ema-alert-pop {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 45; min-width: 292px; max-width: 340px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55); padding: 10px;
+  display: flex; flex-direction: column; gap: 8px; font-size: 0.78rem;
+}
+.ema-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text); }
+.ema-row input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; margin: 0; }
+.ema-row select, .ema-row input[type="number"] {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 6px; font-size: 0.78rem; max-width: 96px;
+}
+.ema-master { font-weight: 700; }
+.ema-master input[type="checkbox"] { transform: scale(1.2); }
+.ema-dir { justify-content: flex-start; gap: 14px; }
+.ema-dir label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.ema-status {
+  padding: 6px 8px; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--border);
+  color: var(--text); font-weight: 600; font-size: 0.75rem;
+}
+.ema-status.pending { color: #ffb74d; border-color: rgba(255, 183, 77, 0.4); }
+.ema-note { color: var(--muted); font-size: 0.7rem; line-height: 1.45; }
+.ema-session, .ema-push {
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px; background: var(--panel-2);
+  display: flex; flex-direction: column; gap: 3px;
+}
+.ema-session-title { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.ema-session-line { color: var(--text); font-weight: 600; }
+.ema-session-ph { color: var(--muted); font-size: 0.72rem; }
+.ema-open { color: var(--up); font-weight: 700; font-size: 0.72rem; }
+.ema-closed { color: var(--muted); font-size: 0.72rem; }
+.ema-actions { display: flex; gap: 6px; }
+.ema-btn {
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+  border-radius: 6px; padding: 5px 12px; font-size: 0.74rem; font-weight: 600; cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.ema-btn:hover:not(:disabled) { border-color: var(--accent); }
+.ema-btn:disabled { opacity: 0.55; cursor: default; }
+.ema-footnote { color: var(--muted); font-size: 0.66rem; line-height: 1.45; }
+
+@media (max-width: 860px) {
+  .ema-alert-btn { font-size: 0.72rem; padding: 6px 8px; }
+  .ema-alert-pop { right: -8px; min-width: 0; width: 88vw; max-width: 330px; }
+}

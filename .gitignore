@@ -11,6 +11,9 @@ build/
 .env.local
 backend/.env
 
+# EMA alert runtime state (settings + push subscriptions) — VM-local only
+backend/data/
+
 # editor / os
 .vscode/*
 !.vscode/extensions.json

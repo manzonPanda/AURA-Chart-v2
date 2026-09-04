@@ -3,15 +3,21 @@ import type { Server as HttpServer } from "node:http";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { isConfigured, loadConfig } from "./config.js";
 import { CandleStore } from "./db/candleStore.js";
 import { createSupabaseAdmin } from "./db/supabaseClient.js";
+import { EmaAlertEngine } from "./emaAlert/emaAlertEngine.js";
+import { PushService } from "./emaAlert/pushService.js";
+import { EmaAlertSettingsStore } from "./emaAlert/settingsStore.js";
+import { defaultEmaAlertSettings, sanitizeEmaAlertSettings } from "./emaAlert/emaAlertConfig.js";
 import { IgClient } from "./ig/client.js";
 import { installLifecycle } from "./lib/lifecycle.js";
 import { SecretRedactor } from "./lib/redact.js";
 import { createCandlesDbRouter } from "./routes/candlesDb.js";
 import { createCandlesRouter } from "./routes/candles.js";
+import { createEmaAlertRouter } from "./routes/emaAlert.js";
 import { createMarketsRouter } from "./routes/markets.js";
 import { RESOLUTION_BUCKET_SEC, createRealtime, redactEpic } from "./realtime.js";
 
@@ -68,6 +74,43 @@ app.route("/api", createMarketsRouter(ig));
 // REST stays a bootstrap/backfill source only (its 429/403 allowance errors
 // can never affect this endpoint).
 app.route("/api", createCandlesDbRouter(candleStore, config.ig.defaultEpic));
+
+// ── EMA Reversal Alerts (server-side detection + Web Push) ──────────────────
+// Runtime state lives in backend/data/*.json (gitignored) — the database is
+// untouched. The engine is fed EXCLUSIVELY by COMPLETED candles from the
+// realtime service (both 1m and 3m rollovers); the forming candle can never
+// reach the detector. Notification generation is config-driven
+// (`alertTimeframes`) and runs regardless of any browser connection.
+// Runtime state directory: backend/data/ in BOTH layouts —
+//   dev:  backend/src/index.ts → ../data/  → backend/data/
+//   prod: backend/dist/index.js → ../data/ → backend/data/
+// (gitignored; never served; the database is untouched).
+const emaDataDir = fileURLToPath(new URL("../data/", import.meta.url));
+const pushService = new PushService(
+  config.vapid,
+  `${emaDataDir}push-subscriptions.json`,
+);
+const emaSettingsStore = new EmaAlertSettingsStore(`${emaDataDir}ema-alert-settings.json`,
+  config.emaAlertEnabledOnBoot
+    ? sanitizeEmaAlertSettings({ ...defaultEmaAlertSettings(), enabled: true })
+    : null,
+);
+const emaAlertEngine = new EmaAlertEngine({
+  epic: config.ig.defaultEpic,
+  instrumentLabel: "DAX / IG",
+  candleStore,
+  push: pushService,
+  store: emaSettingsStore,
+  broadcast: (msg) => realtime.broadcastAuxiliary(msg),
+});
+realtime.onClosedCandle((candle, timeframe) => {
+  emaAlertEngine.onClosedCandle(candle, timeframe);
+});
+// P1 reconnect seed: every newly-added WS client immediately receives the
+// CURRENT alert snapshot — after a backend restart a reconnecting tab restores
+// its bell state without waiting for the next closed-candle broadcast.
+realtime.onClientSeed(() => ({ type: "emaAlert", state: emaAlertEngine.statusSnapshot() }));
+app.route("/api", createEmaAlertRouter(emaAlertEngine));
 
 // Streaming status. Truthful: mirrors the actual IG Lightstreamer state, not
 // whether a browser socket happens to be open.
@@ -174,3 +217,9 @@ if (isConfigured(config) && config.ig.defaultEpic) {
 } else {
   console.log("  [IG] streaming disabled — configure IG_DAX_EPIC + credentials to stream.");
 }
+
+// EMA alert engine: warms up from persisted 1m candles (if any), then reacts
+// to every COMPLETED candle. Fully self-contained — a warm-up failure must
+// never prevent the chart/stream from running.
+void emaAlertEngine.start();
+

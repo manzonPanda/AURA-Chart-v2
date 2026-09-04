@@ -20,6 +20,7 @@
     "db:tz-verify": "tsx src/scripts/db-tz-verify.ts",
     "gap:test": "tsx src/scripts/gap-test.ts",
     "lifecycle:test": "tsx src/scripts/shutdown-test.ts",
+    "test": "tsx --test src/tests/*.test.ts",
     "backfill": "tsx src/scripts/backfill.ts",
     "backfill:test": "tsx src/scripts/backfill-test.ts",
     "env-summary": "node scripts/env-summary.mjs"
@@ -31,11 +32,14 @@
     "hono": "^4.6.14",
     "lightstreamer-client": "^7.3.2",
     "pg": "^8.13.0",
+    "pinets": "^0.9.33",
+    "web-push": "^3.6.7",
     "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/pg": "^8.11.0",
+    "@types/web-push": "^3.6.4",
     "@types/ws": "^8.18.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",

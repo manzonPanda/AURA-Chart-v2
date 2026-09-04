@@ -311,6 +311,65 @@ Key properties:
 - **No server/DB footprint.** No EMA columns, no EMA tables, no backend
   changes; settings stay in `localStorage` (`aura.ema.settings`).
 
+## EMA Reversal Alerts (server-side)
+
+AURA detects **confirmed EMA 9 / EMA 20 reversals** during the New York
+cash-equity session (09:30–16:00 `America/New_York`, DST-safe via IANA) and
+sends a **Web Push** notification to your phone.
+
+```
+IG LiveStream
+      ↓
+Existing server-side candle aggregation
+      ↓
+Closed 1-minute candle            (the forming candle NEVER reaches the detector)
+      ↓
+Existing PineTS EMA 9/20          backend/src/emaAlert/pineEma.ts (same Pine script)
+      ↓
+EMA Reversal Detector             backend/src/emaAlert/reversalDetector.ts
+      ↓
+EmaAlertPipeline                  + NY session filter + closed-candle confirmation
+                                  + duplicate protection + per-direction cooldown
+      ↓
+Notification Service              backend/src/emaAlert/pushService.ts (VAPID)
+      ↓
+Web Push → Service Worker → phone (frontend/public/sw.js)
+```
+
+Rules:
+
+- **Bullish reversal** = previous closed candle had `EMA 9 <= EMA 20`, a closed
+  candle establishes `EMA 9 > EMA 20`, and the relationship holds for
+  `confirmationCandles` closed candles (default 2; allowed 1–5). Bearish is
+  the exact inverse. A flip before confirmation completes cancels the pending
+  reversal.
+- **Closed candles only.** Confirmation and the final alert are evaluated on
+  CLOSED 1-minute candles (bucket rollover in `RealtimeService`) — intrabar
+  EMA crossovers can never produce an alert.
+- **Duplicate protection.** Each alert belongs to one cross lifecycle; no
+  repeat alerts while the relationship continuously holds, plus a configurable
+  per-direction cooldown (default 30 min).
+- **Session.** Alerts only during 09:30–16:00 America/New_York (Mon–Fri),
+  evaluated with Intl per instant — never a fixed UTC offset. Outside the
+  session the EMA series still updates (chart unaffected), but no notification
+  is generated. PH-time equivalents are display-only.
+- **Settings.** Runtime source of truth is the backend (`GET/POST
+  /api/ema-alert/settings`), persisted to `backend/data/ema-alert-settings.json`
+  (gitignored — no database migration). Changes apply live, no restart.
+  `EMA_ALERT_ENABLED=on` in `backend/.env` seeds the very first run enabled.
+- **Phone delivery.** Web Push (VAPID keys in `backend/.env` via
+  `npx web-push generate-vapid-keys`). The browser only registers/manages its
+  subscription; the Oracle-VM backend is the alert engine. Push requires a
+  secure context — serve the app over HTTPS (see `deploy/nginx-aura.conf`
+  certbot section) or use localhost. Subscriptions live in
+  `backend/data/push-subscriptions.json` (endpoints are never logged).
+- **UI.** The toolbar "EMA Alert" bell shows disabled / enabled / pending
+  states and a settings popover (confirmation, bull/bear toggles, cooldown,
+  session window with its current Manila equivalent). Pending
+  confirmations render as e.g. "1/2" — no arrow glyphs in any user-facing text.
+- **Tests.** `backend/src/tests/*` cover the full state machine, session-DST
+  boundaries, cooldown and disable switches (`npm run test:backend`).
+
 ## Import Pine Script (indicators)
 
 AURA can import **Pine Script v5/v6 chart indicators** and run them through the

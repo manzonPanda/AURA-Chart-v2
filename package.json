@@ -10,6 +10,7 @@
     "dev:frontend": "npm --prefix frontend run dev",
     "typecheck": "npm --prefix backend run typecheck && npm --prefix frontend run typecheck",
     "test": "npm --prefix frontend run test",
+    "test:backend": "npm --prefix backend run test",
     "ig:check": "npm --prefix backend run ig:check",
     "ig:stream-check": "npm --prefix backend run ig:stream-check",
     "ig:ts-check": "npm --prefix backend run ig:ts-check"

@@ -128,6 +128,32 @@ Certbot rewrites the nginx config (443 + HTTP→HTTPS redirect). **No frontend
 change is needed** — `realtime.ts` upgrades to `wss://` by itself as soon as the
 page is served over `https:`.
 
+## 8. EMA Reversal Alerts (Web Push)
+
+The server-side alert engine starts on boot; it needs VAPID keys in
+`backend/.env` to deliver phone notifications:
+
+```bash
+cd /opt/aura/backend
+npx web-push generate-vapid-keys     # prints a VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY pair
+nano .env                            # add the three VAPID_* values (see .env.example)
+```
+
+Runtime state — alert settings, cooldown timestamps, push-subscription
+endpoints — lives in `backend/data/*.json` (gitignored, VM-local). No database
+migration is involved.
+
+Web Push additionally requires a **secure context**:
+- With TLS enabled (section 7) the browser can subscribe over `https:`.
+- On plain HTTP the UI truthfully shows "Push needs HTTPS" and the feature is
+  inert until you enable certbot.
+
+Device flow: open AURA → **EMA Alert** bell → **Enable push** (browser
+permission) → **Send test** to confirm the phone receives it. Alerts only fire
+for confirmed reversals on closed 1-minute candles inside 09:30–16:00
+America/New_York (Mon–Fri); the display also shows the current Manila
+equivalent.
+
 ## Updating a deployed VM
 
 ```bash

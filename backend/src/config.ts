@@ -21,6 +21,14 @@ export interface Config {
     serviceKey: string;
     table: string;
   };
+  /** Web Push (VAPID) — server-side alert delivery. Never logged. */
+  vapid: {
+    publicKey: string;
+    privateKey: string;
+    subject: string;
+  };
+  /** First-run seed for the EMA alert master switch (before any UI change). */
+  emaAlertEnabledOnBoot: boolean;
 }
 
 /**
@@ -53,6 +61,16 @@ export function loadConfig(): Config {
       serviceKey: (process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim(),
       table: (process.env.SUPABASE_CANDLES_TABLE || "ohlc_candles").trim(),
     },
+    // Web Push (VAPID) — generate once via: npx web-push generate-vapid-keys
+    // The private key NEVER reaches the browser or the logs.
+    vapid: {
+      publicKey: (process.env.VAPID_PUBLIC_KEY || "").trim(),
+      privateKey: (process.env.VAPID_PRIVATE_KEY || "").trim(),
+      subject: (process.env.VAPID_SUBJECT || "mailto:aura-alerts@localhost").trim(),
+    },
+    emaAlertEnabledOnBoot: ["on", "true", "1"].includes(
+      (process.env.EMA_ALERT_ENABLED || "").trim().toLowerCase(),
+    ),
   };
 }
 

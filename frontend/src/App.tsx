@@ -27,6 +27,22 @@ import {
 import { useRealtimeStream, resolutionToBucketSec } from "./services/realtime";
 import { iso } from "./services/diagnostics";
 import type { Candle } from "./types/candle";
+import { EmaAlertControl } from "./components/EmaAlert/EmaAlertControl";
+import {
+  DEFAULT_EMA_ALERT_SETTINGS,
+  fetchEmaAlert,
+  saveEmaAlertSettings,
+  sendTestPush,
+  type EmaAlertSettings,
+  type EmaAlertState,
+} from "./services/emaAlertApi";
+import {
+  currentSubscription,
+  disablePush,
+  enablePush,
+  pushAvailability,
+  type PushAvailability,
+} from "./services/pushClient";
 
 /** A LIVE socket whose last real tick is older than this shows as
  *  "CONNECTED · NO TICKS" — a connected Lightstreamer is NOT live data. */
@@ -72,6 +88,15 @@ export default function App() {
   // Session runtime status per imported indicator (never persisted).
   const [pineStatuses, setPineStatuses] = useState<Record<string, PineRunStatus>>({});
   const requestSeq = useRef(0);
+  // EMA Reversal Alerts — server-side detection + Web Push. The backend is the
+  // source of truth (settings + state); the browser only configures + displays.
+  const [emaAlertSettings, setEmaAlertSettings] = useState<EmaAlertSettings | null>(DEFAULT_EMA_ALERT_SETTINGS);
+  const [emaAlertState, setEmaAlertState] = useState<EmaAlertState | null>(null);
+  const [emaAlertSaving, setEmaAlertSaving] = useState(false);
+  const [pushAvail] = useState<PushAvailability>(() => pushAvailability());
+  const [pushSubscribed, setPushSubscribed] = useState(false);
+  const [pushWorking, setPushWorking] = useState(false);
+  const [pushMessage, setPushMessage] = useState<string | null>(null);
 
   // Realtime stream for the SELECTED timeframe (backend /ws relay). Switching
   // the selector drops the socket and re-subscribes with the new `res=` — the
@@ -94,6 +119,101 @@ export default function App() {
   useEffect(() => {
     saveImportedPineIndicators(importedPine);
   }, [importedPine]);
+
+  // ── EMA Reversal Alerts ───────────────────────────────────────────────────
+  // Initial config + state from the backend (the engine is the source of truth).
+  useEffect(() => {
+    let cancelled = false;
+    void fetchEmaAlert()
+      .then((r) => {
+        if (cancelled) return;
+        setEmaAlertSettings(r.settings);
+        setEmaAlertState(r.state);
+      })
+      .catch(() => {
+        /* engine unavailable — keep the defaults, UI shows "connecting" */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Live engine state rides the existing /ws relay (server-side detection).
+  useEffect(() => {
+    if (realtime.emaAlert) setEmaAlertState(realtime.emaAlert);
+  }, [realtime.emaAlert]);
+
+  // Reflect the browser's push-subscription status.
+  useEffect(() => {
+    let cancelled = false;
+    void currentSubscription().then((sub) => {
+      if (!cancelled) setPushSubscribed(Boolean(sub));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [pushWorking]);
+
+  /** Patch alert settings via REST — applied by the RUNNING backend (no restart). */
+  const handleEmaAlertSettingsChange = useCallback((patch: Partial<EmaAlertSettings>) => {
+    setEmaAlertSaving(true);
+    setPushMessage(null);
+    void saveEmaAlertSettings(patch)
+      .then((r) => {
+        setEmaAlertSettings(r.settings);
+        setEmaAlertState(r.state);
+      })
+      .catch((err) => {
+        setPushMessage(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => setEmaAlertSaving(false));
+  }, []);
+
+  const handlePushEnable = useCallback(() => {
+    if (pushAvail !== "supported") return;
+    setPushWorking(true);
+    setPushMessage(null);
+    void enablePush()
+      .then(async (r) => {
+        setPushSubscribed(r.ok);
+        setPushMessage(
+          r.ok ? "Push enabled — phone notifications are live." : `Push unavailable: ${r.reason ?? "unknown error"}`,
+        );
+        if (r.ok) {
+          try {
+            const fresh = await fetchEmaAlert();
+            setEmaAlertState(fresh.state);
+          } catch {
+            /* state refresh is best-effort */
+          }
+        }
+      })
+      .finally(() => setPushWorking(false));
+  }, [pushAvail]);
+
+  const handlePushDisable = useCallback(() => {
+    setPushWorking(true);
+    setPushMessage(null);
+    void disablePush()
+      .then((r) => {
+        if (r.ok) setPushSubscribed(false);
+        setPushMessage(r.ok ? "Push disabled." : `Could not disable push: ${r.reason ?? "unknown error"}`);
+      })
+      .finally(() => setPushWorking(false));
+  }, []);
+
+  const handleTestPush = useCallback(() => {
+    setPushWorking(true);
+    setPushMessage(null);
+    void sendTestPush()
+      .then((r) => {
+        setPushMessage(
+          r.ok ? "Test notification sent to your device." : `Test push failed: ${r.reason ?? "no device registered"}`,
+        );
+      })
+      .catch((err) => setPushMessage(err instanceof Error ? err.message : String(err)))
+      .finally(() => setPushWorking(false));
+  }, []);
 
   /** Compile pipeline for the import modal — runs against the CURRENT chart candles. */
   const handlePineImport = useCallback(
@@ -283,6 +403,22 @@ export default function App() {
               </span>
             );
           })()}
+          {/* EMA Reversal Alerts — server-side detection; this control only
+              configures (REST) + displays state streamed over /ws. */}
+                    <EmaAlertControl
+            state={emaAlertState}
+            settings={emaAlertSettings}
+            timeframe={timeframe}
+            saving={emaAlertSaving}
+            pushAvailability={pushAvail}
+            pushSubscribed={pushSubscribed}
+            pushWorking={pushWorking}
+            pushMessage={pushMessage}
+            onSettingsChange={handleEmaAlertSettingsChange}
+            onPushEnable={handlePushEnable}
+            onPushDisable={handlePushDisable}
+            onTestPush={handleTestPush}
+          />
           <label className="auto-toggle" title="Auto-follow the latest candle; turn off to pan freely">
             <input
               type="checkbox"

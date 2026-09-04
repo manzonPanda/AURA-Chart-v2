@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { diag, logWsCandleFrame } from "./diagnostics";
+import { type EmaAlertStateMsg } from "./emaAlertApi.js";
 
 /** Connection states reported by the BACKEND (mirrors IG Lightstreamer). */
 export type RealtimeStatus = "CONNECTING" | "LIVE" | "RECONNECTING" | "DISCONNECTED";
@@ -36,7 +37,13 @@ export interface RealtimeStream {
   lastTickAt: number;
   /** Most recent forming candle from the backend. */
   candle: RealtimeCandleMsg | null;
+     /** Latest EMA-reversal alert state broadcast (server-side detection). */
+  emaAlert: EmaAlertStateMsg | null;
 }
+
+// Re-export the per-timeframe alert state types from the API module — the WS
+// message shape mirrors the REST state exactly (single source of truth).
+export type { EmaAlertStateMsg, EmaAlertUnitState } from "./emaAlertApi.js";
 
 /** Mirrors the backend RESOLUTION_BUCKET_SEC map (single source of truth is the server). */
 const RESOLUTION_BUCKET_SEC: Record<string, number> = {
@@ -73,6 +80,7 @@ export function useRealtimeStream(
     lastPrice: null,
     lastTickAt: 0,
     candle: null,
+    emaAlert: null,
   });
 
   useEffect(() => {
@@ -131,6 +139,11 @@ export function useRealtimeStream(
               candle: c,
               lastPrice: c.close,
             }));
+          } else if (msg.type === "emaAlert" && "state" in msg) {
+            // Server-side EMA alert state (pending confirmations, confirmed
+            // reversals). Display-only — detection never runs in the browser.
+            const a = msg as { type: "emaAlert"; state: EmaAlertStateMsg };
+            setStream((prev) => ({ ...prev, emaAlert: a.state }));
           }
         } catch {
           /* non-JSON frame — ignore */
