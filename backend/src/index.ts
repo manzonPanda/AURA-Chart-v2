@@ -15,11 +15,18 @@ import { defaultEmaAlertSettings, sanitizeEmaAlertSettings } from "./emaAlert/em
 import { IgClient } from "./ig/client.js";
 import { installLifecycle } from "./lib/lifecycle.js";
 import { SecretRedactor } from "./lib/redact.js";
+import { configuredInstruments } from "./market/instruments.js";
 import { createCandlesDbRouter } from "./routes/candlesDb.js";
 import { createCandlesRouter } from "./routes/candles.js";
 import { createEmaAlertRouter } from "./routes/emaAlert.js";
+import { createInstrumentsRouter } from "./routes/instruments.js";
 import { createMarketsRouter } from "./routes/markets.js";
-import { RESOLUTION_BUCKET_SEC, createRealtime, redactEpic } from "./realtime.js";
+import {
+  RESOLUTION_BUCKET_SEC,
+  createMultiInstrumentRealtime,
+  createRealtime,
+  redactEpic,
+} from "./realtime.js";
 
 const config = loadConfig();
 
@@ -47,8 +54,19 @@ const ig = new IgClient({
   sendEncryptFlag: config.ig.sendEncryptFlag,
 });
 
-/** Shared real-time service: one IG Lightstreamer connection + aggregators. */
-const realtime = createRealtime(ig, config.ig.defaultEpic, candleStore);
+/**
+ * Real-time service: ONE IG Lightstreamer connection PER configured instrument
+ * (DAX + Spot Gold when IG_GOLD_EPIC is set), all sharing the single IG REST
+ * session. Ticks are routed by EPIC before aggregation — each instrument owns
+ * fully independent aggregator state, rollovers, persistence and status.
+ * instruments[0] (DAX) stays the default: snapshot()/closed-candle listeners
+ * (EMA engine — untouched) remain bound to it; Gold is capture-only in Phase 1.
+ */
+const instruments = configuredInstruments(config);
+const realtime =
+  instruments.length > 1
+    ? createMultiInstrumentRealtime(ig, instruments, candleStore)
+    : createRealtime(ig, config.ig.defaultEpic, candleStore);
 
 const app = new Hono();
 
@@ -64,16 +82,21 @@ app.get("/api/health", (c) =>
     ok: true,
     configured: isConfigured(config),
     instrumentConfigured: Boolean(config.ig.defaultEpic),
+    // Multi-instrument (Phase 1): the configured set with its metadata.
+    instruments: instruments.map((i) => ({ epic: i.epic, label: i.label, decimals: i.decimals })),
     environment: config.ig.baseUrl.includes("demo") ? "demo" : "live",
   }),
 );
 
-app.route("/api", createCandlesRouter(ig, config.ig.defaultEpic));
+app.route("/api", createCandlesRouter(ig, instruments));
+// Instrument registry — the frontend's source of truth for the selector.
+app.route("/api", createInstrumentsRouter(instruments, config.ig.defaultEpic));
 app.route("/api", createMarketsRouter(ig));
 // Chart history from OUR persistence — frontend's normal history source; IG
 // REST stays a bootstrap/backfill source only (its 429/403 allowance errors
-// can never affect this endpoint).
-app.route("/api", createCandlesDbRouter(candleStore, config.ig.defaultEpic));
+// can never affect this endpoint). Instrument-aware: ?epic= validated against
+// the configured set; omitted → DAX default.
+app.route("/api", createCandlesDbRouter(candleStore, instruments));
 
 // ── EMA Reversal Alerts (server-side detection + Web Push) ──────────────────
 // Runtime state lives in backend/data/*.json (gitignored) — the database is
@@ -127,6 +150,9 @@ const port = config.port;
 const server = serve({ fetch: app.fetch, port, hostname: config.host }, (info) => {
   console.log(`\n  IG chart API ready      ->  http://localhost:${info.port}/api/health`);
   console.log(`  realtime stream ws      ->  ws://localhost:${info.port}/ws`);
+  console.log(
+    `  instruments             ->  ${instruments.map((i) => `${i.label} (${i.epic}, ${i.decimals}dp)`).join(" + ")}`,
+  );
   console.log(`  environment             ->  ${config.ig.baseUrl.includes("demo") ? "demo" : "live"}`);
   if (!isConfigured(config)) {
     console.log("  credentials             ->  MISSING (see backend/.env)");

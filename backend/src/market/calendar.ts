@@ -62,26 +62,101 @@ export const IG_GERMANY_40: MarketCalendar = {
   closedDates: CLOSED_DATES_2025_2026,
 };
 
-// ── Wall-clock conversion (Intl-based, DST-safe) ────────────────────────────
+// ── Gold (Spot) ──────────────────────────────────────────────────────────────
+// IG "Spot Gold (SGD1 Contract)" — CS.D.CFIGOLD.CFI.IP. IG's gold CFD follows
+// the CME Globex precious-metals schedule quoted in UK wall-clock time:
+// Sunday open 23:00, Friday close 22:00, with a DAILY 1-hour break
+// 22:00–23:00. US and UK DST shift together, so these wall-clock windows hold
+// year-round (no dead-zone months).
+//
+// VERIFICATION STATUS (Phase 0, 2026-09-04):
+//   - EPIC + name + currency + precision confirmed against the LIVE account
+//     via GET /markets/{epic} (npm run ig:market-check): "Spot Gold (SGD1
+//     Contract)", SGD, 2-decimal quoting (bid 4467.47 / offer 4467.97).
+//   - IG's REST served openingHours=null on this gateway (v1 and v3) and the
+//     public market pages render client-side, so the WINDOW DATA below is the
+//     Globex-aligned IG schedule, cross-checked empirically: the market was
+//     live-quoting during a London window this seed marks OPEN.
+//   - The gap detector's failure mode for an unmodelled closure is a flagged
+//     "missing" bucket (conservative noise, never data corruption), and this
+//     seed is pure DATA — refine it here (no detector changes) as IG's hours
+//     are confirmed across weekends/breaks.
+const GOLD_DAY_WINDOWS: readonly MarketWindow[] = [
+  { openMin: 0, closeMin: 22 * 60 }, // 00:00–22:00 UK (until the daily break)
+];
+const GOLD_SUNDAY_WINDOWS: readonly MarketWindow[] = [
+  { openMin: 23 * 60, closeMin: 24 * 60 }, // 23:00–24:00 UK (Globex week open)
+];
 
-const dateFmt = new Intl.DateTimeFormat("en-GB", {
-  timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit",
-  hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-});
-const weekdayFmt = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", weekday: "short" });
-const WEEKDAY_INDEX: Record<string, number> = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
+/**
+ * Full closures for Gold (CME Globex precious metals — NO trading). Unlike the
+ * DAX list, German-only holidays (May 1 / Oct 3) are NOT gold closures, and
+ * Easter Monday is a normal Globex day. Deliberately EXCLUDES shortened
+ * sessions (Christmas Eve, Boxing Day, US Thanksgiving): Globex still trades
+ * part of those days, so flagging a collector outage there is the safer
+ * direction — mirrors the DAX half-day policy. Seed covers 2025–2027.
+ */
+const GOLD_CLOSED_DATES_2025_2027: readonly string[] = [
+  "2025-01-01", "2025-04-18", "2025-12-25",
+  "2026-01-01", "2026-04-03", "2026-12-25",
+  "2027-01-01", "2027-03-26",
+];
 
-export interface LondonParts {
-  /** 'YYYY-MM-DD' in Europe/London. */
+/** IG Spot Gold CFD calendar (gap detector for CS.D.CFIGOLD.CFI.IP). */
+export const IG_SPOT_GOLD: MarketCalendar = {
+  id: "ig-spot-gold",
+  label: "IG Spot Gold (SGD) CFD",
+  timezone: "Europe/London",
+  windowsByWeekday: {
+    1: GOLD_DAY_WINDOWS,
+    2: GOLD_DAY_WINDOWS,
+    3: GOLD_DAY_WINDOWS,
+    4: GOLD_DAY_WINDOWS,
+    5: GOLD_DAY_WINDOWS,
+    6: [],
+    7: GOLD_SUNDAY_WINDOWS,
+  },
+  closedDates: GOLD_CLOSED_DATES_2025_2027,
+};
+
+// ── Wall-clock conversion (Intl-based, DST-safe, per-timezone) ───────────────
+
+export interface ZoneParts {
+  /** 'YYYY-MM-DD' in `timezone`. */
   date: string;
   /** ISO weekday 1=Mon … 7=Sun. */
   weekday: number;
-  /** Minutes since London midnight. */
+  /** Minutes since `timezone` midnight. */
   minutes: number;
 }
 
-/** London wall-clock parts for an epoch-ms instant. */
-export function londonParts(ms: number): LondonParts {
+/** Historic name kept for BC — London is simply the DAX calendar's zone. */
+export type LondonParts = ZoneParts;
+
+/** Cached per-zone formatters — isBucketExpected is hot on gap scans. */
+const zoneFmtCache = new Map<string, { date: Intl.DateTimeFormat; weekday: Intl.DateTimeFormat }>();
+
+function zoneFormatters(timezone: string): { date: Intl.DateTimeFormat; weekday: Intl.DateTimeFormat } {
+  let fmts = zoneFmtCache.get(timezone);
+  if (!fmts) {
+    fmts = {
+      date: new Intl.DateTimeFormat("en-GB", {
+        timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+      }),
+      weekday: new Intl.DateTimeFormat("en-GB", { timeZone: timezone, weekday: "short" }),
+    };
+    zoneFmtCache.set(timezone, fmts);
+  }
+  return fmts;
+}
+
+const WEEKDAY_INDEX: Record<string, number> = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
+
+/** Wall-clock parts of an epoch-ms instant in the given IANA zone (DST-safe
+ *  by construction: the IANA database resolves every conversion per instant). */
+export function zoneParts(ms: number, timezone: string): ZoneParts {
+  const { date: dateFmt, weekday: weekdayFmt } = zoneFormatters(timezone);
   const parts = dateFmt.formatToParts(new Date(ms));
   const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? "";
   const wd = weekdayFmt.format(new Date(ms)).slice(0, 3);
@@ -92,7 +167,12 @@ export function londonParts(ms: number): LondonParts {
   };
 }
 
-const inAnyWindow = (parts: LondonParts, cal: MarketCalendar): boolean => {
+/** London wall-clock parts for an epoch-ms instant (BC — DAX calendar zone). */
+export function londonParts(ms: number): LondonParts {
+  return zoneParts(ms, "Europe/London");
+}
+
+const inAnyWindow = (parts: ZoneParts, cal: MarketCalendar): boolean => {
   if (cal.closedDates.includes(parts.date)) return false;
   return (cal.windowsByWeekday[parts.weekday] ?? []).some(
     (w) => parts.minutes >= w.openMin && parts.minutes < w.closeMin,
@@ -100,21 +180,34 @@ const inAnyWindow = (parts: LondonParts, cal: MarketCalendar): boolean => {
 };
 
 /**
- * True when the timeframe bucket starting at `bucketSec` overlaps any trading
- * window: a bucket is expected if its START or its LAST instant falls inside a
- * window of a non-closed trading day. This naturally admits the bucket that
- * contains a mid-grid session open (e.g. 01:10 London opens inside the
- * 01:09–01:12 3m bucket) and rejects everything inside the daily break,
- * weekends and holidays. All instants are UTC epoch; conversion is display-only.
- * The bucket width is taken from the given start instant (parameterized per
- * timeframe — the canonical persisted frame is 1m, so 180 is never hardcoded).
+ * True when the timeframe bucket starting at `bucketStartSec` with width
+ * `bucketWidthSec` overlaps any trading window of `cal`'s OWN timezone: a
+ * bucket is expected if its START or its LAST instant falls inside a window of
+ * a non-closed trading day. This naturally admits the bucket that contains a
+ * mid-grid session open (e.g. DAX 01:10 London opens inside the 01:09–01:12
+ * 3m bucket) and rejects everything inside daily breaks, weekends and
+ * holidays. All instants are UTC epoch; conversion is per-calendar-zone
+ * (instrument-aware — DAX and Gold calendars can quote in different zones)
+ * and display-only.
+ *
+ * WIDTH IS EXPLICIT (Phase 0 bug fix): the previous signature used its single
+ * parameter as BOTH the bucket start AND the width, so the "last instant"
+ * computed to start + start — an epoch doubling that checked a phantom bucket
+ * decades in the future (e.g. Saturday 07:00 UTC evaluated "Monday 14:00",
+ * inside a DAX window) and could classify weekend/break buckets as expected.
+ * Callers on a grid (`detectGaps`, the backfill planner) pass their grid
+ * width; the 60 s default matches the canonical persisted 1m frame.
  */
-export function isBucketExpected(bucketSec: number, cal: MarketCalendar): boolean {
-  const startMs = bucketSec * 1000;
-  const start = londonParts(startMs);
-  // Last instant of the bucket (start + bucketSec − 1 ms) so a window opening
+export function isBucketExpected(
+  bucketStartSec: number,
+  cal: MarketCalendar,
+  bucketWidthSec: number = 60,
+): boolean {
+  const startMs = bucketStartSec * 1000;
+  const start = zoneParts(startMs, cal.timezone);
+  // Last instant of the bucket (start + width − 1 ms) so a window opening
   // INSIDE the bucket still counts as expected.
-  const last = londonParts(startMs + bucketSec * 1000 - 1);
+  const last = zoneParts(startMs + Math.max(1, Math.round(bucketWidthSec)) * 1000 - 1, cal.timezone);
   if (cal.closedDates.includes(start.date) || cal.closedDates.includes(last.date)) return false;
   return inAnyWindow(start, cal) || inAnyWindow(last, cal);
 }

@@ -4,16 +4,17 @@ import type { Candle, CandlesResponse } from "../types/candle";
  * Talks ONLY to our Hono backend (`/api/...`, proxied by Vite). The browser
  * never contacts IG directly and never holds IG credentials.
  */
-const API_BASE = "/api";
+export const API_BASE = "/api";
 
 export class ApiError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly code: string,
-    message: string,
-  ) {
+  readonly status: number;
+  readonly code: string;
+
+  constructor(status: number, code: string, message: string) {
     super(message);
     this.name = "ApiError";
+    this.status = status;
+    this.code = code;
   }
 }
 
@@ -69,6 +70,10 @@ interface DbCandlesResponse {
  * allowance errors cannot affect chart history. `fetchCandles` (IG REST) is
  * kept for a future bootstrap/backfill role only.
  *
+ * Phase 3: `epic` selects the instrument (validated server-side against
+ * GET /api/instruments). Omitted → the backend default (DAX — historic
+ * behavior).
+ *
  * Returns candles ASCENDING with `ts` = bucket start in epoch ms — the exact
  * same time base as the realtime WS frames, so the live candle merges into /
  * appends after the newest persisted bucket with no duplicates.
@@ -76,8 +81,10 @@ interface DbCandlesResponse {
 export async function fetchCandlesDb(
   timeframe: string,
   limit = 500,
+  epic?: string,
 ): Promise<{ epic: string; candles: Candle[] }> {
   const qs = new URLSearchParams({ timeframe, limit: String(limit) });
+  if (epic) qs.set("epic", epic);
   const res = await fetch(`${API_BASE}/candles/db?${qs.toString()}`);
 
   if (!res.ok) {

@@ -1,45 +1,20 @@
 import { useEffect, useState } from "react";
 import { diag, logWsCandleFrame } from "./diagnostics";
 import { type EmaAlertStateMsg } from "./emaAlertApi.js";
+import {
+  buildRealtimeWsUrl,
+  initialStream,
+  isFrameForInstrument,
+  type RealtimeCandleMsg,
+  type RealtimeStatus,
+  type RealtimeStatusMsg,
+  type RealtimeStream,
+} from "./realtimeCore.js";
 
-/** Connection states reported by the BACKEND (mirrors IG Lightstreamer). */
-export type RealtimeStatus = "CONNECTING" | "LIVE" | "RECONNECTING" | "DISCONNECTED";
-
-export interface RealtimeStatusMsg {
-  type: "status";
-  status: RealtimeStatus;
-  ticks: number;
-  price: number | null;
-  /** Server-clock epoch ms of the last REAL IG tick (0 = none ever). */
-  lastTickAt?: number;
-}
-
-/** A candle update pushed by the server. `time` is the bucket start (epoch SECONDS). */
-export interface RealtimeCandleMsg {
-  type: "candle";
-  timeframe: string;
-  time: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume?: number;
-}
-
-export interface RealtimeStream {
-  /** Truthful IG stream state (never guessed from the socket being open). */
-  status: RealtimeStatus;
-  ticks: number;
-  lastPrice: number | null;
-  /** Server-clock epoch ms of the last REAL IG tick (0 = none ever).
-   *  `LIVE` alone means "Lightstreamer connected" — check this to know whether
-   *  ticks are actually flowing (drives the CONNECTED · NO TICKS display). */
-  lastTickAt: number;
-  /** Most recent forming candle from the backend. */
-  candle: RealtimeCandleMsg | null;
-     /** Latest EMA-reversal alert state broadcast (server-side detection). */
-  emaAlert: EmaAlertStateMsg | null;
-}
+// Stream types + pure primitives live in realtimeCore.ts (framework-free —
+// unit-testable without importing React); re-exported here for BC.
+export type { RealtimeStatus, RealtimeStatusMsg, RealtimeCandleMsg, RealtimeStream };
+export { buildRealtimeWsUrl, initialStream, isFrameForInstrument };
 
 // Re-export the per-timeframe alert state types from the API module — the WS
 // message shape mirrors the REST state exactly (single source of truth).
@@ -74,17 +49,17 @@ export function useRealtimeStream(
   epic: string | undefined,
   epoch: number,
 ): RealtimeStream {
-  const [stream, setStream] = useState<RealtimeStream>({
-    status: "DISCONNECTED",
-    ticks: 0,
-    lastPrice: null,
-    lastTickAt: 0,
-    candle: null,
-    emaAlert: null,
-  });
+  const [stream, setStream] = useState<RealtimeStream>(() => initialStream());
 
   useEffect(() => {
     if (!resolution) return;
+
+    // CLEAN INSTRUMENT BOUNDARY (Phase 3): every (re)subscription — instrument
+    // switch, timeframe change, manual refresh, tab-resync — starts from a
+    // BLANK stream. The previous instrument's forming candle, tick counter and
+    // last-tick age can never leak into the new selection; the backend re-seeds
+    // the forming candle + alert snapshot on the new socket.
+    setStream(initialStream("CONNECTING"));
 
     let socket: WebSocket | null = null;
     let cancelled = false;
@@ -93,10 +68,7 @@ export function useRealtimeStream(
 
     const connect = () => {
       if (cancelled) return;
-      const scheme = window.location.protocol === "https:" ? "wss" : "ws";
-      const params = new URLSearchParams({ res: resolution });
-      if (epic) params.set("epic", epic);
-      const url = `${scheme}://${window.location.host}/ws?${params.toString()}`;
+      const url = buildRealtimeWsUrl(resolution, epic);
 
       setStream((prev) => ({ ...prev, status: attempts > 0 ? "RECONNECTING" : "CONNECTING" }));
 
@@ -110,6 +82,14 @@ export function useRealtimeStream(
             | RealtimeStatusMsg
             | RealtimeCandleMsg
             | { type: string };
+          // STALE-FRAME GUARD (Phase 3): frames carry their instrument's epic;
+          // frames for a DIFFERENT instrument are dropped before any state
+          // update — realtime data can never mix across instruments.
+          const frameEpic = (msg as { epic?: string }).epic;
+          if (!isFrameForInstrument(frameEpic, epic ?? "")) {
+            console.info(`[WS] dropped frame for different instrument epic=${frameEpic ?? "(none)"}`);
+            return;
+          }
           diag.wsFramesReceived += 1;
           if (msg.type === "status" && "status" in msg) {
             diag.wsStatusFrames += 1;

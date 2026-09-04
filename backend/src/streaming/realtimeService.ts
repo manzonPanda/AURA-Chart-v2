@@ -1,10 +1,17 @@
 import { WebSocket } from "ws";
 import type { CandleStore } from "../db/candleStore.js";
 import type { IgClient } from "../ig/client.js";
-import { CandleAggregatorSet } from "./aggregator.js";
+import { instrumentMetaFor, type InstrumentMeta } from "../market/instruments.js";
 import { ClientSeeders } from "./clientSeed.js";
 import { IgStreamClient } from "./igStream.js";
-import type { ClosedCandle, IngTick, RealtimeCandle, StreamState } from "./types.js";
+import {
+  clientWantsCandle,
+  createInstrumentUnit,
+  persistenceInstrumentFor,
+  processInstrumentTick,
+  type InstrumentUnit,
+} from "./instrumentPipeline.js";
+import type { ClosedCandle, IngTick, StreamState } from "./types.js";
 import {
   TIMEFRAME_BUCKET_SEC as RESOLUTION_BUCKET_SEC,
   STREAM_TIME_FRAMES,
@@ -24,7 +31,7 @@ export { RESOLUTION_BUCKET_SEC, STREAM_TIME_FRAMES };
 /** "HH:MM:SS.mmm" (UTC) — shared by the temporary candle diagnostics below. */
 const fmtMs = (ms: number): string => new Date(ms).toISOString().slice(11, 23);
 
-/** A connected frontend browser socket, bound to one timeframe. */
+/** A connected frontend browser socket, bound to one instrument+timeframe. */
 interface WsClient {
   ws: WebSocket;
   epic: string;
@@ -44,47 +51,65 @@ const STREAM_RECONNECT_DELAY_MS = 5_000;
 const STATUS_HEARTBEAT_MS = 30_000;
 
 /**
- * Owns the single IG Lightstreamer connection, fans every tick into a set of
- * candle aggregators (one per timeframe), and pushes the resulting candle
- * updates to the WS clients currently subscribed to that timeframe. Also
- * streams truthful status events so the UI never fakes "LIVE" from the socket
- * alone.
+ * Owns ONE Lightstreamer connection PER configured instrument (all sharing the
+ * single IgClient REST session), routes every tick to EXACTLY ONE per-
+ * instrument InstrumentUnit (own CandleAggregatorSet, forming candles, tick
+ * counter, last price, rollover tracking, persistence and diagnostics — see
+ * instrumentPipeline.ts), and pushes candle/status frames tagged with `epic`
+ * to the WS clients subscribed to that instrument.
+ *
+ * Phase 1 contract (DAX + Spot Gold, capture-only Gold):
+ *   - instruments[0] (the constructor epic, DAX) stays the DEFAULT: it keeps
+ *     the historic snapshot()/stateNow() semantics and is the ONLY instrument
+ *     whose closed candles reach onClosedCandle listeners (the EMA alert
+ *     engine — untouched). Gold closes are persisted + relayed but NEVER feed
+ *     the DAX EMA state.
+ *   - Unregistered EPICs keep the exact historic 1-decimal behavior via the
+ *     registry's conservative fallback.
  */
 export class RealtimeService {
-  private stream: IgStreamClient | null = null;
-  private aggregators: CandleAggregatorSet;
+  /** Per-instrument state — NEVER shared across EPICs. Keyed by raw EPIC. */
+  private readonly units = new Map<string, InstrumentUnit>();
+  /** One Lightstreamer connection per instrument (shared IG session). */
+  private readonly streams = new Map<string, IgStreamClient>();
+  /** Per-instrument truthful IG connection state. */
+  private readonly streamStates = new Map<string, StreamState>();
+  private readonly lastStateChangeMs = new Map<string, number>();
+  private readonly reconnectTimers = new Map<string, NodeJS.Timeout>();
   private readonly clients = new Set<WsClient>();
-  private state: StreamState = "DISCONNECTED";
-  private lastStateChange = 0;
-  private ticksReceived = 0;
-  private lastPrice: number | null = null;
-  /** Arrival time (server clock) of the last REAL IG tick — 0 = none ever. */
-  private lastTickAt = 0;
-  /** Previous bucket PER TIMEFRAME, for rollover diagnostics. */
-  private readonly lastBucketSec = new Map<string, number>();
-  /** One-shot flag per timeframe: log how the first forming candle was
-   *  anchored at stream start. */
-  private readonly loggedFirstAnchor = new Set<string>();
-  private reconnectTimer: NodeJS.Timeout | null = null;
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private started = false;
+  /** The constructor epic — snapshot()/stateNow()/closed-candle listeners. */
+  private readonly defaultEpic: string;
 
   constructor(
     private readonly ig: IgClient,
-    private readonly epic: string,
+    epic: string,
     /** Optional completed-candle persistence — null disables DB writes. */
     private readonly candleStore: CandleStore | null = null,
   ) {
-    this.aggregators = new CandleAggregatorSet(
-      Object.entries(RESOLUTION_BUCKET_SEC).map(([timeframe, bucketSec]) => ({
-        timeframe,
-        bucketSec,
-      })),
-    );
+    const meta = instrumentMetaFor(epic);
+    this.units.set(meta.epic, createInstrumentUnit(meta.epic, meta.label, meta.decimals));
+    this.defaultEpic = meta.epic;
   }
 
+  /**
+   * Register an ADDITIONAL instrument (Phase 1: Spot Gold). MUST be called
+   * before start(). The default instrument (constructor epic) is unchanged:
+   * DAX keeps its identity, precision, calendar and its exclusive closed-
+   * candle listener feed; the added instrument is capture-only (aggregate →
+   * persist → relay) until the EMA engine becomes multi-instrument-aware.
+   */
+  addInstrument(meta: InstrumentMeta): void {
+    if (this.started) throw new Error("addInstrument() must be called before start()");
+    const key = meta.epic.trim();
+    if (!key || this.units.has(key)) return;
+    this.units.set(key, createInstrumentUnit(key, meta.label, meta.decimals));
+  }
+
+  /** Historic single-instrument state — now the DEFAULT instrument's (DAX). */
   get stateNow(): StreamState {
-    return this.state;
+    return this.streamStates.get(this.defaultEpic) ?? "DISCONNECTED";
   }
 
   /** Closed-candle listeners — alert-engine hook (any streamed timeframe). */
@@ -131,42 +156,76 @@ export class RealtimeService {
     lastPrice: number | null;
     lastTickAt: number;
     lastTickAgeMs: number | null;
+    /** Per-instrument status (additive, Phase 1) — [0] is the default. */
+    instruments: Array<{
+      epic: string;
+      label: string;
+      decimals: number;
+      state: StreamState;
+      ticks: number;
+      lastPrice: number | null;
+      lastTickAt: number;
+      lastTickAgeMs: number | null;
+    }>;
   } {
+    const unit = this.units.get(this.defaultEpic);
     return {
-      state: this.state,
-      epic: this.epic,
+      state: this.streamStates.get(this.defaultEpic) ?? "DISCONNECTED",
+      epic: this.defaultEpic,
       resolution: "",
       bucketSec: 0,
       timeframes: STREAM_TIME_FRAMES,
-      ticks: this.ticksReceived,
-      lastPrice: this.lastPrice,
-      lastTickAt: this.lastTickAt,
-      lastTickAgeMs: this.lastTickAt > 0 ? Date.now() - this.lastTickAt : null,
+      ticks: unit?.ticksReceived ?? 0,
+      lastPrice: unit?.lastPrice ?? null,
+      lastTickAt: unit?.lastTickAt ?? 0,
+      lastTickAgeMs: unit && unit.lastTickAt > 0 ? Date.now() - unit.lastTickAt : null,
+      instruments: this.instrumentStatuses(),
     };
   }
 
-  /** Start the IG subscription. Idempotent. */
+  /** Truthful per-instrument status — the additive multi-instrument view. */
+  private instrumentStatuses(): Array<{
+    epic: string;
+    label: string;
+    decimals: number;
+    state: StreamState;
+    ticks: number;
+    lastPrice: number | null;
+    lastTickAt: number;
+    lastTickAgeMs: number | null;
+  }> {
+    return [...this.units.values()].map((unit) => ({
+      epic: unit.epic,
+      label: unit.label,
+      decimals: unit.decimals,
+      state: this.streamStates.get(unit.epic) ?? "DISCONNECTED",
+      ticks: unit.ticksReceived,
+      lastPrice: unit.lastPrice,
+      lastTickAt: unit.lastTickAt,
+      lastTickAgeMs: unit.lastTickAt > 0 ? Date.now() - unit.lastTickAt : null,
+    }));
+  }
+
+  /** Start one IG subscription PER instrument. Idempotent. */
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
     if (!this.heartbeatTimer) {
-      this.heartbeatTimer = setInterval(() => this.broadcastStatus(), STATUS_HEARTBEAT_MS);
+      this.heartbeatTimer = setInterval(() => this.heartbeat(), STATUS_HEARTBEAT_MS);
     }
-    await this.connectStream();
+    await Promise.all([...this.units.keys()].map((epic) => this.connectStream(epic)));
   }
 
   stop(): void {
     this.started = false;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
+    for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
+    this.reconnectTimers.clear();
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
-    this.stream?.disconnect();
-    this.stream = null;
+    for (const stream of this.streams.values()) stream.disconnect();
+    this.streams.clear();
   }
 
   /**
@@ -175,16 +234,19 @@ export class RealtimeService {
    * ONLY by the crash-path log redactor; never logged directly.
    */
   redactables(): Array<string | undefined> {
-    return [...this.ig.redactables(), ...(this.stream?.redactables() ?? [])];
+    return [
+      ...this.ig.redactables(),
+      ...[...this.streams.values()].flatMap((stream) => stream.redactables()),
+    ];
   }
 
   /** Register a browser WS client for a given timeframe and send its first frame. */
   addClient(ws: WebSocket, epic: string, resolution: string): boolean {
-    if (this.epic && epic !== this.epic) {
+    if (!this.units.has(epic)) {
       this.sendRaw(ws, {
         type: "error",
         code: "EPIC_MISMATCH",
-        error: `The streaming service is bound to ${this.epic}; requested ${epic} is not available on this connection.`,
+        error: `The streaming service is bound to [${[...this.units.keys()].join(", ")}]; requested ${epic} is not available on this connection.`,
       });
       return false;
     }
@@ -195,14 +257,16 @@ export class RealtimeService {
     // Seed the freshly-connected client with the CURRENT forming candle for its
     // timeframe so the historical↔live handoff is seamless (the client can
     // merge it into the last historical bucket even before the next tick).
-    const candle = this.aggregators.getCandleFor(bucketSec);
-    if (candle) this.send(client, { type: "candle", timeframe: resolution, ...candle });
+    const candle = this.units.get(epic)!.aggregators.getCandleFor(bucketSec);
+    if (candle) this.send(client, { type: "candle", epic, timeframe: resolution, ...candle });
         // Auxiliary seed frames (e.g. the EMA-alert snapshot) — a seeder must
     // never break the connect path (ClientSeeders already isolates throwers).
     for (const frame of this.clientSeeders.frames()) {
       this.sendRaw(ws, frame);
     }
-    console.log(`[WS] client added res=${resolution} (clients=${this.clients.size}, state=${this.state}, ticks=${this.ticksReceived})`);
+    console.log(
+      `[WS] client added res=${resolution} epic=${epic} (clients=${this.clients.size}, state=${this.streamStates.get(epic) ?? "DISCONNECTED"}, ticks=${this.units.get(epic)!.ticksReceived})`,
+    );
     return true;
   }
 
@@ -224,108 +288,120 @@ export class RealtimeService {
     }
   }
 
-  private async connectStream(): Promise<void> {
+  private async connectStream(epic: string): Promise<void> {
     let session;
     try {
-      // Re-uses the existing IG auth (incl. the 90s failure cooldown).
+      // Re-uses the existing IG auth (incl. the 90s failure cooldown). BOTH
+      // instruments share ONE IgClient → token expiry re-auths exactly once
+      // and both streams re-sync from the refreshed session.
       session = await this.ig.getStreamSession();
-    } catch (err) {
-      this.handleState("DISCONNECTED");
-      this.scheduleReconnect();
+    } catch {
+      this.setStreamState(epic, "DISCONNECTED");
+      this.scheduleReconnect(epic);
       return;
     }
 
     // A shutdown raced this in-flight auth (stop() ran while we were awaiting
     // the session). NEVER open a new IG connection after shutdown — reconnect
     // stays permanently disabled for the remainder of the process lifetime.
-    if (!this.started) return;
+    if (!this.started || !this.units.has(epic)) return;
 
-    if (this.stream) this.stream.disconnect();
+    this.streams.get(epic)?.disconnect();
 
-    this.stream = new IgStreamClient(session, this.epic, {
-      onTick: (tick) => this.handleTick(tick),
-      onState: (state) => this.handleState(state),
-    });
+    const unit = this.units.get(epic)!;
+    const stream = new IgStreamClient(
+      session,
+      epic,
+      {
+        onTick: (tick) => this.handleTick(epic, tick),
+        onState: (state) => this.setStreamState(epic, state),
+      },
+      unit.decimals, // per-instrument quoting precision (DAX 1 / Gold 2)
+    );
+    this.streams.set(epic, stream);
     try {
-      this.stream.connect();
+      stream.connect();
     } catch {
       // connect() throws synchronously when the session is unusable (e.g. no
       // Lightstreamer endpoint). Swallow it here so the async caller never
       // produces an unhandled rejection that would kill the whole server.
-      this.stream = null;
-      this.handleState("DISCONNECTED");
-      this.scheduleReconnect();
+      this.streams.delete(epic);
+      this.setStreamState(epic, "DISCONNECTED");
+      this.scheduleReconnect(epic);
     }
   }
 
-  private handleTick(tick: IngTick): void {
-    this.ticksReceived += 1;
-    this.lastPrice = tick.price;
-    this.lastTickAt = Date.now();
-    this.aggregators.onTick(tick);
+  private handleTick(epic: string, tick: IngTick): void {
+    // EPIC routing happens HERE — before ANY aggregation state is touched.
+    // A tick for EPIC X can only ever reach X's InstrumentUnit (its own
+    // aggregators, forming candle, counters, rollover and persistence).
+    const unit = this.units.get(epic);
+    if (!unit) return;
+    const results = processInstrumentTick(unit, tick);
 
     const sec = (s: number) => new Date(s * 1000).toISOString();
+    const instrumentTag = unit.label.split(" /")[0] || epic; // "DAX" | "Spot Gold"
 
     // One pass per timeframe. Every IG tick fans out to BOTH the canonical 1m
     // aggregator (closed candles are persisted) and the in-memory 3m overlay
-    // (never persisted — formed purely for the live WS forming-candle UX).
-    for (const [timeframe, bucketSec] of Object.entries(RESOLUTION_BUCKET_SEC)) {
-      const candle = this.aggregators.getCandleFor(bucketSec);
+    // (never persisted — formed purely for the live WS forming-candle UX) —
+    // ALWAYS within THIS tick's own instrument unit.
+    for (const result of results) {
+      const { timeframe, bucketSec, forming: candle, closed, firstAnchor } = result;
       if (!candle) continue;
 
       const tag = timeframeLabel(timeframe).toUpperCase(); // "1M" | "3M"
-      const prevBucket = this.lastBucketSec.get(timeframe) ?? 0;
 
       // TEMPORARY: one-shot anchor report for the FIRST bucket of this stream,
-      // per timeframe. If the backend started mid-bucket, our open is the first
-      // RECEIVED tick and will NOT match IG's bucket-boundary open.
-      if (!this.loggedFirstAnchor.has(timeframe)) {
-        const stats = this.aggregators.getCurrentStatsFor(bucketSec);
-        if (stats && stats.firstTickMs > 0) {
-          this.loggedFirstAnchor.add(timeframe);
-          const delta = stats.firstTickMs - candle.time * 1000;
-          console.log(
-            `[${tag} CANDLE SESSION-START]\n` +
-              `bucket=${fmtMs(candle.time * 1000).slice(0, 8)}\n` +
-              `firstTick=${fmtMs(stats.firstTickMs)}\n` +
-              `firstTickDeltaMs=${delta}\n` +
-              `ticksInBucket=${stats.tickCount}\n` +
-              `O=${candle.open}`,
-          );
-        }
+      // per instrument+timeframe. If the backend started mid-bucket, our open
+      // is the first RECEIVED tick and will NOT match IG's bucket-boundary open.
+      if (firstAnchor) {
+        const delta = firstAnchor.firstTickMs - candle.time * 1000;
+        console.log(
+          `[${instrumentTag} ${tag} CANDLE SESSION-START]\n` +
+            `instrument=${epic}\n` +
+            `bucket=${fmtMs(candle.time * 1000).slice(0, 8)}\n` +
+            `firstTick=${fmtMs(firstAnchor.firstTickMs)}\n` +
+            `firstTickDeltaMs=${delta}\n` +
+            `ticksInBucket=${firstAnchor.ticksInBucket}\n` +
+            `O=${candle.open}`,
+        );
       }
 
-      if (prevBucket === 0) this.lastBucketSec.set(timeframe, candle.time);
-      if (candle.time > (this.lastBucketSec.get(timeframe) ?? 0)) {
+      if (closed) {
         // A bucket just CLOSED. Dump its full diagnostics: chart OHLC (rounded
-        // MID), unrounded raw OHLC, tick count + first/last tick timestamps.
-        const ls = this.stream?.getStats();
-        const closed = this.aggregators.getClosedCandleFor(bucketSec);
-        if (closed) {
-          console.log(
-            `[${tag} CANDLE CLOSED]\n` +
-              `bucket=${fmtMs(closed.time * 1000).slice(0, 8)}\n` +
-              `O=${closed.open}\n` +
-              `H=${closed.high}\n` +
-              `L=${closed.low}\n` +
-              `C=${closed.close}\n` +
-              `ticks=${closed.tickCount}\n` +
-              `firstTick=${fmtMs(closed.firstTickMs)}\n` +
-              `lastTick=${fmtMs(closed.lastTickMs)}\n` +
-              `firstTickDeltaMs=${closed.firstTickMs - closed.time * 1000}\n` +
-              `lastTickDeltaMs=${closed.lastTickMs - closed.time * 1000}\n` +
-              `rawO=${closed.rawOpen ?? "-"} rawH=${closed.rawHigh ?? "-"} rawL=${closed.rawLow ?? "-"} rawC=${closed.rawClose ?? "-"}\n` +
-              `lsUpdates=${ls?.updatesReceived ?? "-"} lsNoPrice=${ls?.noPriceUpdates ?? "-"} ticksTotal=${this.ticksReceived} clients=${this.clients.size}`,
-          );
-                    // COMPLETED candle → Supabase upsert — ONLY for the canonical
-          // persisted timeframe (MINUTE_1). MINUTE_3 is an in-memory overlay
-          // and is deliberately NEVER written. Fire-and-forget, idempotent —
-          // see persistClosedCandle; never touches the realtime path.
-          if (isPersistedTimeframe(timeframe)) {
-            this.persistClosedCandle(closed, timeframe);
-          }
-          // EMA alert engine hook — BOTH 1m and 3m closed candles reach the
-          // engine (fire-and-forget); the engine filters by `alertTimeframes`.
+        // to THIS instrument's quoting grid), unrounded raw OHLC, tick count +
+        // first/last tick timestamps.
+        const ls = this.streams.get(epic)?.getStats();
+        console.log(
+          `[${instrumentTag} ${tag} CANDLE CLOSED]\n` +
+            `instrument=${epic}\n` +
+            `bucket=${fmtMs(closed.time * 1000).slice(0, 8)}\n` +
+            `O=${closed.open}\n` +
+            `H=${closed.high}\n` +
+            `L=${closed.low}\n` +
+            `C=${closed.close}\n` +
+            `ticks=${closed.tickCount}\n` +
+            `firstTick=${fmtMs(closed.firstTickMs)}\n` +
+            `lastTick=${fmtMs(closed.lastTickMs)}\n` +
+            `firstTickDeltaMs=${closed.firstTickMs - closed.time * 1000}\n` +
+            `lastTickDeltaMs=${closed.lastTickMs - closed.time * 1000}\n` +
+            `rawO=${closed.rawOpen ?? "-"} rawH=${closed.rawHigh ?? "-"} rawL=${closed.rawLow ?? "-"} rawC=${closed.rawClose ?? "-"}\n` +
+            `lsUpdates=${ls?.updatesReceived ?? "-"} lsNoPrice=${ls?.noPriceUpdates ?? "-"} ticksTotal=${unit.ticksReceived} clients=${this.clients.size}`,
+        );
+        // COMPLETED candle → Supabase upsert — ONLY for the canonical persisted
+        // timeframe (MINUTE_1) and ALWAYS under THIS instrument's EPIC as the
+        // ohlc_candles identity. MINUTE_3 is an in-memory overlay and is
+        // deliberately NEVER written. Fire-and-forget, idempotent — see
+        // persistClosedCandle; never touches the realtime path.
+        if (isPersistedTimeframe(timeframe)) {
+          this.persistClosedCandle(unit, closed, timeframe);
+        }
+        // Closed-candle listeners (EMA alert engine) — Phase 1: the DEFAULT
+        // instrument (DAX) ONLY. Gold is capture-only: its closes persist and
+        // relay but can NEVER enter the DAX EMA state. The listener signature
+        // stays (candle, timeframe) so the engine is untouched.
+        if (epic === this.defaultEpic) {
           for (const listener of this.closedCandleListeners) {
             try {
               listener(closed, timeframe);
@@ -335,19 +411,15 @@ export class RealtimeService {
           }
         }
         console.log(
-          `[${tag}] ROLLOVER oldBucket=${sec(this.lastBucketSec.get(timeframe) ?? 0)} newBucket=${sec(candle.time)}`,
+          `[${instrumentTag} ${tag}] ROLLOVER oldBucket=${sec(closed.time)} newBucket=${sec(candle.time)}`,
         );
-        this.lastBucketSec.set(timeframe, candle.time);
-      } else if (candle.time < (this.lastBucketSec.get(timeframe) ?? 0)) {
-        this.lastBucketSec.set(timeframe, candle.time); // stream reset / stale tick safety
       }
 
-      // Per-client-resolution fan-out: only the clients subscribed to THIS
-      // timeframe receive its forming candle. (Previously every client got the
-      // single 3m frame regardless of the res it asked for.)
+      // Per-client fan-out: only clients subscribed to THIS instrument AND
+      // timeframe receive its forming candle (frames carry `epic`).
       for (const client of this.clients) {
-        if (!client.alive || client.bucketSec !== bucketSec) continue;
-        this.sendCandle(client, { type: "candle", timeframe, ...candle });
+        if (!clientWantsCandle(client, epic, bucketSec)) continue;
+        this.send(client, { type: "candle", epic, timeframe, ...candle });
       }
     }
   }
@@ -361,53 +433,62 @@ export class RealtimeService {
    * by upsert on (instrument, timeframe, bucket_time) — reconnects/restarts
    * re-close the same bucket and converge on one row.
    */
-  private persistClosedCandle(candle: ClosedCandle, timeframe: string): void {
+  private persistClosedCandle(unit: InstrumentUnit, candle: ClosedCandle, timeframe: string): void {
     if (!this.candleStore) return;
-    void this.candleStore.saveClosedCandle(this.epic, timeframe, candle);
+    const instrument = persistenceInstrumentFor(timeframe, unit);
+    if (!instrument) return;
+    void this.candleStore.saveClosedCandle(instrument, timeframe, candle);
   }
 
-  private handleState(state: StreamState): void {
-    this.state = state;
-    this.lastStateChange = Date.now();
-    console.log(`[STREAM] IG state -> ${state} (ticks=${this.ticksReceived}${this.lastTickAt ? `, lastTickAge=${Math.round((Date.now() - this.lastTickAt) / 1000)}s` : ", no ticks yet"})`);
-    this.broadcastStatus();
+  private setStreamState(epic: string, state: StreamState): void {
+    if (this.streamStates.get(epic) === state) return;
+    this.streamStates.set(epic, state);
+    this.lastStateChangeMs.set(epic, Date.now());
+    const unit = this.units.get(epic);
+    const tag = unit?.label.split(" /")[0] || epic;
+    console.log(
+      `[STREAM:${tag}] IG state -> ${state} (ticks=${unit?.ticksReceived ?? 0}${
+        unit?.lastTickAt ? `, lastTickAge=${Math.round((Date.now() - unit.lastTickAt) / 1000)}s` : ", no ticks yet"
+      })`,
+    );
+    this.broadcastStatus(epic);
 
     if (state === "DISCONNECTED" && this.started) {
-      this.scheduleReconnect();
+      this.scheduleReconnect(epic);
     }
   }
 
-  /** Push the truthful current status to every alive client (also the heartbeat). */
-  private broadcastStatus(): void {
-    const msg = {
-      type: "status",
-      status: this.state,
-      ticks: this.ticksReceived,
-      price: this.lastPrice,
-      lastTickAt: this.lastTickAt,
-    };
-    for (const client of this.clients) if (client.alive) this.send(client, msg);
+  /** Push an instrument's truthful status to ITS OWN subscribed clients only. */
+  private broadcastStatus(epic: string): void {
+    for (const client of this.clients) {
+      if (client.alive && client.epic === epic) this.sendStatus(client);
+    }
   }
 
-  private scheduleReconnect(): void {
-    if (!this.started || this.reconnectTimer) return;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      void this.connectStream();
+  /** Heartbeat: every alive client is refreshed with ITS OWN instrument status. */
+  private heartbeat(): void {
+    for (const client of this.clients) if (client.alive) this.sendStatus(client);
+  }
+
+  private scheduleReconnect(epic: string): void {
+    if (!this.started || this.reconnectTimers.has(epic)) return;
+    const timer = setTimeout(() => {
+      this.reconnectTimers.delete(epic);
+      void this.connectStream(epic);
     }, STREAM_RECONNECT_DELAY_MS);
-  }
-
-  private sendCandle(client: WsClient, candle: RealtimeCandle & { type: string; timeframe: string }): void {
-    this.send(client, candle);
+    this.reconnectTimers.set(epic, timer);
   }
 
   private sendStatus(client: WsClient): void {
+    const unit = this.units.get(client.epic);
+    if (!unit) return;
     this.send(client, {
       type: "status",
-      status: this.state,
-      ticks: this.ticksReceived,
-      price: this.lastPrice,
-      lastTickAt: this.lastTickAt,
+      epic: client.epic,
+      status: this.streamStates.get(client.epic) ?? "DISCONNECTED",
+      ticks: unit.ticksReceived,
+      price: unit.lastPrice,
+      lastTickAt: unit.lastTickAt,
     });
   }
 

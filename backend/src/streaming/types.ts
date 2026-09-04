@@ -9,7 +9,7 @@ export type StreamState = "CONNECTING" | "LIVE" | "RECONNECTING" | "DISCONNECTED
 export interface IngTick {
   /** Epoch milliseconds from the market (UTM) when available, else now. */
   tsMs: number;
-  /** Mid-of-bid/offer or last-traded price used to build candles (rounded). */
+  /** Mid-of-bid/offer or last-traded price used to build candles (rounded to the instrument's quoting grid). */
   price: number;
   /** Per-tick traded volume when IG provides it. */
   volume: number;
@@ -22,7 +22,7 @@ export interface IngTick {
   arriveMs: number;
   /** Raw Lightstreamer UTM when usable (epoch ms), else undefined. */
   utmMs?: number;
-  /** Unrounded price BEFORE the 1-decimal rounding (diagnostics only). */
+  /** Unrounded price BEFORE instrument-grid rounding (diagnostics only). */
   priceRaw: number;
   /** Which field produced `price` (MID | BID | OFR | LTP). */
   priceField: "MID" | "BID" | "OFR" | "LTP";
@@ -31,9 +31,9 @@ export interface IngTick {
 /**
  * A just-closed candle PLUS the per-bucket diagnostics collected while it was
  * forming. `open/high/low/close` are exactly what the chart received (rounded
- * 1-decimal MID). `rawO…rawC` are the unrounded prices BEFORE the rounding
- * step — kept separately so we can tell whether rounding alone shifted our
- * OHLC versus the IG website's candles.
+ * to the instrument's quoting grid). `rawO…rawC` are the unrounded prices
+ * BEFORE the rounding step — kept separately so we can tell whether rounding
+ * alone shifted our OHLC versus the IG website's candles.
  */
 /**
  * Persistence classification of a closed candle (stored in ohlc_candles.status).

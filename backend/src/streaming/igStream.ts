@@ -62,6 +62,9 @@ export class IgStreamClient {
     private readonly session: StreamSessionInfo,
     private readonly epic: string,
     private readonly handler: TickHandler,
+    /** Quoting precision of THIS instrument (its rounding grid): DAX 1,
+     *  Spot Gold 2. Default 1 = the exact historic DAX behavior. */
+    private readonly decimals: number = 1,
   ) {}
 
   getState(): StreamState {
@@ -217,10 +220,14 @@ export class IgStreamClient {
       return;
     }
 
-    // DAX is quoted to 1 decimal on IG — strip float noise (…0000003). This
-    // ROUNDED price feeds the aggregator (the chart). The unrounded `raw` is
-    // preserved on the tick only for the candle diagnostics above/below.
-    const price = Math.round(raw * 10) / 10;
+    // Round onto THIS instrument's quoting grid — strip float noise (…0000003).
+    // DAX quotes 1 decimal; Spot Gold quotes 2 (SGD cents, e.g. 4467.47). The
+    // precision comes from the instrument registry via RealtimeService, so a
+    // Gold tick is NEVER quantized onto the DAX 1-decimal grid. This ROUNDED
+    // price feeds the aggregator (the chart); the unrounded `raw` is preserved
+    // on the tick only for the candle diagnostics above/below.
+    const factor = 10 ** this.decimals;
+    const price = Math.round(raw * factor) / factor;
 
     const volumeRaw = toNumber(get("LTV"));
     // LTV = LAST TRADED volume (size of the most recent trade), NOT exchange

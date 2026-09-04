@@ -1,6 +1,6 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { CandleStore, PersistedCandle } from "../db/candleStore.js";
-import { IG_GERMANY_40 } from "../market/calendar.js";
+import { instrumentMetaFor, type InstrumentMeta } from "../market/instruments.js";
 import { detectGaps } from "../market/gapDetector.js";
 import type { CandleStatus } from "../streaming/types.js";
 import {
@@ -103,7 +103,31 @@ function deriveGapRows(
   }
   return [...out.values()].sort((a, b) => a.time - b.time);
 }
-export function createCandlesDbRouter(store: CandleStore | null, defaultEpic: string): Hono {
+/** 400 for an EPIC outside the CONFIGURED instrument set — a request with an
+ *  arbitrary string must be REJECTED, never silently answered with an empty
+ *  dataset (Phase 2). */
+function unsupportedEpic(c: Context, epic: string, instruments: readonly InstrumentMeta[]) {
+  return c.json(
+    {
+      error: `Unsupported instrument EPIC "${epic}". Configured instruments: ${instruments.map((i) => i.epic).join(", ")}.`,
+      code: "UNSUPPORTED_EPIC",
+    },
+    400,
+  );
+}
+
+/**
+ * EPIC resolution shared by every /candles/db endpoint: omitted → the
+ * configured default (DAX — the historic behavior); explicit → must be a
+ * CONFIGURED instrument (else 400). The resolved epic is also the
+ * ohlc_candles `instrument` identity every store call is keyed by, so a
+ * query can never accidentally read another instrument's candles.
+ */
+export function createCandlesDbRouter(
+  store: CandleStore | null,
+  instruments: readonly InstrumentMeta[],
+  defaultEpic: string = instruments[0]?.epic ?? "",
+): Hono {
   const app = new Hono();
 
   app.get("/candles/db", async (c) => {
@@ -118,12 +142,16 @@ export function createCandlesDbRouter(store: CandleStore | null, defaultEpic: st
       );
     }
 
-    const epic = (c.req.query("epic") ?? "").trim() || defaultEpic.trim();
+    const requested = (c.req.query("epic") ?? "").trim();
+    const epic = requested || defaultEpic.trim();
     if (!epic) {
       return c.json(
         { error: "No instrument EPIC configured — set IG_DAX_EPIC or pass `epic`.", code: "EPIC_MISSING" },
         400,
       );
+    }
+    if (!instruments.some((i) => i.epic === epic)) {
+      return unsupportedEpic(c, epic, instruments);
     }
 
     const timeframe = (c.req.query("timeframe") ?? CANONICAL_TIMEFRAME).trim().toUpperCase();
@@ -164,17 +192,27 @@ export function createCandlesDbRouter(store: CandleStore | null, defaultEpic: st
    *   - MINUTE_3 → the 180 s grid via deriveGapRows() (one effective row per
    *     3m bucket from its constituent 1m rows — partial if any sub-1m is
    *     partial, else backfilled, else completed; absent buckets are missing).
-   * Market closures (weekends, the daily 05:00–08:00 UK break, holidays) are
-   * never reported as missing — the IG Germany 40 calendar in
-   * src/market/calendar.ts decides "expected". No rows are created; bucket
-   * times are UTC ISO (the chart displays Asia/Manila separately). The
-   * still-forming bucket is always excluded.
+   * Market closures (weekends, breaks, holidays) are never reported as
+   * missing — the REQUESTED instrument's OWN calendar decides "expected"
+   * (DAX → IG_GERMANY_40, Spot Gold → IG_SPOT_GOLD). No rows are created;
+   * bucket times are UTC ISO (the chart displays Asia/Manila separately).
+   * The still-forming bucket is always excluded.
    */
   app.get("/candles/db/gaps", async (c) => {
     if (!store) {
       return c.json({ error: "Candle persistence is not configured.", code: "DB_NOT_CONFIGURED" }, 503);
     }
-    const epic = (c.req.query("epic") ?? "").trim() || defaultEpic.trim();
+    const requested = (c.req.query("epic") ?? "").trim();
+    const epic = requested || defaultEpic.trim();
+    if (!epic) {
+      return c.json(
+        { error: "No instrument EPIC configured — set IG_DAX_EPIC or pass `epic`.", code: "EPIC_MISSING" },
+        400,
+      );
+    }
+    if (!instruments.some((i) => i.epic === epic)) {
+      return unsupportedEpic(c, epic, instruments);
+    }
     const timeframe = (c.req.query("timeframe") ?? "MINUTE_1").trim().toUpperCase();
     if (!(timeframe in TIMEFRAME_BUCKET_SEC)) {
       return c.json(
@@ -204,10 +242,23 @@ export function createCandlesDbRouter(store: CandleStore | null, defaultEpic: st
       const oldestRow = effectiveRows.length > 0 ? effectiveRows[0].time : formingBucket;
       const fromSec = Math.max(Math.ceil((nowSec - hours * 3600) / bucketSec) * bucketSec, oldestRow);
 
+      // The REQUESTED instrument's OWN calendar decides "expected" — DAX uses
+      // IG_GERMANY_40, Spot Gold uses IG_SPOT_GOLD. Never another market's
+      // hours: a calendar-less EPIC is refused rather than guessed.
+      const calendar = instrumentMetaFor(epic).calendar;
+      if (!calendar) {
+        return c.json(
+          {
+            error: `No market calendar is registered for "${epic}" — gap detection needs dealing hours and must not guess another market's.`,
+            code: "NO_MARKET_CALENDAR",
+          },
+          400,
+        );
+      }
       const report = detectGaps(effectiveRows, {
         fromSec,
         toSec: formingBucket,
-        calendar: IG_GERMANY_40,
+        calendar,
         bucketSec,
       });
       const iso = (secs: number[]): string[] =>
@@ -224,10 +275,10 @@ export function createCandlesDbRouter(store: CandleStore | null, defaultEpic: st
           formingBucketExcluded: new Date(formingBucket * 1000).toISOString(),
         },
         market: {
-          calendar: IG_GERMANY_40.id,
-          label: IG_GERMANY_40.label,
-          timezone: IG_GERMANY_40.timezone,
-          closedDatesCount: IG_GERMANY_40.closedDates.length,
+          calendar: calendar.id,
+          label: calendar.label,
+          timezone: calendar.timezone,
+          closedDatesCount: calendar.closedDates.length,
         },
         summary: {
           expectedBuckets: report.expectedBuckets,

@@ -122,7 +122,7 @@ export function planBackfill(input: BackfillPlanInput): BackfillPlan {
 
   for (let b = fromSec; b <= toSec; b += bucketSec) {
     if (b >= input.formingBucketSec) break; // never touch the forming/live bucket
-    if (input.calendar && !isBucketExpected(b, input.calendar)) continue; // market closed — not a gap
+    if (input.calendar && !isBucketExpected(b, input.calendar, bucketSec)) continue; // market closed — not a gap
     plan.stats.expectedBuckets += 1;
 
     // byBucket/oneMinTs are keyed in epoch MS (Candle.ts is ms-based); b is epoch SECONDS.

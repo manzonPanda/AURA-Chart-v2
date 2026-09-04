@@ -56,7 +56,7 @@ export function detectGaps(rows: readonly GapRow[], opts: GapOptions): GapReport
 
   const first = Math.ceil(opts.fromSec / bucketSec) * bucketSec;
   for (let b = first; b < opts.toSec; b += bucketSec) {
-    if (!isBucketExpected(b, opts.calendar)) continue;
+    if (!isBucketExpected(b, opts.calendar, bucketSec)) continue;
     report.expectedBuckets += 1;
     const row = byTime.get(b);
     if (!row) {
@@ -70,7 +70,7 @@ export function detectGaps(rows: readonly GapRow[], opts: GapOptions): GapReport
 
   // Rows outside the expected grid or outside the scanned range: informational.
   for (const r of rows) {
-    if (r.time >= first && r.time < opts.toSec && isBucketExpected(r.time, opts.calendar)) continue;
+    if (r.time >= first && r.time < opts.toSec && isBucketExpected(r.time, opts.calendar, bucketSec)) continue;
     report.unexpected.push(r.time);
   }
   report.unexpected.sort((a, b) => a - b);

@@ -3,6 +3,7 @@ import fs from "node:fs";
 
 const rows = [];
 let epic = "";
+let gold = "";
 for (const line of fs.readFileSync(".env", "utf8").split(/\r?\n/)) {
   const m = line.match(/^(IG_[A-Z0-9_]+)\s*=\s*(.*)\s*$/);
   if (!m) continue;
@@ -13,7 +14,9 @@ for (const line of fs.readFileSync(".env", "utf8").split(/\r?\n/)) {
   } else {
     rows.push(`${k.padEnd(16)} ${v || "(empty)"}`);
     if (k === "IG_DAX_EPIC") epic = v;
+    if (k === "IG_GOLD_EPIC") gold = v;
   }
 }
 console.log(rows.join("\n"));
 console.log(`\ndaxEpicSet : ${Boolean(epic)}`);
+console.log(`goldEpicSet: ${Boolean(gold)}`);

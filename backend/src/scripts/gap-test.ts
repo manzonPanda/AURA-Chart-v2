@@ -122,9 +122,12 @@ function main(): void {
   check("DST December: 07:57 UTC (=07:57 UK, break) NOT expected", !isBucketExpected(U(DEC, 7, 57), IG_GERMANY_40));
 
   // ── Mid-grid session open (01:10 UK) ─────────────────────────────────────
-  // 01:10 UK opens INSIDE the 01:09–01:12 bucket → that bucket is expected.
-  check("mid-grid open: 00:09 UTC (01:09 UK) expected", isBucketExpected(U(DAY, 0, 9), IG_GERMANY_40));
-  check("mid-grid open: 00:06 UTC (01:06 UK) NOT expected", !isBucketExpected(U(DAY, 0, 6), IG_GERMANY_40));
+  // 01:10 UK opens INSIDE the 01:09–01:12 bucket → that 3m bucket is expected.
+  // (Explicit 180 s width — isBucketExpected now takes the grid width; the
+  // 60 s default would correctly reject 01:09 on the 1m grid, which does not
+  // touch the 01:10 open.)
+  check("mid-grid open: 00:09 UTC (01:09 UK) expected", isBucketExpected(U(DAY, 0, 9), IG_GERMANY_40, 180));
+  check("mid-grid open: 00:06 UTC (01:06 UK) NOT expected", !isBucketExpected(U(DAY, 0, 6), IG_GERMANY_40, 180));
 
   // ── toSec is exclusive (forming bucket excluded by the caller) ───────────
   const r8 = detectGaps(fullDayRows(), { fromSec: U(DAY, 8, 0), toSec: U(DAY, 8, 6), calendar: IG_GERMANY_40 });

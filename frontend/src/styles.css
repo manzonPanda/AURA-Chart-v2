@@ -49,6 +49,23 @@ body {
 .instrument { display: flex; flex-direction: column; line-height: 1.1; padding-left: 1rem; border-left: 1px solid var(--border); }
 .instrument-name { font-size: 1rem; font-weight: 700; }
 .instrument-epic { color: var(--muted); font-size: 0.72rem; }
+.instrument-select {
+  appearance: none; -webkit-appearance: none;
+  background: transparent; border: none; color: var(--text);
+  font-size: 1rem; font-weight: 700; line-height: 1.1; font-family: inherit;
+  padding: 0 14px 0 0; cursor: pointer;
+  /* tiny dropdown chevron, consistent with the dark theme */
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 8px) 55%, calc(100% - 3px) 55%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  transition: color 0.15s;
+}
+.instrument-select:hover { color: var(--accent); }
+.instrument-select:focus { outline: none; color: var(--accent); }
+.instrument-select:disabled { opacity: 0.5; cursor: default; }
+.instrument-select option { background: #0b1620; color: var(--text); font-weight: 600; }
 
 .timeframes { display: flex; gap: 2px; margin-left: auto; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 3px; }
 .tf-btn {

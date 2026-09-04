@@ -26,7 +26,7 @@ import { IgClient } from "../ig/client.js";
 import { fetchOneMinuteRange } from "../ig/historical.js";
 import { IgApiError } from "../ig/errors.js";
 import { planBackfill, type BackfillPlan } from "../backfill/planner.js";
-import { IG_GERMANY_40 } from "../market/calendar.js";
+import { instrumentMetaFor } from "../market/instruments.js";
 import { detectGaps } from "../market/gapDetector.js";
 import { timeframeForMinutes } from "../streaming/timeframes.js";
 
@@ -113,6 +113,17 @@ async function main(): Promise<void> {
   const store = new CandleStore(admin, config.supabase.table);
   const epic = (args.epic ?? config.ig.defaultEpic).trim();
   if (!epic) die("No instrument EPIC — set IG_DAX_EPIC or pass --epic=EPIC");
+  // Instrument-aware calendar (Phase 2): --epic=CS.D.CFIGOLD.CFI.IP resolves
+  // the IG Spot Gold calendar; DAX keeps IG_GERMANY_40. An EPIC with NO
+  // registered calendar is REFUSED — gap planning must never guess hours.
+  const instrument = instrumentMetaFor(epic);
+  const calendar = instrument.calendar;
+  if (!calendar) {
+    die(
+      `No market calendar registered for "${epic}" (${instrument.label}) — ` +
+        "backfill planning needs dealing hours and must not guess another market's.",
+    );
+  }
 
   // epoch-ms → grid-aligned epoch-seconds (ms/1000, then floor to the 180 s grid).
   const fromSec = Math.floor(args.fromMs / 1000 / BUCKET_SEC) * BUCKET_SEC;
@@ -122,7 +133,7 @@ async function main(): Promise<void> {
 
   console.log(
     `BACKFILL ${args.dryRun ? "DRY RUN" : "REAL RUN"}\n` +
-      `instrument=${epic} timeframe=${TF}\n` +
+      `instrument=${epic} (${instrument.label}) timeframe=${TF} calendar=${calendar.id}\n` +
       `range=${new Date(fromSec * 1000).toISOString()} .. ${new Date(toSec * 1000).toISOString()}\n` +
       `forming bucket (excluded)=${fmtDayBucket(formingBucketSec)}Z`,
   );
@@ -141,7 +152,7 @@ async function main(): Promise<void> {
   const gaps = detectGaps(rows, {
     fromSec,
     toSec: Math.min(toSec, formingBucketSec), // exclusive bound — forming bucket never scanned
-    calendar: IG_GERMANY_40,
+    calendar,
     bucketSec: BUCKET_SEC,
   });
   const list = (arr: number[]): string =>
@@ -177,7 +188,7 @@ async function main(): Promise<void> {
     rows,
     minutes,
     allowBackfilledRepair: args.force,
-    calendar: IG_GERMANY_40,
+    calendar,
   });
 
   // 5. Full plan report.

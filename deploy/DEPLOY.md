@@ -52,6 +52,7 @@ Fill in (values live only on the VM, never in the browser or git):
 | `IG_ACCOUNT_ID` | optional |
 | `IG_BASE_URL` | live `https://api.ig.com/gateway/deal` (current setup) |
 | `IG_DAX_EPIC` | your account's DAX EPIC |
+| `IG_GOLD_EPIC` | optional — Spot Gold CFD (`CS.D.CFIGOLD.CFI.IP`, SGD, 2-decimal); when set the backend streams DAX + Gold concurrently (Gold is capture-only); empty = DAX-only |
 | `PORT=8787` | keep |
 | `HOST=127.0.0.1` | **add this** — loopback only, nginx is the sole caller |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | candle persistence (leave empty → `/api/candles/db` 503) |

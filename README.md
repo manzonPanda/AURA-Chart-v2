@@ -124,6 +124,21 @@ IG Markets REST API
    are `INDEX:DAX`, `UA.D.DAX.CASH.IP` (cash) and `IX.D.DAX.IFD.IP` (futures CFD). Set the
    one for your account in `IG_DAX_EPIC` (or pass `?epic=...` per request).
 
+4. Optional second instrument — **Spot Gold** (`IG_GOLD_EPIC`). Leave it empty for
+   DAX-only behavior (unchanged). The verified EPIC for this account is
+   `CS.D.CFIGOLD.CFI.IP` ("Spot Gold (SGD1 Contract)" — SGD-denominated, 2-decimal
+   quoting; NOT the futures EPIC, so no rollover logic). When set (Phase 1), the
+   backend streams BOTH instruments CONCURRENTLY: one Lightstreamer connection per
+   EPIC sharing one IG session, fully independent per-instrument aggregation/
+   rollover/persistence, `epic`-tagged WS frames (`/ws?epic=...` — omitted = DAX
+   default). Gold is capture-only: its 1m candles persist under
+   `CS.D.CFIGOLD.CFI.IP`; the DAX EMA alert engine is untouched. Instrument
+   metadata (label, price precision, market calendar) lives in the registry
+   `backend/src/market/instruments.ts`; Gold's dealing hours / holiday seed live in
+   `backend/src/market/calendar.ts` (`IG_SPOT_GOLD`). Verify any EPIC's live details with
+   `npm --prefix backend run ig:market-check`; prove the dual feed with
+   `npm --prefix backend run ig:dual-stream-check`.
+
 ## 2. Install
 
 ```bash
@@ -179,6 +194,19 @@ GET /api/candles?epic=<EPIC>&resolution=MINUTE_5&limit=500
 Errors return `{ error, code }` with a useful HTTP status and never include secrets:
 `EPIC_MISSING` (400), `INVALID_RESOLUTION` (400), `IG_EPIC_NOT_FOUND` (404), `IG_RATE_LIMITED`
 (429), `IG_NOT_CONFIGURED` (500), `IG_AUTH_FAILED` / `IG_UNREACHABLE` / `IG_UPSTREAM_ERROR` (502).
+
+### Multi-instrument API (Phase 2)
+
+```
+GET /api/instruments
+```
+The frontend's source of truth: `{ defaultEpic, count, instruments: [{ epic, label, decimals, calendar }] }`.
+`GET /api/candles`, `GET /api/candles/db` and `GET /api/candles/db/gaps` are instrument-aware:
+`?epic=` must be a **configured** instrument — an unsupported EPIC gets `UNSUPPORTED_EPIC` (400),
+never a silent empty dataset; **omitting `epic` defaults to DAX** (historic behavior).
+`/api/candles/db/gaps` classifies each instrument with its OWN market calendar
+(DAX → `ig-germany-40`, Spot Gold → `ig-spot-gold`); a configured EPIC without a
+registered calendar gets `NO_MARKET_CALENDAR` (400) — hours are never guessed.
 
 ---
 

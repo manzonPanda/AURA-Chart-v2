@@ -15,6 +15,7 @@ import {
 } from "./config/chart";
 import { loadEmaSettings, saveEmaSettings, type EmaSettings } from "./config/emaSettings";
 import { ApiError, fetchCandlesDb, fetchHealth } from "./services/api";
+import { useInstruments } from "./services/useInstruments";
 import {
   compileImportedPine,
   loadImportedPineIndicators,
@@ -70,7 +71,14 @@ function streamLabel(status: string, lastTickAt: number, now: number): {
 
 export default function App() {
   const [candles, setCandles] = useState<Candle[]>([]);
-  const [epic, setEpic] = useState<string>("");
+  // Instrument selection (Phase 3) — the BACKEND REGISTRY (GET /api/instruments)
+  // is the source of truth; localStorage only persists WHICH entry is active.
+  // selectedEpic is "" until the catalog resolves → WS/history then run WITHOUT
+  // an epic param → the backend serves its default (DAX): the historic behavior.
+  const { catalog, selectedEpic, selected: selectedInstrument, selectInstrument } = useInstruments();
+  const epic = selectedEpic;
+  /** Epic reported by the last successful history load (display fallback). */
+  const [historyEpic, setHistoryEpic] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [autoFollow, setAutoFollow] = useState(true); // TradingView-style follow
   const [historyMissing, setHistoryMissing] = useState(false);
@@ -239,6 +247,27 @@ export default function App() {
     [candles, realtime.candle, timeframe],
   );
 
+  /**
+   * Instrument switch — a CLEAN data/stream boundary (Phase 3): the previous
+   * instrument's candles are dropped IMMEDIATELY (the chart never mixes DAX
+   * and Gold bars); the realtime hook resets its stream and re-subscribes with
+   * the new epic (frames are epic-filtered), and loadHistory re-runs for the
+   * new instrument (its identity changes with `epic`).
+   */
+  const handleInstrumentChange = useCallback(
+    (nextEpic: string) => {
+      if (!nextEpic || nextEpic === epic) return;
+      setCandles([]);
+      selectInstrument(nextEpic);
+    },
+    [epic, selectInstrument],
+  );
+
+  /** Dynamic page title — the selected instrument (fallback: generic label). */
+  useEffect(() => {
+    document.title = `${selectedInstrument?.label ?? INSTRUMENT_LABEL} · AURA Chart`;
+  }, [selectedInstrument?.label]);
+
   /** Confirm-import: called by the modal AFTER the user reviews the
    *  diagnostics panel (or immediately when nothing needs reviewing). */
   const handlePineImportConfirm = useCallback((indicator: ImportedPineIndicator) => {
@@ -276,11 +305,13 @@ export default function App() {
   // page history — its allowance errors can never block the chart from loading.
   const loadHistory = useCallback(async () => {
     const seq = ++requestSeq.current;
+    const wantedEpic = epic; // switch guard: never accept candles for a superseded instrument
     setLoading(true);
     try {
-      const data = await fetchCandlesDb(timeframe, HISTORY_LIMIT);
+      const data = await fetchCandlesDb(timeframe, HISTORY_LIMIT, wantedEpic || undefined);
       if (seq !== requestSeq.current) return;
-      setEpic(data.epic);
+      if (wantedEpic && data.epic !== wantedEpic) return; // stale instrument — dropped
+      setHistoryEpic(data.epic);
       setCandles(data.candles);
       setHistoryMissing(false);
     } catch (err) {
@@ -292,7 +323,7 @@ export default function App() {
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
-  }, [timeframe]);
+  }, [timeframe, epic]);
 
   // Initial load + page health.
   useEffect(() => {
@@ -358,8 +389,25 @@ export default function App() {
           <span className="brand-sub">Chart</span>
         </div>
         <div className="instrument">
-          <span className="instrument-name">{INSTRUMENT_LABEL}</span>
-          <span className="instrument-epic">{epic || "…"}</span>
+          {/* Instrument selector (Phase 3) — populated from the BACKEND
+              registry (GET /api/instruments); switching is a clean data/stream
+              boundary (see handleInstrumentChange). */}
+          <select
+            className="instrument-select"
+            value={epic}
+            onChange={(e) => handleInstrumentChange(e.target.value)}
+            aria-label="Instrument"
+            title="Switch instrument — stream, history and gaps follow the selection"
+            disabled={!catalog}
+          >
+            {!catalog && <option value="">{INSTRUMENT_LABEL}</option>}
+            {catalog?.instruments.map((inst) => (
+              <option key={inst.epic} value={inst.epic}>
+                {inst.label}
+              </option>
+            ))}
+          </select>
+          <span className="instrument-epic">{epic || historyEpic || "…"}</span>
         </div>
         <div className="topbar-actions">
           {/* EMA indicator slots (9/20) + Imported Pine Script section —
@@ -396,7 +444,7 @@ export default function App() {
             return (
               <span
                 className={`stream-chip ${cls}`}
-                title={`IG Lightstreamer: ${realtime.status}${ageTxt} · ${realtime.ticks} ticks this session · ${epic || "—"}`}
+                title={`IG Lightstreamer: ${realtime.status}${ageTxt} · ${realtime.ticks} ticks this session · ${epic || historyEpic || "—"}`}
               >
                 <span className="dot" />
                 {sl.label}
