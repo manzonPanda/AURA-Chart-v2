@@ -100,7 +100,25 @@ export default function App() {
   const [importedPine, setImportedPine] = useState<ImportedPineIndicator[]>(loadImportedPineIndicators);
   // Chart display settings (e.g. Invert Scale) — localStorage-persisted in
   // App, frontend-only presentation state that never touches candle data.
-  const [chartSettings, setChartSettings] = useState<ChartSettings>(loadChartSettings);
+  // ⚠ TEMP debug hook (?debugInvert): `?invert=1|0` seeds/forces the setting so
+  // headless reproduction runs can pin OFF vs ON. Absent the flag, the normal
+  // localStorage load is used and nothing changes.
+  const [chartSettings, setChartSettings] = useState<ChartSettings>(() => {
+    const loaded = loadChartSettings();
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (!params.has("debugInvert")) return loaded;
+      const forced = params.get("invert");
+      if (forced === "1" || forced === "0") {
+        const seeded: ChartSettings = { invertScale: forced === "1" };
+        saveChartSettings(seeded);
+        return seeded;
+      }
+    } catch {
+      /* no window / blocked storage — fall through to the normal load */
+    }
+    return loaded;
+  });
   // Session runtime status per imported indicator (never persisted).
   const [pineStatuses, setPineStatuses] = useState<Record<string, PineRunStatus>>({});
   const requestSeq = useRef(0);
@@ -498,8 +516,8 @@ export default function App() {
             aria-pressed={chartSettings.invertScale}
             title={
               chartSettings.invertScale
-                ? "Price scale is inverted — higher prices appear lower (click to restore)"
-                : "Click to invert the price scale — higher prices will appear lower"
+                ? "Inverted: higher prices appear lower and bull/bear candle colors are swapped (click to restore)"
+                : "Click to invert the price scale — higher prices will appear lower and candle colors will swap"
             }
             onClick={() =>
               setChartSettings((prev) => ({ ...prev, invertScale: !prev.invertScale }))

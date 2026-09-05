@@ -1,19 +1,25 @@
 import type { Candle } from "../../types/candle";
 import { formatManilaDateTimeFull } from "../../services/timefmt";
+import { effectiveBullish } from "./candleColors";
 
 interface Props {
   candle?: Candle;
+  /** AURA inverted semantics — the rendered direction swaps when true. */
+  invertScale?: boolean;
 }
 
 const fmtPrice = (v: number | undefined): string =>
   v == null || Number.isNaN(v) ? "—" : v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 /** Compact OHLC/quote strip fed by the most recent candle. */
-export function OHLCReadout({ candle }: Props) {
+export function OHLCReadout({ candle, invertScale = false }: Props) {
   const last = candle;
   const change = last ? last.close - last.open : 0;
   const range = last ? last.high - last.low : 0;
-  const up = change >= 0;
+  // Rendered direction follows AURA's inverted semantics so the strip's
+  // change coloring matches the on-screen (possibly color-swapped) candle.
+  // The VALUES themselves are always the real market numbers.
+  const up = last ? effectiveBullish(last.close, last.open, invertScale) : change >= 0;
 
   return (
     <div className="ohlc" aria-label="OHLC">

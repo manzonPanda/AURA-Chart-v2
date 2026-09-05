@@ -4,6 +4,7 @@ import { LineStyle, type IPriceLine } from "lightweight-charts";
 import { useChartApi } from "@getcandlekit/charts/react";
 
 import { candleCloseCountdown } from "../../services/liveCandle";
+import { effectiveBullish } from "./candleColors";
 import type { RealtimeCandleMsg } from "../../services/realtime";
 import type { Candle } from "../../types/candle";
 
@@ -14,6 +15,8 @@ interface Props {
   candles: readonly Candle[];
   /** Selected timeframe bucket size in seconds (60 = 1m, 180 = 3m). */
   bucketSec: number;
+  /** AURA inverted semantics — the rendered direction swaps when true. */
+  invertScale: boolean;
 }
 
 /** Redraw cadence for the countdown. The VALUE is never taken from this
@@ -56,7 +59,7 @@ const LIVE_PRICE_COUNTDOWN_ID = "aura-live-price-countdown";
  *    never creates candles — the WS stream (LiveBarBridge) is the only candle
  *    authority, so no duplicates can appear at rollover.
  */
-export function CandleCountdown({ liveCandle, candles, bucketSec }: Props) {
+export function CandleCountdown({ liveCandle, candles, bucketSec, invertScale }: Props) {
   const api = useChartApi();
   const [now, setNow] = useState(() => Date.now());
   /** The native price line, created lazily once a price exists. */
@@ -99,7 +102,10 @@ export function CandleCountdown({ liveCandle, candles, bucketSec }: Props) {
   // candle before the stream's first frame.
   const lastHistory = candles.length > 0 ? candles[candles.length - 1] : undefined;
   const price = liveCandle ? liveCandle.close : (lastHistory?.close ?? null);
-  const up = liveCandle ? liveCandle.close >= liveCandle.open : true;
+  // Rendered direction follows AURA's inverted semantics: with Invert Scale
+  // ON, a bullish forming candle is painted (and labeled) bearish — keeping
+  // the axis pill consistent with the swapped candle colors next to it.
+  const up = liveCandle ? effectiveBullish(liveCandle.close, liveCandle.open, invertScale) : true;
   const countdown = candleCloseCountdown(liveCandle, bucketSec, now);
 
   useEffect(() => {

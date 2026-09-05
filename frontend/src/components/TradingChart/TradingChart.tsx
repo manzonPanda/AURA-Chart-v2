@@ -27,6 +27,7 @@ import type { ImportedPineIndicator, PineRunStatus } from "../../services/pineIm
 import { CandleCountdown } from "./CandleCountdown";
 import { EmaBridge } from "./EmaBridge";
 import { InvertScaleBridge } from "./InvertScaleBridge";
+import { InvertDebugProbe } from "./invertDebug"; // ⚠ TEMP debug probe (?debugInvert)
 import { OHLCReadout } from "./OHLCReadout";
 import { PineBridge } from "./PineBridge";
 
@@ -605,10 +606,12 @@ export function TradingChart({
               pane-0 overlays invert together; separate indicator panes are
               untouched. No data is modified. */}
           <InvertScaleBridge invertScale={invertScale} />
+          {/* ⚠ TEMP diagnostic probe — inert unless ?debugInvert / aura.debug.invert=1 */}
+          <InvertDebugProbe invertScale={invertScale} />
           {/* TradingView-style countdown ON the right price scale, pinned to
               the forming candle's price level (native LWC price line; renders
               no DOM). Stays attached to the live price on 1m and 3m. */}
-          <CandleCountdown liveCandle={liveCandle} candles={candles} bucketSec={bucketSec} />
+          <CandleCountdown liveCandle={liveCandle} candles={candles} bucketSec={bucketSec} invertScale={invertScale} />
           {/* EMA 9 / EMA 20 overlays — plain LWC line series on the price
               pane, recalculated from the SELECTED timeframe's candles with the
               forming candle's server truth (see services/ema.ts). */}
@@ -626,7 +629,7 @@ export function TradingChart({
         {loading && <div className="chart-spinner">…</div>}
       </div>
       <div className="chart-footer">
-        <OHLCReadout candle={crosshairCandle ?? last} />
+        <OHLCReadout candle={crosshairCandle ?? last} invertScale={invertScale} />
       </div>
     </div>
   );
