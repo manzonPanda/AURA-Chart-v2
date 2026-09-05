@@ -1,4 +1,5 @@
 import type { Candle, CandlesResponse } from "../types/candle";
+import { HISTORY_LIMIT } from "../config/chart.ts";
 
 /**
  * Talks ONLY to our Hono backend (`/api/...`, proxied by Vite). The browser
@@ -80,7 +81,7 @@ interface DbCandlesResponse {
  */
 export async function fetchCandlesDb(
   timeframe: string,
-  limit = 500,
+  limit = HISTORY_LIMIT,
   epic?: string,
 ): Promise<{ epic: string; candles: Candle[] }> {
   const qs = new URLSearchParams({ timeframe, limit: String(limit) });

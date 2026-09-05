@@ -128,7 +128,7 @@ export class CandleStore {
     timeframe: string,
     limit: number,
   ): Promise<PersistedCandle[]> {
-    const capped = Math.max(1, Math.min(5000, Math.round(limit) || 500));
+        const capped = Math.max(1, Math.min(10000, Math.round(limit) || 500));
     const { data, error } = await this.client
       .from(this.table)
       .select("bucket_time,open,high,low,close,tick_count,status")

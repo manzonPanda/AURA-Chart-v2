@@ -13,7 +13,7 @@ import {
 import type { Candle } from "../types/candle.js";
 
 /**
- * GET /api/candles/db?epic=<EPIC>&timeframe=MINUTE_1|MINUTE_3&limit=<1..5000>
+  * GET /api/candles/db?epic=<EPIC>&timeframe=MINUTE_1|MINUTE_3&limit=<1..10000>
  *
  * Serves chart history from OUR Supabase persistence — the frontend's normal
  * history source. IG REST stays a bootstrap/backfill source only and its
@@ -165,8 +165,8 @@ export function createCandlesDbRouter(
       );
     }
 
-    const parsedLimit = Number(c.req.query("limit"));
-    const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 500;
+        const parsedLimit = Number(c.req.query("limit"));
+    const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 2000;
 
     try {
       const candles = await loadTimeframeCandles(store, epic, timeframe, limit);

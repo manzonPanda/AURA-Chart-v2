@@ -22,12 +22,13 @@ export type TimeFrameKey = (typeof TIMEFRAMES)[number]["key"];
 export const DEFAULT_TIME_FRAME: TimeFrameKey = "MINUTE_3";
 
 /**
- * How many candles (of the SELECTED timeframe) to load from Supabase on page
- * load (GET /api/candles/db). 500 × 1m ≈ 8 h; 500 × 3m ≈ 25 h. History is
- * optional — realtime never depends on it. IG historical REST (max 500
- * points/request) is no longer the page-history source; it may serve as a
- * future bootstrap/backfill source only.
+  * How many candles (of the SELECTED timeframe) to load from Supabase on page
+ * load (GET /api/candles/db). 2,000 × 1m ≈ 1.5 trading days (covers
+ * yesterday + today for DAX); 2,000 × 3m ≈ 3 trading days. The window is
+ * bounded so refreshes don't load the entire table. IG historical REST
+ * (max 500 points/request) is no longer the page-history source; it may serve
+ * as a future bootstrap/backfill source only.
  */
-export const HISTORY_LIMIT = 500;
+export const HISTORY_LIMIT = 2000;
 
 export const INSTRUMENT_LABEL = "DAX / IG";
