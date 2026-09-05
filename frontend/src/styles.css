@@ -235,6 +235,21 @@ body {
 .refresh-btn:hover { border-color: var(--accent); }
 .refresh-btn:disabled { opacity: 0.6; cursor: default; }
 
+/* Invert Scale — visual-only price-scale inversion toggle (TradingView-style).
+   OFF matches the muted toolbar buttons; ON gets the accent treatment so the
+   active state is obvious at a glance. */
+.invert-toggle {
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--muted);
+  border-radius: 6px; padding: 6px 12px; cursor: pointer; font-weight: 600; font-size: 0.8rem;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.invert-toggle:hover { color: var(--text); border-color: var(--accent); }
+.invert-toggle.on {
+  color: #06121b; background: var(--accent); border-color: var(--accent);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.35);
+}
+
 /* ── Stream status chip ─────────────────────────────────────── */
 .stream-chip {
   display: inline-flex; align-items: center; gap: 6px;

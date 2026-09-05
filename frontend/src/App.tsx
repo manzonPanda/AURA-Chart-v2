@@ -14,6 +14,11 @@ import {
   type TimeFrameKey,
 } from "./config/chart";
 import { loadEmaSettings, saveEmaSettings, type EmaSettings } from "./config/emaSettings";
+import {
+  loadChartSettings,
+  saveChartSettings,
+  type ChartSettings,
+} from "./config/chartSettings";
 import { ApiError, fetchCandlesDb, fetchHealth } from "./services/api";
 import { useInstruments } from "./services/useInstruments";
 import {
@@ -93,6 +98,9 @@ export default function App() {
   // versioned `aura.pine.indicators`). Values are always recomputed by the
   // PineTS engine against the selected timeframe's candles.
   const [importedPine, setImportedPine] = useState<ImportedPineIndicator[]>(loadImportedPineIndicators);
+  // Chart display settings (e.g. Invert Scale) — localStorage-persisted in
+  // App, frontend-only presentation state that never touches candle data.
+  const [chartSettings, setChartSettings] = useState<ChartSettings>(loadChartSettings);
   // Session runtime status per imported indicator (never persisted).
   const [pineStatuses, setPineStatuses] = useState<Record<string, PineRunStatus>>({});
   const requestSeq = useRef(0);
@@ -127,6 +135,11 @@ export default function App() {
   useEffect(() => {
     saveImportedPineIndicators(importedPine);
   }, [importedPine]);
+
+  // Persist chart display settings (Invert Scale) on every change.
+  useEffect(() => {
+    saveChartSettings(chartSettings);
+  }, [chartSettings]);
 
   // ── EMA Reversal Alerts ───────────────────────────────────────────────────
   // Initial config + state from the backend (the engine is the source of truth).
@@ -475,6 +488,25 @@ export default function App() {
             />
             Auto
           </label>
+          {/* Invert Scale — visual-only price-scale inversion (TradingView-style).
+              Native LWC `invertScale` on the main right scale via
+              InvertScaleBridge (TradingChart). Pure viewport transform —
+              candle data, crosshair values and the time axis are untouched. */}
+          <button
+            type="button"
+            className={`invert-toggle ${chartSettings.invertScale ? "on" : ""}`}
+            aria-pressed={chartSettings.invertScale}
+            title={
+              chartSettings.invertScale
+                ? "Price scale is inverted — higher prices appear lower (click to restore)"
+                : "Click to invert the price scale — higher prices will appear lower"
+            }
+            onClick={() =>
+              setChartSettings((prev) => ({ ...prev, invertScale: !prev.invertScale }))
+            }
+          >
+            Invert Scale: {chartSettings.invertScale ? "ON" : "OFF"}
+          </button>
           <button
             className="refresh-btn"
             onClick={() => {
@@ -510,6 +542,7 @@ export default function App() {
           emaSettings={emaSettings}
           pineIndicators={importedPine}
           onPineStatus={handlePineStatus}
+          invertScale={chartSettings.invertScale}
         />
       </main>
 

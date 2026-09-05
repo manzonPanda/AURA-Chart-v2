@@ -26,6 +26,7 @@ import { defaultEmaSettings, type EmaSettings } from "../../config/emaSettings";
 import type { ImportedPineIndicator, PineRunStatus } from "../../services/pineImport";
 import { CandleCountdown } from "./CandleCountdown";
 import { EmaBridge } from "./EmaBridge";
+import { InvertScaleBridge } from "./InvertScaleBridge";
 import { OHLCReadout } from "./OHLCReadout";
 import { PineBridge } from "./PineBridge";
 
@@ -45,6 +46,13 @@ interface Props {
   pineIndicators?: ImportedPineIndicator[];
   /** Runtime status reporter for imported Pine indicators. */
   onPineStatus?: (id: string, status: PineRunStatus) => void;
+  /**
+   * Visual price-scale inversion (TradingView-style "Invert Scale"). A pure
+   * viewport transform on the main right price scale — OHLC data, candle
+   * order, crosshair values and the time axis are all untouched. Persisted
+   * in App via chartSettings.ts.
+   */
+  invertScale?: boolean;
 }
 
 function asBar(c: { ts: number; open: number; high: number; low: number; close: number; volume?: number }): Bar {
@@ -460,6 +468,7 @@ export function TradingChart({
   emaSettings = defaultEmaSettings(),
   pineIndicators = [],
   onPineStatus,
+  invertScale = false,
 }: Props) {
   const [crosshairCandle, setCrosshairCandle] = useState<Candle | null>(null);
   // When history is empty (e.g. IG allowance exhausted), ChartView still needs
@@ -591,6 +600,11 @@ export function TradingChart({
             autoFollow={autoFollow}
             onCrosshairCandle={setCrosshairCandle}
           />
+          {/* Visual price-scale inversion ("Invert Scale") — native LWC
+              price-scale transform on the main right scale. Candles, EMAs and
+              pane-0 overlays invert together; separate indicator panes are
+              untouched. No data is modified. */}
+          <InvertScaleBridge invertScale={invertScale} />
           {/* TradingView-style countdown ON the right price scale, pinned to
               the forming candle's price level (native LWC price line; renders
               no DOM). Stays attached to the live price on 1m and 3m. */}
