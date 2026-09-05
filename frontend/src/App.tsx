@@ -637,23 +637,16 @@ export default function App() {
           replaySymbol={selectedEpic || undefined}
           onLoadMoreHistory={loadMoreHistory}
           historyStatus={historyStatus}
+          marketStatus={{
+            environment: health?.environment ?? "…",
+            bars: candles.length > 0 ? candles.length : realtime.candle ? 1 : 0,
+            ticks: realtime.ticks,
+            lastTickAge: realtime.lastTickAt > 0
+              ? Math.max(0, Math.round((nowTick - realtime.lastTickAt) / 1000))
+              : null,
+          }}
         />
       </main>
-
-      <footer className="statusbar">
-        <div className="statusbar-brand">
-          <span className="statusbar-dot" />
-          <span>Market feed</span>
-        </div>
-        <div className="statusbar-metrics">
-          <span className="status-metric"><span className="status-label">ENV</span><strong>{health?.environment ?? "…"}</strong></span>
-          <span className="status-metric"><span className="status-label">BARS</span><strong>{candles.length > 0 ? candles.length : realtime.candle ? 1 : 0}</strong></span>
-          <span className="status-metric"><span className="status-label">TICKS</span><strong>{realtime.ticks}</strong></span>
-          {realtime.lastTickAt > 0 && (
-            <span className="status-metric"><span className="status-label">LAST TICK</span><strong>{Math.max(0, Math.round((nowTick - realtime.lastTickAt) / 1000))}s</strong></span>
-          )}
-        </div>
-      </footer>
     </div>
   );
 }

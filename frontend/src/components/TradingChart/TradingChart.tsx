@@ -91,6 +91,13 @@ interface Props {
   onLoadMoreHistory?: () => void;
   /** Incremental-history state for the edge control (loading/exhausted/error). */
   historyStatus?: HistoryStatus;
+  /** Compact live status values rendered alongside the OHLC readout. */
+  marketStatus?: {
+    environment: string;
+    bars: number;
+    ticks: number;
+    lastTickAge: number | null;
+  };
 }
 
 function asBar(c: { ts: number; open: number; high: number; low: number; close: number; volume?: number }): Bar {
@@ -592,6 +599,7 @@ export function TradingChart({
   replaySymbol,
   onLoadMoreHistory,
   historyStatus,
+  marketStatus = { environment: "…", bars: 0, ticks: 0, lastTickAge: null },
 }: Props) {
   const [crosshairCandle, setCrosshairCandle] = useState<Candle | null>(null);
   // When history is empty (e.g. IG allowance exhausted), ChartView still needs
@@ -973,6 +981,18 @@ export function TradingChart({
           <span className="chart-footer-caption">{resolution === "MINUTE_1" ? "1 minute" : "3 minute"} candles</span>
         </div>
         <OHLCReadout candle={crosshairCandle ?? replayCursorCandle ?? last} invertScale={invertScale} />
+        <div className="statusbar-inline" aria-label="Market feed status">
+          <div className="statusbar-brand">
+            <span className="statusbar-dot" />
+            <span>Market feed</span>
+          </div>
+          <span className="status-metric"><span className="status-label">ENV</span><strong>{marketStatus.environment}</strong></span>
+          <span className="status-metric"><span className="status-label">BARS</span><strong>{marketStatus.bars}</strong></span>
+          <span className="status-metric"><span className="status-label">TICKS</span><strong>{marketStatus.ticks}</strong></span>
+          {marketStatus.lastTickAge !== null && (
+            <span className="status-metric"><span className="status-label">LAST TICK</span><strong>{marketStatus.lastTickAge}s</strong></span>
+          )}
+        </div>
       </div>
     </div>
   );
