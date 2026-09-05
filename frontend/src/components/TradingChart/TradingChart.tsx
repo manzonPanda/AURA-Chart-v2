@@ -38,6 +38,7 @@ import {
 import { diag, iso, logUpdateBar, maybeLogChartBlock } from "../../services/diagnostics";
 import { planLiveUpdate, type LiveBar } from "../../services/liveCandle";
 import { defaultEmaSettings, type EmaSettings } from "../../config/emaSettings";
+import type { SmaSettings } from "../../config/smaSettings";
 import type { ImportedPineIndicator, PineRunStatus } from "../../services/pineImport";
 import { CandleCountdown } from "./CandleCountdown";
 import { EmaBridge } from "./EmaBridge";
@@ -45,6 +46,7 @@ import { InvertScaleBridge } from "./InvertScaleBridge";
 import { InvertDebugProbe } from "./invertDebug"; // ⚠ TEMP debug probe (?debugInvert)
 import { OHLCReadout } from "./OHLCReadout";
 import { PineBridge } from "./PineBridge";
+import { SmaBridge } from "./SmaBridge";
 import {
   REPLAY_SYMBOL,
   buildReplayManifest,
@@ -70,6 +72,8 @@ interface Props {
   autoFollow?: boolean;
   /** EMA overlay configuration (localStorage-persisted in App). */
   emaSettings?: EmaSettings;
+  /** SMA overlay configuration (localStorage-persisted in App). */
+  smaSettings?: SmaSettings;
   /** Imported Pine indicators (localStorage-persisted in App). */
   pineIndicators?: ImportedPineIndicator[];
   /** Runtime status reporter for imported Pine indicators. */
@@ -586,6 +590,7 @@ export function TradingChart({
   loading = false,
   autoFollow = true,
   emaSettings = defaultEmaSettings(),
+  smaSettings,
   pineIndicators = [],
   onPineStatus,
   invertScale = false,
@@ -929,6 +934,17 @@ export function TradingChart({
             bucketSec={bucketSec}
             settings={emaSettings}
           />
+          {/* SMA overlay — pure moving average on the SELECTED timeframe's
+              candles, same lifecycle + anti-look-ahead guarantees as EmaBridge
+              (cursor slice during Replay, live truth merged per tick). */}
+          {smaSettings && (
+            <SmaBridge
+              bars={visibleBars}
+              liveCandle={session ? null : liveCandle}
+              bucketSec={bucketSec}
+              settings={smaSettings}
+            />
+          )}
           {/* Imported Pine indicators — same generic PineTS engine path as the
               EMAs, rendered via native LWC panes when overlay=false. */}
           <PineBridge
