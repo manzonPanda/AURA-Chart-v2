@@ -479,12 +479,13 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <div className="brand">
-          <span className="dot" />
-          <span className="brand-name">AURA</span>
-          <span className="brand-sub">Chart</span>
-        </div>
-        <div className="instrument">
+        <div className="topbar-identity">
+          <div className="brand">
+            <span className="dot" />
+            <span className="brand-name">AURA</span>
+            <span className="brand-sub">Chart</span>
+          </div>
+          <div className="instrument">
           {/* Instrument selector (Phase 3) — populated from the BACKEND
               registry (GET /api/instruments); switching is a clean data/stream
               boundary (see handleInstrumentChange). */}
@@ -503,22 +504,24 @@ export default function App() {
               </option>
             ))}
           </select>
-          <span className="instrument-epic">{epic || historyEpic || "…"}</span>
+            <span className="instrument-epic">{epic || historyEpic || "…"}</span>
+          </div>
         </div>
         <div className="topbar-actions">
-          {/* EMA indicator slots (9/20) + Imported Pine Script section —
-              localStorage-persisted config */}
-          <IndicatorsMenu
-            settings={emaSettings}
-            onChange={setEmaSettings}
-            imported={importedPine}
-            pineStatuses={pineStatuses}
-            onImportedChange={handlePineChange}
-            onCompile={handlePineImport}
-            onImportConfirm={handlePineImportConfirm}
-          />
-          {/* Timeframe selector — 1m (canonical persisted) | 3m (derived) */}
-          <div className="timeframes" role="tablist" aria-label="Chart timeframe">
+          <div className="toolbar-group toolbar-group--analysis" aria-label="Chart analysis">
+            {/* EMA indicator slots (9/20) + Imported Pine Script section —
+                localStorage-persisted config */}
+            <IndicatorsMenu
+              settings={emaSettings}
+              onChange={setEmaSettings}
+              imported={importedPine}
+              pineStatuses={pineStatuses}
+              onImportedChange={handlePineChange}
+              onCompile={handlePineImport}
+              onImportConfirm={handlePineImportConfirm}
+            />
+            {/* Timeframe selector — 1m (canonical persisted) | 3m (derived) */}
+            <div className="timeframes" role="tablist" aria-label="Chart timeframe">
             {TIMEFRAMES.map((tf) => (
               <button
                 key={tf.key}
@@ -531,9 +534,11 @@ export default function App() {
                 {tf.label}
               </button>
             ))}
+            </div>
           </div>
-          {(() => {
-            const sl = streamLabel(realtime.status, realtime.lastTickAt, nowTick);
+          <div className="toolbar-group toolbar-group--status" aria-label="Connection status">
+            {(() => {
+              const sl = streamLabel(realtime.status, realtime.lastTickAt, nowTick);
             const cls = sl.live ? "live" : sl.noTicks ? "noticks" : realtime.status.toLowerCase();
             const ageTxt =
               sl.ageSec !== null ? ` · last tick ${sl.ageSec}s ago` : " · no ticks received yet";
@@ -546,10 +551,10 @@ export default function App() {
                 {sl.label}
               </span>
             );
-          })()}
-          {/* EMA Reversal Alerts — server-side detection; this control only
-              configures (REST) + displays state streamed over /ws. */}
-                    <EmaAlertControl
+            })()}
+            {/* EMA Reversal Alerts — server-side detection; this control only
+                configures (REST) + displays state streamed over /ws. */}
+            <EmaAlertControl
             state={emaAlertState}
             settings={emaAlertSettings}
             timeframe={timeframe}
@@ -560,10 +565,12 @@ export default function App() {
             pushMessage={pushMessage}
             onSettingsChange={handleEmaAlertSettingsChange}
             onPushEnable={handlePushEnable}
-            onPushDisable={handlePushDisable}
-            onTestPush={handleTestPush}
-          />
-          <label className="auto-toggle" title="Auto-follow the latest candle; turn off to pan freely">
+              onPushDisable={handlePushDisable}
+              onTestPush={handleTestPush}
+            />
+          </div>
+          <div className="toolbar-group toolbar-group--actions" aria-label="Chart controls">
+            <label className="auto-toggle" title="Auto-follow the latest candle; turn off to pan freely">
             <input
               type="checkbox"
               checked={autoFollow}
@@ -598,8 +605,9 @@ export default function App() {
             }}
             disabled={loading}
           >
-            {loading ? "…" : "Refresh"}
-          </button>
+              {loading ? "…" : "Refresh"}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -633,12 +641,18 @@ export default function App() {
       </main>
 
       <footer className="statusbar">
-        <span>Environment: {health?.environment ?? "…"}</span>
-        <span>Bars: {candles.length > 0 ? candles.length : realtime.candle ? 1 : 0}</span>
-        <span>Stream ticks: {realtime.ticks}</span>
-        {realtime.lastTickAt > 0 && (
-          <span>Last tick: {Math.max(0, Math.round((nowTick - realtime.lastTickAt) / 1000))}s ago</span>
-        )}
+        <div className="statusbar-brand">
+          <span className="statusbar-dot" />
+          <span>Market feed</span>
+        </div>
+        <div className="statusbar-metrics">
+          <span className="status-metric"><span className="status-label">ENV</span><strong>{health?.environment ?? "…"}</strong></span>
+          <span className="status-metric"><span className="status-label">BARS</span><strong>{candles.length > 0 ? candles.length : realtime.candle ? 1 : 0}</strong></span>
+          <span className="status-metric"><span className="status-label">TICKS</span><strong>{realtime.ticks}</strong></span>
+          {realtime.lastTickAt > 0 && (
+            <span className="status-metric"><span className="status-label">LAST TICK</span><strong>{Math.max(0, Math.round((nowTick - realtime.lastTickAt) / 1000))}s</strong></span>
+          )}
+        </div>
       </footer>
     </div>
   );

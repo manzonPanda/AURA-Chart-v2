@@ -968,6 +968,10 @@ export function TradingChart({
         {loading && <div className="chart-spinner">…</div>}
       </div>
       <div className="chart-footer">
+        <div className="chart-footer-context">
+          <span className="chart-footer-kicker">MARKET DATA</span>
+          <span className="chart-footer-caption">{resolution === "MINUTE_1" ? "1 minute" : "3 minute"} candles</span>
+        </div>
         <OHLCReadout candle={crosshairCandle ?? replayCursorCandle ?? last} invertScale={invertScale} />
       </div>
     </div>
