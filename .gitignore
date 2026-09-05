@@ -23,3 +23,6 @@ Thumbs.db
 
 # logs
 *.log
+
+# deploy hook runtime log (also covered by *.log — kept explicit for discoverability)
+.last-deploy.log

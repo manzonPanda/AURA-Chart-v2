@@ -155,13 +155,34 @@ for confirmed reversals on closed 1-minute candles inside 09:30–16:00
 America/New_York (Mon–Fri); the display also shows the current Manila
 equivalent.
 
-## Updating a deployed VM
+## Updating a deployed VM (automatic since `ea9fd51`+)
+
+`git pull` now **deploys itself** — a versioned git hook rebuilds and restarts
+whatever the pull actually touched:
 
 ```bash
-cd /opt/aura && git pull
-npm --prefix backend  run build && sudo systemctl restart aura-backend
-npm --prefix frontend run build          # static files — nginx picks them up instantly
+cd /opt/aura && git pull        # that's it — see the ✅ deploy summary it prints
+git config core.hooksPath deploy/githooks   # one-time per clone; enables the hook
 ```
+
+How it works (`deploy/redeploy.sh`, wired via `post-merge` + `post-rewrite` so
+both `git pull` and `git pull --rebase` are covered):
+
+| Pull touched | What happens automatically |
+|---|---|
+| `backend/**` | `npm ci` if `package*.json` changed → `tsc` build → `sudo systemctl restart aura-backend` → `/api/health` check |
+| `frontend/**` | `npm ci` if `package*.json` changed → `vite build` (nginx serves `dist/` from disk — live immediately) |
+| only README/docs | nothing — logged as "nothing to deploy" |
+
+Notes:
+- Requires passwordless sudo for `systemctl restart aura-backend`
+  (`sudo -n systemctl restart aura-backend` must work — true on this VM).
+- Full output is appended to `.last-deploy.log` (repo root, gitignored).
+- The restart path in the systemd unit assumes the sudoers rule; on a fresh VM
+  where `sudo` prompts for a password, run the restart once by hand or add a
+  scoped sudoers drop-in.
+- Manual override / full rebuild regardless of diff: `npm run deploy`
+  (= `bash deploy/redeploy.sh --full`).
 
 ## Why no code changes are needed
 

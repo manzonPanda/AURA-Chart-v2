@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Fires after `git pull` performed a merge/fast-forward (up-to-date pulls do
+# NOT fire it). Delegates to the versioned deploy script — see deploy/redeploy.sh
+# for what gets rebuilt and why. Enabled via: git config core.hooksPath deploy/githooks
+repo="$(git rev-parse --show-toplevel 2>/dev/null)" || repo="$(cd "$(dirname "$0")/../.." && pwd)"
+exec bash "$repo/deploy/redeploy.sh" auto
