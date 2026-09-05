@@ -72,6 +72,7 @@ test("per-timeframe cooldown state round-trips; legacy scalar runtime maps onto 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
 
 test("backend restart reloads push subscriptions; 400 (VAPID rotation) and 404/410 prune them", async () => {
   const dir = tempDir();
@@ -192,5 +193,4 @@ test("reconnect seed: a throwing seeder never breaks connect nor blocks the rema
   const frames = seeders.frames();
   assert.equal(frames.length, 1, "only the healthy seeder's frame is delivered");
   assert.equal((frames[0] as { type: string }).type, "emaAlert");
-});
 });

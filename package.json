@@ -5,7 +5,7 @@
   "description": "IG DAX candlestick chart — React + CandleKit + Lightweight Charts frontend with a Hono + TypeScript backend proxying the IG Markets REST API.",
   "scripts": {
     "setup": "npm install && npm --prefix backend install && npm --prefix frontend install",
-    "dev": "concurrently -k -n api,ui -c blue,green \"npm --prefix backend run dev\" \"npm --prefix frontend run dev\"",
+    "dev": "npm --prefix frontend run dev",
     "dev:backend": "npm --prefix backend run dev",
     "dev:frontend": "npm --prefix frontend run dev",
     "typecheck": "npm --prefix backend run typecheck && npm --prefix frontend run typecheck",
