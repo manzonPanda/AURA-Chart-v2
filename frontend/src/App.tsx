@@ -561,6 +561,7 @@ export default function App() {
           pineIndicators={importedPine}
           onPineStatus={handlePineStatus}
           invertScale={chartSettings.invertScale}
+          replaySymbol={selectedEpic || undefined}
         />
       </main>
 

@@ -8,6 +8,18 @@
   --accent: #38bdf8;
   --up: #26a69a;
   --down: #ef5350;
+  /* CandleKit overlay components (.ck-*) — AURA dark palette via the library's
+     documented CSS-variable theming (see @getcandlekit/charts/styles.css). */
+  --ck-bg: rgba(18, 21, 29, 0.85);
+  --ck-fg: #dfe4ee;
+  --ck-muted: #8b93a7;
+  --ck-border: #232936;
+  --ck-accent: #38bdf8;
+  --ck-accent-fg: #06121c;
+  --ck-up: #26a69a;
+  --ck-down: #ef5350;
+  --ck-warn: #fbbf24;
+  --ck-radius: 6px;
 }
 
 * { box-sizing: border-box; }
@@ -379,4 +391,23 @@ body {
 @media (max-width: 860px) {
   .ema-alert-btn { font-size: 0.72rem; padding: 6px 8px; }
   .ema-alert-pop { right: -8px; min-width: 0; width: 88vw; max-width: 330px; }
+}
+
+/* ── Candle Replay (CandleKit-native) ─────────────────────────────────────── */
+/* Slim chrome row above the canvas: the entry button, or CandleKit's own
+   ReplayControls panel + an Exit button (styled with CandleKit's own
+   .ck-replay-btn class). All panel styling comes from
+   @getcandlekit/charts/styles.css, themed via the --ck-* variables above. */
+.replay-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 0;
+}
+.replay-bar .ck-replay {
+  flex: 0 1 440px;
+  min-width: 0;
+}
+.replay-bar .ck-replay-btn {
+  height: 26px;
 }

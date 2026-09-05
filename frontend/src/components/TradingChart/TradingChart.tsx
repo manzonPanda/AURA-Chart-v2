@@ -1,5 +1,20 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { ChartView, useChartApi, type Bar } from "@getcandlekit/charts/react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
+import {
+  ChartView,
+  ReplayControls,
+  createReplayController,
+  useChartApi,
+  type Bar,
+  type ChartViewApi,
+  type ReplayController,
+} from "@getcandlekit/charts/react";
 import {
   TickMarkType,
   type ChartOptions,
@@ -30,6 +45,12 @@ import { InvertScaleBridge } from "./InvertScaleBridge";
 import { InvertDebugProbe } from "./invertDebug"; // ⚠ TEMP debug probe (?debugInvert)
 import { OHLCReadout } from "./OHLCReadout";
 import { PineBridge } from "./PineBridge";
+import {
+  REPLAY_SYMBOL,
+  buildReplayManifest,
+  findReplayIndex,
+  replayEngineOptions,
+} from "../../services/replay";
 
 interface Props {
   candles: readonly Candle[];
@@ -54,6 +75,8 @@ interface Props {
    * in App via chartSettings.ts.
    */
   invertScale?: boolean;
+  /** Instrument scope key (used to scope a replay session). */
+  replaySymbol?: string;
 }
 
 function asBar(c: { ts: number; open: number; high: number; low: number; close: number; volume?: number }): Bar {
@@ -66,6 +89,15 @@ function asBar(c: { ts: number; open: number; high: number; low: number; close: 
     ...(c.volume !== undefined && Number.isFinite(c.volume) ? { volume: c.volume } : {}),
   };
 }
+
+/**
+ * Stable empty series passed to ChartView while Replay is active. With a
+ * constant identity the ChartView `data` effect never re-fires mid-session,
+ * so the replay subscription is the SINGLE painter (CandleKit examples pass a
+ * static `[]` for exactly this reason) and no parent re-render can ever leak
+ * the full (future) history onto a replaying chart.
+ */
+const NO_BARS: readonly Bar[] = [];
 
 /**
  * Smooth-tick animation for the forming (current) candle.
@@ -146,13 +178,19 @@ function toCandle(
 function LiveBarBridge({
   liveCandle,
   bucketSec,
+  replayActive = false,
 }: {
   liveCandle: RealtimeCandleMsg | null;
   bucketSec: number;
+  /** When Replay Mode is active, the live stream continues updating its internal
+   *  truth but DOES NOT paint — replay owns the chart during the session. */
+  replayActive?: boolean;
 }) {
   const api = useChartApi();
   const liveRef = useRef(liveCandle);
   liveRef.current = liveCandle;
+  const replayActiveRef = useRef(replayActive);
+  replayActiveRef.current = replayActive;
   /** Authoritative merged OHLC of the forming bucket (see liveCandle.ts). */
   const truthRef = useRef<LiveBar | null>(null);
 
@@ -226,6 +264,9 @@ function LiveBarBridge({
 
     const applyFrame = (msg: RealtimeCandleMsg | null): void => {
       if (!msg) return;
+      // Replay Mode owns the chart — the live stream keeps merging into
+      // `truthRef` but must NEVER paint into the replay timeline.
+      if (replayActiveRef.current) return;
       // rAF is PAUSED while the tab is hidden — never plan an animation there.
       const hidden = document.visibilityState === "hidden";
       const plan = planLiveUpdate(truthRef.current, msg, bucketSec, { hidden });
@@ -307,14 +348,21 @@ function LiveBarBridge({
     // Re-apply the newest live candle AFTER every full-history setData
     // (initial load, timeframe switch, Refresh). Child effects run before the
     // parent's setData effect, so this must go through the bus "data" event,
-    // which CandleKit emits at the end of setData.
-    const offData = controller.bus.on("data", () => applyFrame(liveRef.current));
+    // which CandleKit emits at the end of setData. During Replay the "data"
+    // event is for the REPLAY slices — the live candle must not leak in.
+    const offData = controller.bus.on("data", () => {
+      if (replayActiveRef.current) return;
+      applyFrame(liveRef.current);
+    });
 
     // Tab-focus reconciliation: repaint the bucket truth immediately when the
     // tab becomes visible again so a close frozen mid-glide while hidden can
     // never survive past the focus event.
-    const onVisibility = (): void => {
+        const onVisibility = (): void => {
       if (document.visibilityState !== "visible") return;
+      // Replay owns the chart while active — repainting the live forming
+      // candle here would corrupt the replay timeline with present-day truth.
+      if (replayActiveRef.current) return;
       const truth = truthRef.current;
       if (!truth) return;
       cancelGlide();
@@ -355,17 +403,24 @@ function ViewportBridge({
   bucketSec,
   autoFollow = true,
   onCrosshairCandle,
+  replayCursor = null,
 }: {
   candles: readonly Candle[];
   liveCandle: RealtimeCandleMsg | null;
   bucketSec: number;
   autoFollow: boolean;
   onCrosshairCandle: (c: Candle | null) => void;
+  /** While Replay is active the "latest" bar is the replay cursor bar, never
+   *  the live candle — the crosshair/OHLC and the follow-edge stay replay-
+   *  scoped. */
+  replayCursor?: Candle | null;
 }) {
   const api = useChartApi();
   const candlesRef = useRef(candles);
   const liveRef = useRef(liveCandle);
   const autoRef = useRef(autoFollow);
+  const replayCursorRef = useRef<Candle | null>(replayCursor);
+  replayCursorRef.current = replayCursor;
   const followingRef = useRef(true);
   candlesRef.current = candles;
   liveRef.current = liveCandle;
@@ -380,6 +435,8 @@ function ViewportBridge({
     let disposed = false;
 
     const latestCandle = (): Candle | null => {
+      // Replay active → the current bar is the replay cursor bar.
+      if (replayCursorRef.current) return replayCursorRef.current;
       const lc = liveRef.current;
       if (lc) {
         return toCandle(alignToBucketStart(lc.time * 1000, bucketSec), {
@@ -470,6 +527,7 @@ export function TradingChart({
   pineIndicators = [],
   onPineStatus,
   invertScale = false,
+  replaySymbol,
 }: Props) {
   const [crosshairCandle, setCrosshairCandle] = useState<Candle | null>(null);
   // When history is empty (e.g. IG allowance exhausted), ChartView still needs
@@ -582,24 +640,181 @@ export function TradingChart({
     [],
   );
 
+  // ── Replay Mode — CandleKit-native (mirrors examples/replay) ───────────────
+  // The ReplayController is the single source of truth: CandleKit's own
+  // <ReplayControls> drives play/pause/step/speed/seek, and ONE subscription
+  // paints `getBarsUpToCursor()` onto the chart series on every engine state
+  // change — the official example's exact pattern (setData uniformly handles
+  // entry, forward ticks, backward steps and seeks; updateBar is never used).
+  // AURA adds only what the demo doesn't have: live-paint suppression,
+  // cursor-scoped indicator inputs, candle-pick entry and a clean exit.
+  const [chartApi, setChartApi] = useState<ChartViewApi | null>(null);
+  const [session, setSession] = useState<{
+    rc: ReplayController;
+    manifest: Parameters<ReplayController["load"]>[0];
+    interval: string;
+  } | null>(null);
+  const [picking, setPicking] = useState(false);
+    /** Replay-visible bars (cursor slice) feeding the indicator bridges + OHLC. */
+  const visibleRef = useRef<readonly Bar[]>(NO_BARS);
+  // The bump (not the value) is what matters: it re-renders the ref-reads
+  // (visibleBars / replayCursorCandle) after every engine state change.
+  const [, bumpVisible] = useReducer((n: number) => n + 1, 0);
+
+  // Enter: the picked candle becomes the replay start (the last visible bar
+  // before playback). The manifest wraps the ALREADY-LOADED history — the
+  // source array is never mutated and nothing is refetched.
+  const enterReplay = useCallback(
+    (startTs: number) => {
+      if (!chartApi || session || data.length === 0) return;
+      const interval = resolution || "DEFAULT";
+      const { manifest, dates } = buildReplayManifest({
+        id: `${replaySymbol ?? REPLAY_SYMBOL}|${interval}|${startTs}`,
+        symbol: REPLAY_SYMBOL,
+        interval,
+        bars: data,
+        startTs,
+      });
+      const rc = createReplayController(replayEngineOptions(dates));
+      visibleRef.current = NO_BARS; // hide the future until the first slice lands
+      setPicking(false);
+      setSession({ rc, manifest, interval });
+    },
+    [chartApi, session, data, resolution, replaySymbol],
+  );
+
+  const exitReplay = useCallback(() => setSession(null), []);
+
+  // The single paint loop (CandleKit example pattern). Runs after ChartView
+  // has cleared its series (child effects first), so the future candles can
+  // never flash on entry. Unsubscribing + unloading here is also the exit
+  // path and the unmount cleanup.
+  useEffect(() => {
+    if (!session || !chartApi) return;
+    const { rc, manifest, interval } = session;
+    const unsub = rc.subscribe((s) => {
+      if (s.status !== "ready") return;
+      const slice = rc.getBarsUpToCursor(REPLAY_SYMBOL, interval);
+      visibleRef.current = slice;
+      try {
+        chartApi.controller.setData(slice);
+      } catch {
+        /* chart already torn down */
+      }
+      bumpVisible();
+    });
+    void rc.load(manifest);
+    return () => {
+      unsub();
+      try {
+        rc.unload();
+      } catch {
+        /* already idle */
+      }
+    };
+  }, [session, chartApi]);
+
+  // Scope guard: an instrument/timeframe change invalidates the replay cursor
+  // — exit cleanly instead of carrying it across datasets. (A mid-session
+  // history refetch intentionally does NOT exit: replay is a frozen in-memory
+  // simulation, and exiting would repaint the refetched dataset.)
+  useEffect(() => {
+    setSession((s) => (s ? null : s));
+    setPicking(false);
+  }, [replaySymbol, resolution]);
+
+  // Candle-pick entry: while armed (and idle), a click on a historical candle
+  // reports its bucket ts as the replay start point (LWC subscribeClick).
+  useEffect(() => {
+    if (!chartApi || !picking || session) return;
+    const chart = chartApi.controller.getChart() as unknown as {
+      subscribeClick?(h: (param: unknown) => void): void;
+      unsubscribeClick?(h: (param: unknown) => void): void;
+    } | null;
+    if (!chart || typeof chart.subscribeClick !== "function") return;
+    const series = chartApi.controller.getSeries();
+    const onClick = (param: unknown) => {
+      const p = param as { seriesData?: { get?(k: unknown): unknown } | null };
+      const raw =
+        p && p.seriesData && typeof p.seriesData.get === "function"
+          ? p.seriesData.get(series)
+          : undefined;
+      const time =
+        raw && typeof raw === "object" ? (raw as { time?: number }).time : undefined;
+      if (typeof time === "number" && Number.isFinite(time)) enterReplay(time * 1000);
+    };
+    try {
+      chart.subscribeClick(onClick);
+    } catch {
+      /* click unsupported */
+    }
+    return () => {
+      try {
+        chart.unsubscribeClick?.(onClick);
+      } catch {
+        /* noop */
+      }
+    };
+  }, [chartApi, picking, session, enterReplay]);
+
+  // Replay-visible bars: the cursor slice during a session, the full dataset
+  // otherwise. Ref-reads are re-rendered into view by `visibleTick`.
+  const visibleBars = session ? visibleRef.current : data;
+  // The bar under the replay cursor — the OHLC strip's "current" candle while
+  // replay is active (a crosshair hover still wins).
+  const replayCursorCandle: Candle | null = (() => {
+    if (!session) return null;
+    const vis = visibleRef.current;
+    if (vis.length === 0) return null;
+    const idx = findReplayIndex(data, vis[vis.length - 1].ts);
+    return idx >= 0 ? data[idx] ?? null : null;
+  })();
+  const replayActive = session !== null;
+
   return (
     <div className="trading-chart" data-stream={streamStatus}>
+      {/* Replay chrome — CandleKit's native ReplayControls is the entire replay
+          UI (play/pause/step/speed/seek/progress); AURA adds only the entry
+          button and Exit (the demo hardcodes both), styled with CandleKit's
+          own .ck-replay-btn class. Slim top row, in flow — no floating dock. */}
+      <div className="replay-bar">
+        {session ? (
+          <>
+            <ReplayControls controller={session.rc} formatTime={formatManilaHHMMSS} />
+            <button type="button" className="ck-replay-btn" onClick={exitReplay}>
+              Exit Replay
+            </button>
+          </>
+        ) : (
+          data.length > 0 && (
+            <button
+              type="button"
+              className="ck-replay-btn"
+              onClick={() => setPicking((v) => !v)}
+            >
+              {picking ? "Click a candle to start Replay…" : "Replay"}
+            </button>
+          )
+        )}
+      </div>
       <div className="chart-canvas-wrap">
         <ChartView
-          data={data}
+          data={session ? NO_BARS : data}
           seriesType="candlestick"
           theme="dark"
           showVolume={false}
           autoFit={false}
           chartOptions={manilaChartOptions}
+          onReady={setChartApi}
         >
-          <LiveBarBridge liveCandle={liveCandle} bucketSec={bucketSec} />
+          <LiveBarBridge liveCandle={liveCandle} bucketSec={bucketSec} replayActive={replayActive} />
           <ViewportBridge
             candles={candles}
             liveCandle={liveCandle}
             bucketSec={bucketSec}
             autoFollow={autoFollow}
             onCrosshairCandle={setCrosshairCandle}
+            replayCursor={replayCursorCandle ?? undefined}
           />
           {/* Visual price-scale inversion ("Invert Scale") — native LWC
               price-scale transform on the main right scale. Candles, EMAs and
@@ -610,17 +825,29 @@ export function TradingChart({
           <InvertDebugProbe invertScale={invertScale} />
           {/* TradingView-style countdown ON the right price scale, pinned to
               the forming candle's price level (native LWC price line; renders
-              no DOM). Stays attached to the live price on 1m and 3m. */}
-          <CandleCountdown liveCandle={liveCandle} candles={candles} bucketSec={bucketSec} invertScale={invertScale} />
+              no DOM). Stays attached to the live price on 1m and 3m.
+              Hidden while Replay is active: the countdown counts LIVE market
+              time, which does not exist on a replaying (historical) chart. */}
+          {!session && (
+            <CandleCountdown liveCandle={liveCandle} candles={candles} bucketSec={bucketSec} invertScale={invertScale} />
+          )}
           {/* EMA 9 / EMA 20 overlays — plain LWC line series on the price
               pane, recalculated from the SELECTED timeframe's candles with the
-              forming candle's server truth (see services/ema.ts). */}
-          <EmaBridge bars={data} liveCandle={liveCandle} bucketSec={bucketSec} settings={emaSettings} />
+              forming candle's server truth (see services/ema.ts). While replay
+              is active the bars are the cursor slice and the present-day
+              forming candle is withheld, so indicators can never see the
+              future. */}
+          <EmaBridge
+            bars={visibleBars}
+            liveCandle={session ? null : liveCandle}
+            bucketSec={bucketSec}
+            settings={emaSettings}
+          />
           {/* Imported Pine indicators — same generic PineTS engine path as the
               EMAs, rendered via native LWC panes when overlay=false. */}
           <PineBridge
-            bars={data}
-            liveCandle={liveCandle}
+            bars={visibleBars}
+            liveCandle={session ? null : liveCandle}
             bucketSec={bucketSec}
             indicators={pineIndicators}
             onStatus={onPineStatus}
@@ -629,7 +856,7 @@ export function TradingChart({
         {loading && <div className="chart-spinner">…</div>}
       </div>
       <div className="chart-footer">
-        <OHLCReadout candle={crosshairCandle ?? last} invertScale={invertScale} />
+        <OHLCReadout candle={crosshairCandle ?? replayCursorCandle ?? last} invertScale={invertScale} />
       </div>
     </div>
   );
