@@ -51,6 +51,12 @@ import {
   findReplayIndex,
   replayEngineOptions,
 } from "../../services/replay";
+import {
+  isNearHistoryEdge,
+  resolveViewportAction,
+  shouldShowLoadMore,
+  type HistoryStatus,
+} from "../../services/historyPagination";
 
 interface Props {
   candles: readonly Candle[];
@@ -77,6 +83,14 @@ interface Props {
   invertScale?: boolean;
   /** Instrument scope key (used to scope a replay session). */
   replaySymbol?: string;
+  /**
+   * "Load More History" — called when the user clicks the historical-edge
+   * control. App owns the fetch + merge; TradingChart only captures the
+   * viewport first so the prepend repaint stays visually anchored.
+   */
+  onLoadMoreHistory?: () => void;
+  /** Incremental-history state for the edge control (loading/exhausted/error). */
+  historyStatus?: HistoryStatus;
 }
 
 function asBar(c: { ts: number; open: number; high: number; low: number; close: number; volume?: number }): Bar {
@@ -118,6 +132,9 @@ const clamp01 = (v: number): number => Math.max(0, Math.min(1, v));
 /** Minimal, version-agnostic handles into the underlying Lightweight Charts API. */
 interface TimeScaleApi {
   getVisibleRange(): { from: number; to: number } | null;
+  /** Restore an exact visible window (used to keep the viewport anchored when
+   *  older history is prepended — LWC's own visible-range API). */
+  setVisibleRange(range: { from: number; to: number }): void;
   scrollToRealTime(): void;
   fitContent(): void;
   subscribeVisibleTimeRangeChange(cb: () => void): void;
@@ -404,6 +421,8 @@ function ViewportBridge({
   autoFollow = true,
   onCrosshairCandle,
   replayCursor = null,
+  preserveRangeRef,
+  onNearHistoryEdge,
 }: {
   candles: readonly Candle[];
   liveCandle: RealtimeCandleMsg | null;
@@ -414,6 +433,14 @@ function ViewportBridge({
    *  the live candle — the crosshair/OHLC and the follow-edge stay replay-
    *  scoped. */
   replayCursor?: Candle | null;
+  /** When set (by the "Load More History" click) the NEXT bus-"data" repaint —
+   *  the prepend — restores this exact visible window instead of jumping to
+   *  the latest candle, keeping the user's historical viewport anchored.
+   *  Structural type: a mutable ref to the captured LWC visible range. */
+  preserveRangeRef?: { current: { from: number; to: number } | null } | null;
+  /** Reports whether the visible range's left edge sits near the oldest
+   *  loaded candle (reveals the "Load More History" control). */
+  onNearHistoryEdge?: (near: boolean) => void;
 }) {
   const api = useChartApi();
   const candlesRef = useRef(candles);
@@ -422,6 +449,9 @@ function ViewportBridge({
   const replayCursorRef = useRef<Candle | null>(replayCursor);
   replayCursorRef.current = replayCursor;
   const followingRef = useRef(true);
+  const nearEdgeRef = useRef(false);
+  const nearEdgeCbRef = useRef(onNearHistoryEdge);
+  nearEdgeCbRef.current = onNearHistoryEdge;
   candlesRef.current = candles;
   liveRef.current = liveCandle;
   autoRef.current = autoFollow;
@@ -466,28 +496,60 @@ function ViewportBridge({
 
     const onPan = () => {
       if (disposed) return;
+      let range: { from: number; to: number } | null = null;
       try {
-        const range = ts.getVisibleRange();
+        range = ts.getVisibleRange();
         const lastSec = (latestCandle()?.ts ?? 0) / 1000;
         followingRef.current = !range || !lastSec || range.to >= lastSec - bucketSec;
       } catch {
         followingRef.current = true;
       }
+      // Historical-edge proximity → reveal/hide the "Load More History" control.
+      const edgeCb = nearEdgeCbRef.current;
+      if (edgeCb) {
+        const oldest = candlesRef.current[0];
+        const near =
+          range && oldest
+            ? isNearHistoryEdge(range.from, oldest.ts / 1000, bucketSec)
+            : false;
+        if (near !== nearEdgeRef.current) {
+          nearEdgeRef.current = near;
+          edgeCb(near);
+        }
+      }
     };
 
-    const scrollToLatest = () => {
-      // Auto ON + user at the realtime edge → keep the latest candle visible.
-      // Auto OFF or panned away → never move the user's viewport.
-      if (autoRef.current && followingRef.current) {
+    const applyViewportAfterData = () => {
+      const captured = preserveRangeRef?.current ?? null;
+      const action = resolveViewportAction({
+        hasCapturedRange: captured !== null,
+        autoFollow: autoRef.current,
+        following: followingRef.current,
+      });
+      if (action === "restore" && captured) {
+        // Prepend repaint: put the user back on the exact candles they were
+        // viewing (the captured times still resolve to the same candles —
+        // prepends are strictly older and never re-time existing bars).
+        if (preserveRangeRef) preserveRangeRef.current = null;
+        try {
+          ts.setVisibleRange(captured);
+        } catch {
+          try { ts.scrollToRealTime(); } catch { /* older LWC */ }
+        }
+        return;
+      }
+      if (action === "follow-latest") {
+        // Auto ON + user at the realtime edge → keep the latest candle visible.
         try { ts.scrollToRealTime(); } catch { /* older LWC */ }
       }
+      // "none" → the user panned away and nothing was prepended: hands off.
     };
 
     try { ts.subscribeVisibleTimeRangeChange(onPan); } catch { /* older LWC */ }
     onPan();
-    scrollToLatest();
+    applyViewportAfterData();
     // Re-align after every full-history setData (CandleKit emits "data" there).
-    const offData = controller.bus.on("data", scrollToLatest);
+    const offData = controller.bus.on("data", applyViewportAfterData);
 
     try { lwc.subscribeCrosshairMove(onMove); } catch { /* crosshair disabled */ }
     return () => {
@@ -528,6 +590,8 @@ export function TradingChart({
   onPineStatus,
   invertScale = false,
   replaySymbol,
+  onLoadMoreHistory,
+  historyStatus,
 }: Props) {
   const [crosshairCandle, setCrosshairCandle] = useState<Candle | null>(null);
   // When history is empty (e.g. IG allowance exhausted), ChartView still needs
@@ -660,6 +724,26 @@ export function TradingChart({
   // The bump (not the value) is what matters: it re-renders the ref-reads
   // (visibleBars / replayCursorCandle) after every engine state change.
   const [, bumpVisible] = useReducer((n: number) => n + 1, 0);
+
+  // ── Incremental history ("Load More History") ───────────────────────────────
+  // App owns the fetch/merge; this component owns the VIEWPORT CONTRACT and the
+  // edge control. On click we snapshot the exact visible window BEFORE the
+  // prepend repaint; ViewportBridge restores it on the bus-"data" event that
+  // follows the setData — the user stays visually anchored on the same candles.
+  const preserveRangeRef = useRef<{ from: number; to: number } | null>(null);
+  const [nearEdge, setNearEdge] = useState(false);
+  const handleLoadMore = useCallback(() => {
+    if (session || !onLoadMoreHistory || !data.length) return;
+    if (historyStatus?.loading || historyStatus?.exhausted) return;
+    try {
+      const chart = chartApi?.controller.getChart() as unknown as ChartApi | null;
+      const range = chart?.timeScale().getVisibleRange() ?? null;
+      if (range) preserveRangeRef.current = { from: range.from, to: range.to };
+    } catch {
+      /* viewport capture unsupported — the restore simply won't engage */
+    }
+    onLoadMoreHistory();
+  }, [session, onLoadMoreHistory, historyStatus, chartApi, data.length]);
 
   // Enter: the picked candle becomes the replay start (the last visible bar
   // before playback). The manifest wraps the ALREADY-LOADED history — the
@@ -815,6 +899,8 @@ export function TradingChart({
             autoFollow={autoFollow}
             onCrosshairCandle={setCrosshairCandle}
             replayCursor={replayCursorCandle ?? undefined}
+            preserveRangeRef={preserveRangeRef}
+            onNearHistoryEdge={setNearEdge}
           />
           {/* Visual price-scale inversion ("Invert Scale") — native LWC
               price-scale transform on the main right scale. Candles, EMAs and
@@ -853,6 +939,32 @@ export function TradingChart({
             onStatus={onPineStatus}
           />
         </ChartView>
+        {/* Historical-edge control — subtle pill, top-left, revealed only when
+            the user pans near the oldest loaded candle. Hidden during Replay
+            (a replaying chart is a frozen dataset, never paginated). */}
+        {historyStatus && shouldShowLoadMore({
+          replayActive: session !== null,
+          exhausted: historyStatus.exhausted,
+          nearEdge,
+          hasData: data.length > 0,
+        }) && (
+          historyStatus.exhausted ? (
+            <div className="history-more history-more--end">No more history</div>
+          ) : (
+            <button
+              type="button"
+              className="history-more"
+              onClick={handleLoadMore}
+              disabled={historyStatus.loading}
+            >
+              {historyStatus.loading
+                ? "Loading history…"
+                : historyStatus.error
+                  ? `Retry · ${historyStatus.error}`
+                  : "Load More History"}
+            </button>
+          )
+        )}
         {loading && <div className="chart-spinner">…</div>}
       </div>
       <div className="chart-footer">

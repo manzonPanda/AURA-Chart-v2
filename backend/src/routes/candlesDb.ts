@@ -13,7 +13,7 @@ import {
 import type { Candle } from "../types/candle.js";
 
 /**
-  * GET /api/candles/db?epic=<EPIC>&timeframe=MINUTE_1|MINUTE_3&limit=<1..10000>
+   * GET /api/candles/db?epic=<EPIC>&timeframe=MINUTE_1|MINUTE_3&limit=<1..10000>&before=<epoch-sec>
  *
  * Serves chart history from OUR Supabase persistence — the frontend's normal
  * history source. IG REST stays a bootstrap/backfill source only and its
@@ -32,24 +32,32 @@ import type { Candle } from "../types/candle.js";
  */
 
 /** Load chart-history candles for a timeframe WITHOUT touching IG historical
- *  REST (see the header above). Never reads a stored 3m series. */
+ *  REST (see the header above). Never reads a stored 3m series.
+ *
+ *  `beforeSec` (optional) is the history-pagination cursor: only rows strictly
+ *  older than it are considered. `hasMore` reports whether the RAW database
+ *  page came back full — a full page means older rows may still exist (the
+ *  frontend's "Load More History" keeps going while hasMore is true). */
 async function loadTimeframeCandles(
   store: CandleStore,
   epic: string,
   timeframe: string,
   limit: number,
-): Promise<PersistedCandle[]> {
+  beforeSec?: number,
+): Promise<{ candles: PersistedCandle[]; hasMore: boolean }> {
   const minutes = minutesFor(timeframe);
 
   // Not a whole-minute frame (or 1m itself) → the stored rows are the result.
   if (typeof minutes !== "number" || minutes <= 1) {
-    return store.loadCandles(epic, timeframe, limit);
+    const raw = await store.loadCandles(epic, timeframe, limit, beforeSec);
+    return { candles: raw, hasMore: raw.length >= limit };
   }
 
   // N complete macro candles require N*minutes closed 1m rows; fetch a little
   // head-room so the newest (still-forming) macro bucket can be dropped — it
   // belongs to the live WS overlay, not to history.
-  const raw = await store.loadCandles(epic, CANONICAL_TIMEFRAME, limit * minutes + minutes + 1);
+  const requested1m = limit * minutes + minutes + 1;
+  const raw = await store.loadCandles(epic, CANONICAL_TIMEFRAME, requested1m, beforeSec);
   const oneMin: Candle[] = raw.map((r) => ({
     ts: r.time * 1000,
     open: r.open,
@@ -73,7 +81,7 @@ async function loadTimeframeCandles(
     else if (curStatus === "backfilled" && prev === "completed") statuses.set(b, "backfilled");
   }
 
-  return aggregateCompleteToMinutes(oneMin, minutes).map((c) => ({
+  const candles = aggregateCompleteToMinutes(oneMin, minutes).map((c) => ({
     time: Math.floor(c.ts / 1000),
     open: c.open,
     high: c.high,
@@ -82,6 +90,9 @@ async function loadTimeframeCandles(
     tickCount: tickSums.get(c.ts) ?? null,
     ...(statuses.get(c.ts) ? { status: statuses.get(c.ts) } : {}),
   }));
+  // Full 1m page ⇒ the table still has older rows (the derived macro count can
+  // legitimately be < limit — the last macro bucket may be incomplete).
+  return { candles, hasMore: raw.length >= requested1m };
 }
 
 /** Squash groups of stored 1m GapRows into one effective row per macro bucket:
@@ -165,12 +176,18 @@ export function createCandlesDbRouter(
       );
     }
 
-        const parsedLimit = Number(c.req.query("limit"));
+    const parsedLimit = Number(c.req.query("limit"));
     const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 2000;
 
+    // History-pagination cursor (epoch SECONDS): only candles STRICTLY older
+    // than this bucket start are returned. Omitted → the newest `limit`.
+    const parsedBefore = Number(c.req.query("before"));
+    const beforeSec =
+      Number.isFinite(parsedBefore) && parsedBefore > 0 ? Math.floor(parsedBefore) : undefined;
+
     try {
-      const candles = await loadTimeframeCandles(store, epic, timeframe, limit);
-      return c.json({ epic, timeframe, count: candles.length, candles });
+      const { candles, hasMore } = await loadTimeframeCandles(store, epic, timeframe, limit, beforeSec);
+      return c.json({ epic, timeframe, count: candles.length, hasMore, candles });
     } catch (err) {
       return c.json(
         {

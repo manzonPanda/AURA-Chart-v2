@@ -20,6 +20,14 @@ import {
   type ChartSettings,
 } from "./config/chartSettings";
 import { ApiError, fetchCandlesDb, fetchHealth } from "./services/api";
+import {
+  canLoadMore,
+  cursorFrom,
+  INITIAL_HISTORY_STATUS,
+  isExhausted,
+  mergeOlderCandles,
+  type HistoryStatus,
+} from "./services/historyPagination";
 import { useInstruments } from "./services/useInstruments";
 import {
   compileImportedPine,
@@ -334,14 +342,26 @@ export default function App() {
   // (GET /api/candles/db). If it fails (Supabase unconfigured / unreachable) we
   // keep streaming and just note it. IG historical REST is NOT used for normal
   // page history — its allowance errors can never block the chart from loading.
+  //
+  // Incremental pagination ("Load More History"): `historyStatus` tracks the
+  // manual older-page fetches. The cursor is ALWAYS derived from the current
+  // dataset's oldest candle (never stored globally), so an instrument or
+  // timeframe switch can never reuse a foreign cursor — loadHistory resets the
+  // status whenever the dataset changes.
+  const [historyStatus, setHistoryStatus] = useState<HistoryStatus>(INITIAL_HISTORY_STATUS);
   const loadHistory = useCallback(async () => {
     const seq = ++requestSeq.current;
     const wantedEpic = epic; // switch guard: never accept candles for a superseded instrument
     setLoading(true);
+    setHistoryStatus(INITIAL_HISTORY_STATUS); // new dataset → fresh pagination state
     try {
       const data = await fetchCandlesDb(timeframe, HISTORY_LIMIT, wantedEpic || undefined);
       if (seq !== requestSeq.current) return;
       if (wantedEpic && data.epic !== wantedEpic) return; // stale instrument — dropped
+      // Invalidate any in-flight "Load More History" — its resolution would
+      // merge onto the STALE (pre-scope-change) closure and could overwrite
+      // this freshly-loaded dataset.
+      moreHistorySeq.current++;
       setHistoryEpic(data.epic);
       setCandles(data.candles);
       setHistoryMissing(false);
@@ -355,6 +375,51 @@ export default function App() {
       if (seq === requestSeq.current) setLoading(false);
     }
   }, [timeframe, epic]);
+
+  // "Load More History": fetch the next OLDER page (cursor = oldest loaded
+  // bucket) and prepend it. Guards (canLoadMore) keep exactly one request in
+  // flight; the merge is strictly-older + dedupe, so live/newer candles are
+  // never touched. Replay does not consume this path: while a replay session
+  // is active TradingChart's data prop is a constant, so even a concurrent
+  // merge could not repaint the replaying chart (and the control is hidden).
+  const moreHistorySeq = useRef(0);
+  const loadMoreHistory = useCallback(async () => {
+    // Guards: one in-flight request max, nothing while exhausted, and always a
+    // dataset to anchor the cursor to. `historyStatus`/`candles` are deps, so
+    // the values here are current at click time (double-click = one request).
+    if (!canLoadMore(historyStatus, candles.length > 0)) return;
+    const cursor = cursorFrom(candles);
+    if (cursor === null) return;
+    const seq = ++moreHistorySeq.current;
+    const wantedEpic = epic;
+    const wantedTf = timeframe;
+    setHistoryStatus((prev) => ({ ...prev, loading: true, error: null }));
+    try {
+      const data = await fetchCandlesDb(
+        wantedTf,
+        HISTORY_LIMIT,
+        wantedEpic || undefined,
+        Math.floor(cursor / 1000),
+      );
+      if (seq !== moreHistorySeq.current) return;
+      if (wantedEpic && data.epic !== wantedEpic) return; // stale instrument — dropped
+      const { merged, added } = mergeOlderCandles(candles, data.candles, cursor);
+      setHistoryStatus({
+        loading: false,
+        exhausted: isExhausted(data.hasMore, added),
+        error: null,
+      });
+      if (added > 0) {
+        setCandles(merged);
+        console.info(`[HISTORY] +${added} older candles (oldest now ${iso(merged[0].ts)})`);
+      }
+    } catch (err) {
+      if (seq !== moreHistorySeq.current) return;
+      const msg = err instanceof ApiError ? err.message : (err as Error).message;
+      setHistoryStatus((prev) => ({ ...prev, loading: false, error: msg }));
+      console.info(`[HISTORY] load-more failed (chart keeps current window): ${msg}`);
+    }
+  }, [epic, timeframe, candles, historyStatus]);
 
   // Initial load + page health.
   useEffect(() => {
@@ -562,6 +627,8 @@ export default function App() {
           onPineStatus={handlePineStatus}
           invertScale={chartSettings.invertScale}
           replaySymbol={selectedEpic || undefined}
+          onLoadMoreHistory={loadMoreHistory}
+          historyStatus={historyStatus}
         />
       </main>
 

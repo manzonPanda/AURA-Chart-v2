@@ -304,6 +304,20 @@ body {
 }
 @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
 
+/* Historical-edge control ("Load More History") — a subtle pill top-left of
+   the chart, revealed only while the user's viewport sits near the oldest
+   loaded candle. Same visual language as .chart-spinner: quiet panel chip. */
+.history-more {
+  position: absolute; top: 10px; left: 12px; z-index: 5;
+  padding: 4px 10px; font-size: 0.78rem;
+  color: var(--text); background: rgba(11, 14, 20, 0.72);
+  border: 1px solid var(--border); border-radius: 6px;
+  cursor: pointer; opacity: 0.85; transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+.history-more:hover:not(:disabled) { opacity: 1; border-color: var(--accent); }
+.history-more:disabled { cursor: default; opacity: 0.6; color: var(--accent); }
+.history-more--end { cursor: default; opacity: 0.55; color: var(--text); }
+
 /* ── OHLC strip ──────────────────────────────────────────── */
 .chart-footer { border-top: 1px solid var(--border); background: var(--panel); padding: 8px 1rem; flex-shrink: 0; display: flex; align-items: center; gap: 1rem; }
 .ohlc { display: flex; flex-wrap: wrap; gap: 1.1rem; font-size: 0.8rem; font-variant-numeric: tabular-nums; }

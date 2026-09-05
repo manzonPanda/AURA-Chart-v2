@@ -123,6 +123,10 @@ export class CandleStore {
    * chart-ready (`time` = epoch seconds) — directly consumable by
    * `series.setData()`.
    *
+   * `beforeSec` (optional) is a history-pagination CURSOR: only rows STRICTLY
+   * OLDER than that bucket start are returned (used by the chart's
+   * "Load More History" — the frontend sends its oldest loaded bucket).
+   *
    * Supabase-hosted PostgREST silently CLAMPS every request to 1000 rows
    * (db-max-rows=1000): `.limit(2000)` returns only the newest 1000 — exactly
    * one 1m trading day. To serve genuine multi-day history we page through
@@ -133,17 +137,22 @@ export class CandleStore {
     instrument: string,
     timeframe: string,
     limit: number,
+    beforeSec?: number,
   ): Promise<PersistedCandle[]> {
     const capped = Math.max(1, Math.min(10000, Math.round(limit) || 500));
     const PAGE = 1000; // PostgREST per-request max — keep every window ≤ 1000
     const rows: CandleRow[] = [];
     for (let from = 0; from < capped; from += PAGE) {
       const to = Math.min(from + PAGE - 1, capped - 1);
-      const { data, error } = await this.client
+      let q = this.client
         .from(this.table)
         .select("bucket_time,open,high,low,close,tick_count,status")
         .eq("instrument", instrument)
-        .eq("timeframe", timeframe)
+        .eq("timeframe", timeframe);
+      if (beforeSec !== undefined && Number.isFinite(beforeSec) && beforeSec > 0) {
+        q = q.lt("bucket_time", new Date(beforeSec * 1000).toISOString());
+      }
+      const { data, error } = await q
         .order("bucket_time", { ascending: false })
         .range(from, to);
       if (error) throw new Error(error.message);

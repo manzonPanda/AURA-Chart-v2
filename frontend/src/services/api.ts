@@ -62,6 +62,8 @@ interface DbCandlesResponse {
   epic: string;
   timeframe: string;
   count: number;
+  /** True when the raw DB page came back full → older rows may still exist. */
+  hasMore?: boolean;
   candles: DbCandleDto[];
 }
 
@@ -75,6 +77,11 @@ interface DbCandlesResponse {
  * GET /api/instruments). Omitted → the backend default (DAX — historic
  * behavior).
  *
+ * Incremental pagination: `beforeSec` (epoch SECONDS, optional) is the
+ * "Load More History" cursor — the backend returns only candles STRICTLY
+ * older than it. `hasMore` reports whether older rows may still exist
+ * (backend: the raw page came back full).
+ *
  * Returns candles ASCENDING with `ts` = bucket start in epoch ms — the exact
  * same time base as the realtime WS frames, so the live candle merges into /
  * appends after the newest persisted bucket with no duplicates.
@@ -83,9 +90,11 @@ export async function fetchCandlesDb(
   timeframe: string,
   limit = HISTORY_LIMIT,
   epic?: string,
-): Promise<{ epic: string; candles: Candle[] }> {
+  beforeSec?: number,
+): Promise<{ epic: string; candles: Candle[]; hasMore: boolean }> {
   const qs = new URLSearchParams({ timeframe, limit: String(limit) });
   if (epic) qs.set("epic", epic);
+  if (beforeSec !== undefined) qs.set("before", String(Math.floor(beforeSec)));
   const res = await fetch(`${API_BASE}/candles/db?${qs.toString()}`);
 
   if (!res.ok) {
@@ -95,6 +104,8 @@ export async function fetchCandlesDb(
   const body = (await res.json()) as DbCandlesResponse;
   return {
     epic: body.epic,
+    // Older backend builds don't send hasMore — approximate with page-fullness.
+    hasMore: body.hasMore ?? body.candles.length >= limit,
     candles: body.candles.map((c) => ({
       ts: c.time * 1000,
       open: c.open,
