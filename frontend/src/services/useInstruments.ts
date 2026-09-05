@@ -32,6 +32,30 @@ export interface UseInstrumentsResult {
   selectInstrument: (epic: string) => void;
 }
 
+/**
+ * GET /api/instruments with a few bounded retries. The backend may still be
+ * booting (or mid-restart) when the UI mounts — a single failed fetch would
+ * otherwise leave the instrument selector permanently empty/disabled with no
+ * way to recover short of a page refresh.
+ */
+const CATALOG_ATTEMPTS = 3;
+const CATALOG_BACKOFF_MS = 800;
+
+async function fetchInstrumentsWithRetry(): Promise<InstrumentsCatalog> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= CATALOG_ATTEMPTS; attempt++) {
+    try {
+      return await fetchInstruments();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < CATALOG_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, CATALOG_BACKOFF_MS * attempt));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 export function useInstruments(): UseInstrumentsResult {
   const [catalog, setCatalog] = useState<InstrumentsCatalog | null>(null);
   const [loading, setLoading] = useState(true);
@@ -41,7 +65,7 @@ export function useInstruments(): UseInstrumentsResult {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    fetchInstruments()
+    fetchInstrumentsWithRetry()
       .then((cat) => {
         if (cancelled) return;
         setCatalog(cat);
