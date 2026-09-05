@@ -14,6 +14,7 @@ import {
   type TimeFrameKey,
 } from "./config/chart";
 import { loadEmaSettings, saveEmaSettings, type EmaSettings } from "./config/emaSettings";
+import { loadSmaSettings, saveSmaSettings, type SmaSettings } from "./config/smaSettings";
 import {
   loadChartSettings,
   saveChartSettings,
@@ -102,6 +103,9 @@ export default function App() {
   // EMA overlay configuration — localStorage-persisted, frontend-only (never
   // Supabase; EMA VALUES are always derived client-side from the candles).
   const [emaSettings, setEmaSettings] = useState<EmaSettings>(loadEmaSettings);
+    // SMA overlay configuration — localStorage-persisted, frontend-only (never
+  // Supabase; SMA VALUES are always derived client-side from the candles).
+  const [smaSettings, setSmaSettings] = useState<SmaSettings>(loadSmaSettings);
   // Imported Pine indicators — script source + settings ONLY (localStorage,
   // versioned `aura.pine.indicators`). Values are always recomputed by the
   // PineTS engine against the selected timeframe's candles.
@@ -156,6 +160,11 @@ export default function App() {
   useEffect(() => {
     saveEmaSettings(emaSettings);
   }, [emaSettings]);
+
+  // Persist SMA configuration to localStorage on every change (guarded write).
+  useEffect(() => {
+    saveSmaSettings(smaSettings);
+  }, [smaSettings]);
 
   // Persist imported Pine indicators (source + settings) on every change.
   useEffect(() => {
@@ -509,11 +518,13 @@ export default function App() {
         </div>
         <div className="topbar-actions">
           <div className="toolbar-group toolbar-group--analysis" aria-label="Chart analysis">
-            {/* EMA indicator slots (9/20) + Imported Pine Script section —
+            {/* EMA/SMA indicator slots + Imported Pine Script section —
                 localStorage-persisted config */}
             <IndicatorsMenu
               settings={emaSettings}
               onChange={setEmaSettings}
+              smaSettings={smaSettings}
+              onSmaChange={setSmaSettings}
               imported={importedPine}
               pineStatuses={pineStatuses}
               onImportedChange={handlePineChange}
@@ -631,6 +642,7 @@ export default function App() {
           loading={loading}
           autoFollow={autoFollow}
           emaSettings={emaSettings}
+          smaSettings={smaSettings}
           pineIndicators={importedPine}
           onPineStatus={handlePineStatus}
           invertScale={chartSettings.invertScale}

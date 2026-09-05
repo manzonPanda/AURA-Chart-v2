@@ -7,6 +7,10 @@ import {
 } from "../../config/emaSettings";
 import { MAX_EMA_PERIOD, MIN_EMA_PERIOD } from "../../services/ema";
 import {
+  SMA_PERIODS,
+  type SmaSettings,
+} from "../../config/smaSettings";
+import {
   MAX_IMPORTED_INDICATORS,
   isEditableInputType,
   type ImportedPineIndicator,
@@ -19,6 +23,9 @@ import { PineImportModal } from "./PineImportModal";
 interface Props {
   settings: EmaSettings;
   onChange: (next: EmaSettings) => void;
+  /** SMA overlay configuration (localStorage-persisted in App). */
+  smaSettings: SmaSettings;
+  onSmaChange: (next: SmaSettings) => void;
   /** Imported Pine indicators (localStorage-persisted in App). */
   imported: ImportedPineIndicator[];
   /** Session runtime status per imported indicator id. */
@@ -199,7 +206,7 @@ function PineInputField({
  * Configuration state lives in App (localStorage-persisted via emaSettings.ts
  * and services/pineImport.ts).
  */
-export function IndicatorsMenu({ settings, onChange, imported, pineStatuses, onImportedChange, onCompile, onImportConfirm }: Props) {
+export function IndicatorsMenu({ settings, onChange, smaSettings, onSmaChange, imported, pineStatuses, onImportedChange, onCompile, onImportConfirm }: Props) {
   const [open, setOpen] = useState(false);
   const [expanded, setExpanded] = useState<EmaSlotId | string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
@@ -222,7 +229,8 @@ export function IndicatorsMenu({ settings, onChange, imported, pineStatuses, onI
     };
   }, [open]);
 
-  const anyEnabled = EMA_SLOTS.some((slot) => settings[slot.id].enabled);
+  const anyEnabled =
+    EMA_SLOTS.some((slot) => settings[slot.id].enabled) || smaSettings.enabled;
 
   return (
     <div className="indicators" ref={rootRef}>
@@ -231,7 +239,7 @@ export function IndicatorsMenu({ settings, onChange, imported, pineStatuses, onI
         className={`indicators-btn${anyEnabled ? " active" : ""}`}
         aria-expanded={open}
         aria-haspopup="true"
-        title="Indicator overlays (EMA)"
+        title="Indicator overlays (EMA / SMA)"
         onClick={() => setOpen((o) => !o)}
       >
         <span className="indicators-glyph" aria-hidden="true">ƒx</span>
@@ -326,6 +334,67 @@ export function IndicatorsMenu({ settings, onChange, imported, pineStatuses, onI
               </div>
             );
           })}
+
+          {/* ── SMA ─────────────────────────────────────────────────────────── */}
+          <div className="ind-divider" role="separator" />
+          <div className="ind-section">SMA</div>
+          <div className="ind-slot" key="sma">
+            <div className="ind-row">
+              <label className="ind-toggle" title="SMA overlay">
+                <input
+                  type="checkbox"
+                  checked={smaSettings.enabled}
+                  onChange={(e) =>
+                    onSmaChange({ ...smaSettings, enabled: e.target.checked })
+                  }
+                />
+                <span className="ind-swatch" style={{ background: smaSettings.color }} aria-hidden="true" />
+                <span className="ind-name">SMA {smaSettings.period}</span>
+              </label>
+            </div>
+            <div className="ind-config">
+              <label className="ind-field">
+                <span>Period</span>
+                <select
+                  value={smaSettings.period}
+                  onChange={(e) =>
+                    onSmaChange({ ...smaSettings, period: Number(e.target.value) })
+                  }
+                >
+                  {SMA_PERIODS.map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="ind-field">
+                <span>Color</span>
+                <input
+                  type="color"
+                  value={toPickerHex(smaSettings.color)}
+                  onChange={(e) =>
+                    onSmaChange({ ...smaSettings, color: e.target.value })
+                  }
+                />
+              </label>
+              <label className="ind-field">
+                <span>Width</span>
+                <select
+                  value={smaSettings.width}
+                  onChange={(e) =>
+                    onSmaChange({ ...smaSettings, width: Number(e.target.value) })
+                  }
+                >
+                  {WIDTHS.map((w) => (
+                    <option key={w} value={w}>
+                      {w}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </div>
 
           {/* ── Imported Pine indicators ─────────────────────────────────── */}
           {imported.length > 0 && (
