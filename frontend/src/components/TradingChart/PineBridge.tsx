@@ -25,13 +25,14 @@ import {
   type PineRunStatus,
 } from "../../services/pineImport";
 import {
-  PineIndicatorEngine,
   type PineBar,
   type PineLiveCandle,
   type PineMarkerPoint,
   type PineSymbolMeta,
   type PineVisual,
 } from "../../services/pineEngine";
+import { createPineEngine } from "../../services/pineEngineFactory";
+import type { PineScriptEngine } from "../../services/pineEngineTypes";
 import type { RealtimeCandleMsg } from "../../services/realtime";
 import { PineLabelPrimitive } from "./pineLabelPrimitive";
 import { PineLineBoxPrimitive } from "./pineLineBoxPrimitive";
@@ -88,7 +89,7 @@ type IndicatorChartState = {
 
 /**
  * Renders every ENABLED imported Pine indicator through the SHARED
- * PineIndicatorEngine — the exact same generic execution architecture as
+ * The configured Pine engine (services/pineEngineFactory) — the same generic
  * EmaBridge (authoritative `effectiveCloseSeries` input, memoized runs, no
  * re-transpile per frame). ONE engine instance serves all imported
  * indicators; each `computeScriptVisuals` call compiles once and extracts ALL
@@ -109,7 +110,7 @@ type IndicatorChartState = {
  *
  * Data flow (identical guarantees as EmaBridge — doji-bug safe):
  *   IG tick → WS candle snapshot → liveCandle prop → effectiveCloseSeries()
- *   → PineIndicatorEngine → PineVisual[] → Lightweight Charts series/markers.
+ *   → configured PineEngine → PineVisual[] → Lightweight Charts series/markers.
  * The rAF-animated close is NEVER an input; background tabs stay safe.
  *
  * Panes: overlay=true scripts paint on the main price pane (priceScaleId
@@ -118,7 +119,7 @@ type IndicatorChartState = {
  */
 export function PineBridge({ bars, liveCandle, bucketSec, indicators, symbol, onStatus }: Props) {
   const api = useChartApi();
-  const engineRef = useRef<PineIndicatorEngine>(new PineIndicatorEngine());
+  const engineRef = useRef<PineScriptEngine>(createPineEngine());
   /** Per-indicator chart state (series, markers, price lines). */
   const stateRef = useRef<Map<string, IndicatorChartState>>(new Map());
   /** Signature of the last-built layout (avoids rebuilds on input edits). */
@@ -581,7 +582,7 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
       lastStatusRef.current = new Map();
       layoutSigRef.current = "";
       engineRef.current.dispose();
-      engineRef.current = new PineIndicatorEngine();
+      engineRef.current = createPineEngine();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api]);

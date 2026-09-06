@@ -217,7 +217,7 @@ indicator("bad")
 plot(ta.someFunction(close), "x")`);
   assert.equal(outcome.ok, false);
   assert.equal(outcome.issue.kind, "run");
-  assert.equal(outcome.issue.message, "Unknown function: ta.someFunction — it is not available in PineTS.");
+  assert.equal(outcome.issue.message, "Unknown function: ta.someFunction — it is not available in AURA.");
 });
 
 test("basic: strategy() scripts are rejected as a future phase", async () => {
@@ -771,7 +771,7 @@ test("compile progress: onStage fires the real pipeline stages in order", async 
     onStage: (s) => stages.push(s),
   });
   assert.ok(outcome.ok, "compile succeeds");
-  const order = ["preparing", "validating", "transpiling", "executing", "extracting", "rendering"];
+  const order = ["preparing", "validating", "transpiling", "compiling", "executing", "extracting", "rendering"];
   for (const s of order) assert.ok(stages.includes(s), `stage "${s}" reported`);
   const idx = stages.map((s) => order.indexOf(s));
   for (let i = 1; i < idx.length; i++) {

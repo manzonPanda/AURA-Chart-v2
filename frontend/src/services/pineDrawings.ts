@@ -257,6 +257,43 @@ export function resolveLabelPrice(
   return y;
 }
 
+// ── Shared marker mapping (plotshape/plotchar → LWC markers) ────────────────
+// Both engines (PineTS + Piner) funnel markers through these pure tables so
+// the mapping is single-sourced and worker-safe (no engine imports here).
+
+/** LWC-marker domain for Pine shapes/chars. */
+export type PineMarkerShape = "arrowUp" | "arrowDown" | "circle" | "square";
+export type PineMarkerPosition = "aboveBar" | "belowBar" | "inBar";
+
+/** Pine shape ids → LWC marker shapes (unmapped shapes fall back to "circle"). */
+export const PINE_SHAPE_TO_MARKER: Record<string, PineMarkerShape> = {
+  shape_triangleup: "arrowUp",
+  shape_triangle_up: "arrowUp",
+  shape_triangledown: "arrowDown",
+  shape_triangle_down: "arrowDown",
+  shape_arrowup: "arrowUp",
+  shape_arrow_up: "arrowUp",
+  shape_arrowdown: "arrowDown",
+  shape_arrow_down: "arrowDown",
+  shape_circle: "circle",
+  shape_square: "square",
+  shape_diamond: "square",
+  shape_flag: "square",
+  shape_labelup: "square",
+  shape_label_up: "square",
+  shape_labeldown: "square",
+  shape_label_down: "square",
+  shape_xcross: "square",
+  shape_cross: "square",
+};
+
+/** Map Pine location ids to LWC marker positions. */
+export function pineMarkerPosition(location: unknown): PineMarkerPosition {
+  if (location === "AboveBar" || location === "abovebar") return "aboveBar";
+  if (location === "BelowBar" || location === "belowbar") return "belowBar";
+  return "inBar";
+}
+
 // ── Collector normalization ──────────────────────────────────────────────────
 
 interface LabelSnapshotLike {
@@ -303,8 +340,11 @@ function normalizeLabel(
   const y = asFinite(raw.y);
   const xlocRaw = typeof raw.xloc === "string" ? raw.xloc : "";
   const ylocRaw = typeof raw.yloc === "string" ? raw.yloc : "";
-  const xloc = XLOC_ALIASES[xlocRaw];
-  const yloc = YLOC_ALIASES[ylocRaw];
+  // Piner omits props left at their Pine defaults: label.new defaults to
+  // xloc.bar_index + yloc.price. An ABSENT field therefore resolves to that
+  // documented default; an unknown NON-empty value stays unsupported.
+  const xloc = XLOC_ALIASES[xlocRaw] ?? (xlocRaw === "" ? "bar_index" : undefined);
+  const yloc = YLOC_ALIASES[ylocRaw] ?? (ylocRaw === "" ? "price" : undefined);
 
   if (x === null || y === null) {
     bumpUnsupported(unsupported, 'label.new anchor "na"');
@@ -557,7 +597,9 @@ function normalizeLine(
   const x2 = asFinite(raw.x2);
   const y2 = asFinite(raw.y2);
   const xlocRaw = typeof raw.xloc === "string" ? raw.xloc : "";
-  const xloc = LINE_XLOC_ALIASES[xlocRaw];
+  // Piner omits the field when the script left xloc at its Pine default
+  // (line.new → xloc.bar_index); absent ≠ unknown.
+  const xloc = LINE_XLOC_ALIASES[xlocRaw] ?? (xlocRaw === "" ? "bar_index" : undefined);
   if (x1 === null || y1 === null || x2 === null || y2 === null) {
     bumpUnsupported(unsupported, 'line.new anchor "na"');
     return null;
@@ -672,7 +714,9 @@ function normalizeBox(
   const right = asFinite(raw.right);
   const bottom = asFinite(raw.bottom);
   const xlocRaw = typeof raw.xloc === "string" ? raw.xloc : "";
-  const xloc = LINE_XLOC_ALIASES[xlocRaw];
+  // Piner omits the field when the script left xloc at its Pine default
+  // (box.new → xloc.bar_index); absent ≠ unknown.
+  const xloc = LINE_XLOC_ALIASES[xlocRaw] ?? (xlocRaw === "" ? "bar_index" : undefined);
   if (left === null || top === null || right === null || bottom === null) {
     bumpUnsupported(unsupported, 'box.new anchor "na"');
     return null;

@@ -50,13 +50,25 @@ import { PineTS, Indicator } from "pinets";
 // extensions are accepted by both `tsc -b` (allowImportingTsExtensions) and the
 // Vite build, so the production bundle and the tests stay green.
 import {
-  effectiveCloseSeries,
-  type EmaSourceBar,
-} from "./ema.ts";
+  buildAuthoritativeSeries,
+  dataSignature,
+  sourceSignature,
+  type PineCandle,
+} from "./pineSeries.ts";
+import {
+  estimateMintickFromCandles,
+  mintickFromDecimals,
+  MINTICK_DATA_FLOOR,
+} from "./pineMintick.ts";
+
+// Re-exported for test/API compatibility (canonical home: services/pineMintick.ts).
+export { estimateMintickFromCandles, mintickFromDecimals } from "./pineMintick.ts";
 import {
   extractBoxDrawings,
   extractLabelDrawings,
   extractLineDrawings,
+  PINE_SHAPE_TO_MARKER,
+  pineMarkerPosition as pineLocationToPosition,
   type PineBoxDrawing,
   type PineLabelBar,
   type PineLabelDrawing,
@@ -68,7 +80,7 @@ import {
   type PineInputBinding,
 } from "./pineIndicators.ts";
 
-export type { PineIndicatorSpec, PineInputBinding };
+export type { PineIndicatorSpec, PineInputBinding, PineCandle };
 
 /** Minimal candle shape the engine consumes (a structural subtype of CandleKit `Bar`). */
 export interface PineBar {
@@ -219,6 +231,9 @@ export type PineVisual =
       overlayBoxes: PineBoxDrawing[];
     };
 
+/** Real compile/execution stage boundaries — surfaced to the import progress UI. */
+export type PineEngineStage = "compiling" | "executing" | "extracting";
+
 /** What one PineTS run produced / could NOT produce (runtime half of the import diagnostics). */
 export interface PineRuntimeDiagnostics {
   rendered: { key: string; title: string; type: PineVisualType }[];
@@ -227,28 +242,6 @@ export interface PineRuntimeDiagnostics {
   /** Plots the script itself hides via `display=display.none`. */
   hidden: number;
 }
-
-/** Pine shape ids → LWC marker shapes (unmapped shapes fall back to "circle"). */
-const PINE_SHAPE_TO_MARKER: Record<string, PineMarkerPoint["shape"]> = {
-  shape_triangleup: "arrowUp",
-  shape_triangle_up: "arrowUp",
-  shape_triangledown: "arrowDown",
-  shape_triangle_down: "arrowDown",
-  shape_arrowup: "arrowUp",
-  shape_arrow_up: "arrowUp",
-  shape_arrowdown: "arrowDown",
-  shape_arrow_down: "arrowDown",
-  shape_circle: "circle",
-  shape_square: "square",
-  shape_diamond: "square",
-  shape_flag: "square",
-  shape_labelup: "square",
-  shape_label_up: "square",
-  shape_labeldown: "square",
-  shape_label_down: "square",
-  shape_xcross: "square",
-  shape_cross: "square",
-};
 
 /** Internal PineTS drawing-collector keys → human-readable unsupported kinds. */
 const INTERNAL_PLOT_KIND: Record<string, string> = {
@@ -306,53 +299,11 @@ export interface PineSymbolMeta {
   timezone?: string;
 }
 
-function clampDecimals(decimals: number): number {
-  return typeof decimals === "number" && Number.isInteger(decimals) && decimals >= 0 && decimals <= 8
-    ? decimals
-    : 0;
-}
-
-/** Tick size implied by an instrument's quoting precision (0–8 decimals). */
-export function mintickFromDecimals(decimals: number): number {
-  return 10 ** -clampDecimals(decimals);
-}
-
-/**
- * Data-derived mintick fallback (mirrors PineTS's own FMPProvider heuristic):
- * the smallest observed price delta, snapped DOWN onto the standard tick grid
- * {1, 2, 2.5, 5} × 10^n. Returns `null` when the candles carry no usable
- * delta at all (degenerate flat data) — the caller owns the terminal fallback.
- */
-export function estimateMintickFromCandles(
-  klines: readonly { open: number; high: number; low: number; close: number }[],
-): number | null {
-  let min = Infinity;
-  const consider = (d: number): void => {
-    if (Number.isFinite(d) && d > 0 && d < min) min = d;
-  };
-  for (let i = 0; i < klines.length; i++) {
-    const k = klines[i];
-    if (!k) continue;
-    consider(Math.abs(k.close - k.open));
-    consider(Math.abs(k.high - k.low));
-    const prev = klines[i - 1];
-    if (prev) consider(Math.abs(k.close - prev.close));
-  }
-  if (!Number.isFinite(min)) return null;
-  const exp = Math.floor(Math.log10(min));
-  const base = 10 ** exp;
-  const mantissa = min / base;
-  const grid = mantissa >= 5 ? 5 : mantissa >= 2.5 ? 2.5 : mantissa >= 2 ? 2 : 1;
-  return grid * base;
-}
-
-/** Terminal fallback for degenerate flat data (no decimals, no usable deltas). */
-const MINTICK_DATA_FLOOR = 0.0001;
-
 /**
  * Build the full symbol-info object PineTS assigns to `pine.syminfo` on every
  * run. mintick precedence: instrument `decimals` → candle-data estimate →
- * documented degenerate floor. Never a global 0.01.
+ * documented degenerate floor (services/pineMintick.ts — shared with Piner).
+ * Never a global 0.01.
  */
 export function buildPineSymbolInfo(
   meta: PineSymbolMeta | null | undefined,
@@ -397,17 +348,6 @@ export function buildPineSymbolInfo(
   };
 }
 
-/** A PineScript-compatible candle — the Kline shape PineTS expects for an array source. */
-interface PineCandle {
-  openTime: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-  closeTime: number;
-}
-
 /** Tolerance that absorbs PineTS's 10-decimal `context.precision` rounding. */
 export const PINE_EQUIVALENCE_TOL = 5e-9;
 
@@ -429,83 +369,8 @@ interface ResolvedInput {
   paramKey: string;
 }
 
-/**
- * Build the authoritative, full-OHLCV candle series for PineTS from the
- * chart's closed bars + the forming WS candle, REUSING `effectiveCloseSeries`
- * so the close stream feeding `ta.ema` is byte-for-byte identical to ema.ts.
- *
- * Only the **close** drives an EMA; open/high/low/volume are carried so the
- * engine is generic enough for future OHLC-dependent indicators (atr, etc.)
- * without re-architecting the data path.
- */
-function buildAuthoritativeSeries(
-  bars: readonly PineBar[],
-  live: PineLiveCandle | null,
-  bucketSec: number,
-): PineCandle[] {
-  const bucketMs = bucketSec * 1000;
-  const closes = effectiveCloseSeries(
-    bars as readonly EmaSourceBar[],
-    live ? { time: live.time, close: live.close } : null,
-    bucketSec,
-  );
-  const byTs = new Map<number, PineBar>();
-  for (const b of bars) byTs.set(b.ts, b);
-  const liveBucketTs = live ? Math.floor((live.time * 1000) / bucketMs) * bucketMs : null;
-
-  const out: PineCandle[] = [];
-  for (const m of closes) {
-    const bar = byTs.get(m.ts);
-    if (live && liveBucketTs === m.ts) {
-      out.push({ openTime: m.ts, open: live.open, high: live.high, low: live.low, close: m.close, volume: live.volume ?? 0, closeTime: m.ts + bucketMs });
-    } else if (bar) {
-      out.push({ openTime: bar.ts, open: bar.open, high: bar.high, low: bar.low, close: m.close, volume: bar.volume ?? 0, closeTime: bar.ts + bucketMs });
-    } else {
-      out.push({ openTime: m.ts, open: m.close, high: m.close, low: m.close, close: m.close, volume: 0, closeTime: m.ts + bucketMs });
-    }
-  }
-  return out;
-}
-
-/**
- * Compact, exact fingerprint of the authoritative close stream. A cache hit
- * whenever the series is unchanged — so the engine never re-runs PineTS for a
- * stale/rAF frame that didn't move the authoritative close.
- *
- * FNV-1a over the precise `"ts,close"` text of every candle (no float
- * truncation) plus length and end-points, so a collision is practically
- * impossible.
- */
-function dataSignature(series: readonly PineCandle[]): string {
-  let h = 2166111748;
-  for (let i = 0; i < series.length; i++) {
-    const c = series[i];
-    const s = `${c.openTime},${c.close}`;
-    for (let j = 0; j < s.length; j++) {
-      h = Math.imul(h ^ s.charCodeAt(j), 16777619);
-    }
-  }
-  const first = series[0];
-  const last = series[series.length - 1];
-  return (
-    `${series.length}|` +
-    `f=${first?.openTime ?? 0}:${first?.close ?? 0}|` +
-    `l=${last?.openTime ?? 0}:${last?.close ?? 0}|` +
-    `h=${(h >>> 0).toString(36)}`
-  );
-}
-
 function paramsSignature(params: PineParams): string {
   return JSON.stringify(params ?? {});
-}
-
-/** FNV-1a fingerprint of the source text — distinguishes edited scripts in cache keys. */
-function sourceSignature(source: string): string {
-  let h = 2166111748;
-  for (let i = 0; i < source.length; i++) {
-    h = Math.imul(h ^ source.charCodeAt(i), 16777619);
-  }
-  return (h >>> 0).toString(36) + ":" + source.length.toString(36);
 }
 
 function resolveInputMeta(indicator: Indicator, bindings: PineInputBinding[]): ResolvedInput[] {
@@ -624,13 +489,6 @@ function rawRowsToPoints(data: unknown[]): { points: PinePoint[]; uniformColor?:
     points.push(dynamicColor ? { ts: d.time as number, value: v, color } : { ts: d.time as number, value: v });
   }
   return { points, uniformColor: dynamicColor ? undefined : uniformColor, dynamic: dynamicColor };
-}
-
-/** Map Pine location ids to LWC marker positions. */
-function pineLocationToPosition(location: unknown): PineMarkerPoint["position"] {
-  if (location === "AboveBar" || location === "abovebar") return "aboveBar";
-  if (location === "BelowBar" || location === "belowbar") return "belowBar";
-  return "inBar";
 }
 
 /** Shared option plumbing for data-driven visuals (line family). */
@@ -1108,7 +966,7 @@ export class PineIndicatorEngine {
     onError?: (message: string) => void,
     onContext?: (info: { overlay?: boolean; title?: string }) => void,
     /** Progress stages for the import modal (no-op outside the UI flow). */
-    onStage?: (stage: string) => void,
+    onStage?: (stage: PineEngineStage) => void,
   ): Promise<{ visuals: PineVisual[]; diagnostics: PineRuntimeDiagnostics } | null> {
     if (this.pine === null || this.klines.length === 0 || this.dataSig === null) {
       return null;
@@ -1118,6 +976,7 @@ export class PineIndicatorEngine {
     const cached = this.scriptVisualsCache.get(cacheKey);
     if (cached) return cached;
 
+    onStage?.("compiling");
     const compiled = this.getCompiled(spec, params);
     onStage?.("executing");
     let ctx: any;

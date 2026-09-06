@@ -23,7 +23,6 @@
 import { Indicator } from "pinets";
 
 import {
-  PineIndicatorEngine,
   type PineBar,
   type PineLiveCandle,
   type PineRuntimeDiagnostics,
@@ -31,6 +30,7 @@ import {
   type PineVisualType,
   type PineSymbolMeta,
 } from "./pineEngine.ts";
+import { createPineEngine } from "./pineEngineFactory.ts";
 
 export type { PineSymbolMeta };
 
@@ -306,10 +306,11 @@ export function friendlyPineError(raw: string): string {
   if (transpile) {
     return `Pine syntax error: ${msg.slice(transpile[0].length)}`;
   }
-  // Runtime unknown function: "ta.someFunction is not a function"
-  const notAFunction = /^([a-zA-Z_][\w.]*\.[a-zA-Z_]\w*) is not a function$/.exec(msg);
+  // Runtime unknown function: "ta.someFunction is not a function" (PineTS) or
+  // "$.ta.someFunction is not a function" (Piner) — engine-neutral UI text.
+  const notAFunction = /^\$?\.?([a-zA-Z_][\w.]*\.[a-zA-Z_]\w*) is not a function$/.exec(msg);
   if (notAFunction) {
-    return `Unknown function: ${notAFunction[1]} — it is not available in PineTS.`;
+    return `Unknown function: ${notAFunction[1]} — it is not available in AURA.`;
   }
   // Version banner passes through verbatim (already user-friendly).
   if (/Unsupported Pine Script version/i.test(msg)) return msg;
@@ -632,7 +633,7 @@ export async function compileImportedPine(args: CompileImportedPineArgs): Promis
   let runtimeDiagnostics: PineRuntimeDiagnostics | null = null;
   let runtimeOverlay: boolean | null = null;
   if (bars.length > 0) {
-    const engine = new PineIndicatorEngine();
+    const engine = createPineEngine();
     try {
       // The preview run gets the SAME syminfo the live chart will use — a
       // script reading syminfo.mintick compiles+runs here exactly as it does
