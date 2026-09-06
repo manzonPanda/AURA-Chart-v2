@@ -53,6 +53,11 @@ import {
   type EmaSourceBar,
 } from "./ema.ts";
 import {
+  extractLabelDrawings,
+  type PineLabelBar,
+  type PineLabelDrawing,
+} from "./pineDrawings.ts";
+import {
   PINE_INDICATORS,
   type PineIndicatorSpec,
   type PineInputBinding,
@@ -116,8 +121,12 @@ export interface PineSeries {
 //   plotshape(cond, …)               → options { style: "shape", shape, location, color, text?, size? }
 //                                      with per-bar boolean/numeric `value`
 //   plotchar(cond, char="…")         → options { style: "char", char, location, color }
-//   label.new / line.new / fill()    → internal `__labels__` / `__lines__` / `__linefills__` …
-//                                      collectors whose rows carry drawing arrays
+//   label.new(…)/label.set_*/delete → __labels__ / __labels_overlay__ collectors whose
+//                                      rows carry the LIVE drawing-registry snapshots
+//                                      (normalized by services/pineDrawings.ts → "labels"
+//                                      PineVisual → Label adding is a first-class primitive)
+//   line.new / fill()                → internal `__lines__` / `__linefills__` collectors —
+//                                      still inspected, reported as unsupported
 //   display=display.none             → plot options { display: "none" } (data still present)
 //
 // Every supported construct maps to one normalized `PineVisual`; everything
@@ -125,7 +134,7 @@ export interface PineSeries {
 // faked or silently dropped.
 
 /** Visual kinds AURA can currently render for imported Pine scripts. */
-export type PineVisualType = "line" | "histogram" | "area" | "horizontal" | "marker";
+export type PineVisualType = "line" | "histogram" | "area" | "horizontal" | "marker" | "labels";
 
 /** LWC-marker domain for Pine shapes/chars. */
 export interface PineMarkerPoint {
@@ -165,7 +174,17 @@ export type PineVisual =
       lineWidth?: number;
       lineStyle: "solid" | "dashed" | "dotted";
     }
-  | { type: "marker"; key: string; title: string; data: PineMarkerPoint[] };
+  | { type: "marker"; key: string; title: string; data: PineMarkerPoint[] }
+  | {
+      /** Pine `label.new()` drawings (see services/pineDrawings.ts). */
+      type: "labels";
+      key: string;
+      title: string;
+      /** Labels painted on the indicator's own pane. */
+      labels: PineLabelDrawing[];
+      /** `force_overlay=true` labels — always pinned to the main price pane. */
+      overlayLabels: PineLabelDrawing[];
+    };
 
 /** What one PineTS run produced / could NOT produce (runtime half of the import diagnostics). */
 export interface PineRuntimeDiagnostics {
@@ -200,7 +219,8 @@ const PINE_SHAPE_TO_MARKER: Record<string, PineMarkerPoint["shape"]> = {
 
 /** Internal PineTS drawing-collector keys → human-readable unsupported kinds. */
 const INTERNAL_PLOT_KIND: Record<string, string> = {
-  __labels__: "label.new drawings",
+  // NOTE: __labels__ / __labels_overlay__ are NOT here — labels are a fully
+  // rendered drawing primitive (see extractVisuals → "labels" PineVisual).
   __lines__: "line.new drawings",
   __boxes__: "box.new drawings",
   __polylines__: "polyline drawings",
@@ -559,13 +579,15 @@ function buildMarkerVisual(
  * `extractSeries`/`extractPoints` untouched).
  *
  * Supported → line / stepline / histogram / columns / area / hline /
- * plotshape / plotchar. Explicit `plot.style_line` IS a plain line (an earlier
- * filter incorrectly dropped styled plots — real-world scripts declare
- * styles). `display=display.none` plots are skipped as "hidden" (the author's
- * choice, not an incompatibility). Internal `__`-collectors surface as
- * unsupported kinds ONLY when they actually carry drawings. Nothing valid is
- * ever dropped silently — unrecognized constructs land in
- * `diagnostics.unsupported`.
+ * plotshape / plotchar / label.new. Explicit `plot.style_line` IS a plain
+ * line (an earlier filter incorrectly dropped styled plots — real-world
+ * scripts declare styles). `display=display.none` plots are skipped as
+ * "hidden" (the author's choice, not an incompatibility). Labels come from
+ * the `__labels__` / `__labels_overlay__` collectors, which carry PineTS's
+ * live drawing-object registry (stable ids; set_text/delete sync through
+ * the same objects). Remaining `__`-collectors surface as unsupported kinds
+ * ONLY when they actually carry drawings. Nothing valid is ever dropped
+ * silently — unrecognized constructs land in `diagnostics.unsupported`.
  */
 export function extractVisuals(
   ctx: { plots?: Record<string, { title?: unknown; options?: RawPlotOptions; data?: unknown[] }> } | undefined,
@@ -580,8 +602,43 @@ export function extractVisuals(
   };
   if (!ctx?.plots) return { visuals, diagnostics };
 
+  // ── label.new() → first-class "labels" visual (drawing object registry) ─
+  // PineTS 0.9.33 merges ALL labels (including force_overlay=true) into the
+  // single `__labels__` collector, flagging each snapshot with `force_overlay`.
+  // We split by that per-label flag so overlay labels render on the main pane.
+  const marketData = (ctx as { marketData?: unknown }).marketData;
+  const klines: PineLabelBar[] = Array.isArray(marketData) ? (marketData as PineLabelBar[]) : [];
+  const paneLabels: PineLabelDrawing[] = [];
+  const overlayLabels: PineLabelDrawing[] = [];
+  for (const collector of ["__labels__", "__labels_overlay__"]) {
+    const plot = ctx.plots[collector];
+    if (!plot) continue;
+    const rows = Array.isArray(plot.data) ? plot.data : [];
+    const { labels, unsupported } = extractLabelDrawings(rows, klines);
+    for (const u of unsupported) {
+      const found = diagnostics.unsupported.find((d) => d.kind === u.kind);
+      if (found) found.count += u.count;
+      else diagnostics.unsupported.push({ kind: u.kind, count: u.count });
+    }
+    for (const lbl of labels) {
+      (lbl.forceOverlay ? overlayLabels : paneLabels).push(lbl);
+    }
+  }
+  if (paneLabels.length > 0 || overlayLabels.length > 0) {
+    visuals.push({
+      type: "labels",
+      key: "labels",
+      title: "Label drawings",
+      labels: paneLabels,
+      overlayLabels,
+    });
+  }
+
   for (const [key, plot] of Object.entries(ctx.plots)) {
-    // Internal drawing collectors — count only when drawings were actually used.
+    // Label collectors were fully consumed by the pre-pass above.
+    if (key === "__labels__" || key === "__labels_overlay__") continue;
+    // Remaining internal drawing collectors — count only when drawings were
+    // actually used.
     if (isInternalPlotKey(key)) {
       const rows = Array.isArray(plot?.data) ? plot.data : [];
       let used = 0;

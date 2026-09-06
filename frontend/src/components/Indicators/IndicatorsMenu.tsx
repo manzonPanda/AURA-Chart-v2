@@ -46,6 +46,7 @@ const VISUAL_LABEL: Record<string, string> = {
   area: "area",
   horizontal: "hline",
   marker: "markers",
+  labels: "label drawings",
 };
 
 /** "2 lines · 4 markers" style summary (or a no-output notice). */

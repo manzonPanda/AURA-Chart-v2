@@ -277,7 +277,7 @@ plot(close * 1.02, "cross", style=plot.style_cross)`, bars);
   assert.match(kinds, /cross/);
 });
 
-test("visuals: label.new + fill() drawings are reported unsupported, lines still render", async () => {
+test("visuals: label.new() renders a first-class labels visual, fill() stays unsupported", async () => {
   const bars = make1m(80);
   const { visuals, diagnostics } = await runVisuals(`//@version=6
 indicator("draw", overlay=true)
@@ -286,9 +286,26 @@ p2 = plot(ta.ema(close, 20), "e2")
 fill(p1, p2, color=color.new(color.blue, 90))
 if barstate.islast
     label.new(bar_index, high, "LAST", style=label.style_label_down, color=color.orange, textcolor=color.white)`, bars);
-  assert.equal(visuals.length, 2, "the two lines still render");
+  assert.equal(visuals.length, 3, "two lines + one labels visual");
+  const lines = visuals.filter((v) => v.type === "line");
+  assert.equal(lines.length, 2, "the two lines still render");
+  const labelsVis = visuals.find((v) => v.type === "labels");
+  assert.ok(labelsVis, "label.new must produce a labels visual");
+  assert.equal(labelsVis.labels.length, 1, "exactly one label drawing");
+  const lbl = labelsVis.labels[0];
+  // Anchored to the LAST bar's high — semantic chart-space, not pixels.
+  assert.equal(lbl.logical, bars.length - 1);
+  assert.equal(lbl.timeMs, bars[bars.length - 1].ts);
+  assert.equal(lbl.price, bars[bars.length - 1].high);
+  assert.equal(lbl.text, "LAST");
+  assert.equal(lbl.xloc, "bar_index");
+  assert.equal(lbl.yloc, "price");
+  assert.equal(lbl.style, "label_down");
+  assert.equal(lbl.color.toLowerCase(), "#ff9800", "color.orange → #FF9800");
+  assert.equal(lbl.textcolor.toLowerCase(), "#ffffff");
+  assert.equal(lbl.forceOverlay, false);
   const kinds = diagnostics.unsupported.map((u) => u.kind).join(",");
-  assert.match(kinds, /label\.new/);
+  assert.ok(!/label\.new/.test(kinds), "label.new is rendered, never reported unsupported");
   // VERIFIED PineTS 0.9.33: fill() is emitted as a plot with style "fill"
   // (which LWC cannot represent faithfully) — reported, never faked.
   assert.match(kinds, /style "fill"/);

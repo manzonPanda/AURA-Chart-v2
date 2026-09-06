@@ -32,6 +32,7 @@ import {
   type PineVisual,
 } from "../../services/pineEngine";
 import type { RealtimeCandleMsg } from "../../services/realtime";
+import { PineLabelPrimitive } from "./pineLabelPrimitive";
 
 interface Props {
   /** The chart's bucket-aligned candles (history or live-only accumulation). */
@@ -68,6 +69,10 @@ type IndicatorChartState = {
   data: Map<string, DataEntry>;
   carriers: Map<number, ISeriesApi<"Line">>;
   markerPlugins: Map<number, ISeriesMarkersPluginApi<Time>>;
+  /** Renderer primitives for this indicator's `label.new()` drawings, per pane host. */
+  labelPrimitives: Map<number, PineLabelPrimitive>;
+  /** Renderer primitive for `force_overlay=true` labels (always pinned to the main pane). */
+  overlayLabelPrimitive: PineLabelPrimitive | null;
   priceLines: IPriceLine[];
   priceLineSig: string;
   priceLineHost: ISeriesApi<"Line"> | null;
@@ -120,6 +125,8 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, onStatus }
     data: new Map(),
     carriers: new Map(),
     markerPlugins: new Map(),
+    labelPrimitives: new Map(),
+    overlayLabelPrimitive: null,
     priceLines: [],
     priceLineSig: "",
     priceLineHost: null,
@@ -143,7 +150,7 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, onStatus }
     onStatusRef.current?.(id, status);
   };
 
-  /** Clear one indicator's painted outputs (data, markers, price lines). */
+  /** Clear one indicator's painted outputs (data, markers, price lines, labels). */
   const clearPainted = (st: IndicatorChartState): void => {
     for (const entry of st.data.values()) {
       try {
@@ -158,6 +165,20 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, onStatus }
         plugin.setMarkers([]);
       } catch {
         /* plugin gone */
+      }
+    }
+    for (const prim of st.labelPrimitives.values()) {
+      try {
+        prim.setLabels([]);
+      } catch {
+        /* primitive gone */
+      }
+    }
+    if (st.overlayLabelPrimitive) {
+      try {
+        st.overlayLabelPrimitive.setLabels([]);
+      } catch {
+        /* primitive gone */
       }
     }
     removePriceLines(st);
@@ -250,6 +271,8 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, onStatus }
     const markers: SeriesMarker<Time>[] = [];
     const hlines = visuals.filter((v): v is HorizontalVisual => v.type === "horizontal");
     let paintedAny = false;
+    /** True when THIS run carried a labels visual — its absence clears old drawings. */
+    let seenLabels = false;
 
     for (const v of visuals) {
       if (v.type === "line" || v.type === "histogram" || v.type === "area") {
@@ -349,6 +372,29 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, onStatus }
             ...(m.text ? { text: m.text } : {}),
           });
         }
+      } else if (v.type === "labels") {
+        // Pine label.new() drawings → canvas primitives. The pane primitive
+        // paints on the same host as this indicator's markers/price lines
+        // (candle series for overlays, a carrier series otherwise); a script
+        // that no longer produces labels (or is replaying before its label
+        // conditions fire) clears the drawing via setLabels([]) below.
+        seenLabels = true;
+        if (v.labels.length > 0) {
+          const host = labelHostFor(chart, st, candleSeries, barsNow);
+          if (host) {
+            const prim = ensureLabelPrimitive(host, st, st.paneIndex);
+            prim.setLabels(v.labels);
+            paintedAny = true;
+          }
+        }
+        if (v.overlayLabels.length > 0) {
+          const overlayHost = candleSeries ?? ensureCarrier(chart, st, barsNow);
+          if (overlayHost) {
+            const prim = ensureOverlayLabelPrimitive(overlayHost, st);
+            prim.setLabels(v.overlayLabels);
+            paintedAny = true;
+          }
+        }
       }
     }
     // Markers: LWC requires time-sorted arrays; one merged set per pane.
@@ -412,6 +458,25 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, onStatus }
           /* series gone */
         }
         entry.painted = null;
+      }
+    }
+
+    // A labels visual absent from this run (replay before conditions fire,
+    // script edit, warmup-only) clears every previously-painted label.
+    if (!seenLabels) {
+      for (const prim of st.labelPrimitives.values()) {
+        try {
+          prim.setLabels([]);
+        } catch {
+          /* primitive gone */
+        }
+      }
+      if (st.overlayLabelPrimitive) {
+        try {
+          st.overlayLabelPrimitive.setLabels([]);
+        } catch {
+          /* primitive gone */
+        }
       }
     }
 
@@ -587,6 +652,51 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, onStatus }
     } catch {
       return null;
     }
+  };
+  /** Label primitive host: candle series for overlays, else own/carrier series (mirrors markers). */
+  const labelHostFor = (
+    chart: IChartApi,
+    st: IndicatorChartState,
+    candleSeries: ISeriesApi<"Line"> | null,
+    barsNow: readonly Bar[],
+  ): ISeriesApi<"Line"> | null => {
+    if (st.paneIndex === 0 && candleSeries) return candleSeries;
+    for (const entry of st.data.values()) return entry.series as ISeriesApi<"Line">;
+    return ensureCarrier(chart, st, barsNow);
+  };
+
+  /** One label primitive per pane host (created once, repainted in place via setLabels). */
+  const ensureLabelPrimitive = (
+    host: ISeriesApi<"Line">,
+    st: IndicatorChartState,
+    paneIndex: number,
+  ): PineLabelPrimitive => {
+    const existing = st.labelPrimitives.get(paneIndex);
+    if (existing) return existing;
+    const prim = new PineLabelPrimitive();
+    try {
+      host.attachPrimitive(prim);
+      st.labelPrimitives.set(paneIndex, prim);
+    } catch {
+      /* older LWC without primitive support — label drawings degrade silently */
+    }
+    return prim;
+  };
+
+  /** Overlay primitive for force_overlay=true labels — always on the main pane's host. */
+  const ensureOverlayLabelPrimitive = (
+    host: ISeriesApi<"Line">,
+    st: IndicatorChartState,
+  ): PineLabelPrimitive => {
+    if (st.overlayLabelPrimitive) return st.overlayLabelPrimitive;
+    const prim = new PineLabelPrimitive();
+    try {
+      host.attachPrimitive(prim);
+      st.overlayLabelPrimitive = prim;
+    } catch {
+      /* older LWC without primitive support */
+    }
+    return prim;
   };
 
   /** Price-line host: candle series for overlays, else own/carrier series. */

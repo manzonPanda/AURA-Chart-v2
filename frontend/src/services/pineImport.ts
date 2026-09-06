@@ -375,7 +375,7 @@ export function isEditableInputType(type: string): boolean {
 
 // ── Record sanitization (localStorage can contain anything) ────────────────
 
-const VISUAL_TYPES: ReadonlySet<string> = new Set(["line", "histogram", "area", "horizontal", "marker"]);
+const VISUAL_TYPES: ReadonlySet<string> = new Set(["line", "histogram", "area", "horizontal", "marker", "labels"]);
 
 function sanitizePlotMeta(raw: unknown): PinePlotMetaSnapshot | null {
   if (!isPlainObject(raw)) return null;
@@ -483,7 +483,7 @@ function plotMetaFromVisual(v: PineVisual): PinePlotMetaSnapshot {
   if (v.type === "line" || v.type === "area" || v.type === "horizontal") {
     if (typeof v.lineWidth === "number") meta.linewidth = v.lineWidth;
   }
-  if (v.type !== "marker" && typeof v.color === "string") meta.color = v.color;
+  if (typeof (v as { color?: unknown }).color === "string") meta.color = (v as { color: string }).color;
   return meta;
 }
 
