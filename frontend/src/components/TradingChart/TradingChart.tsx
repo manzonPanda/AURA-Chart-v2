@@ -901,6 +901,43 @@ export function TradingChart({
     };
   }, [chartApi, picking, session, enterReplay]);
 
+  // ── Replay hotkeys (session-scoped) ─────────────────────────────────────────
+  // → step forward one bar · ← step back one bar · Space play/pause.
+  // Bound ONLY while a replay session exists (the live chart keeps arrow/space
+  // for its own scrolling), and never hijacks keys while the user is typing in
+  // an input/textarea/contentEditable.
+  useEffect(() => {
+    if (!session) return;
+    const rc = session.rc;
+    const onKey = (e: KeyboardEvent): void => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        rc.step(1);
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        rc.step(-1);
+      } else if (e.key === " " || e.code === "Space") {
+        e.preventDefault(); // keep the page from scrolling
+        const st = rc.getState();
+        if (st.status === "ready") {
+          if (st.playing) rc.pause();
+          else rc.play();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [session]);
+
   // Replay-visible bars: the cursor slice during a session, the full dataset
   // otherwise. Ref-reads are re-rendered into view by `visibleTick`.
   const visibleBars = session ? visibleRef.current : data;
@@ -917,28 +954,20 @@ export function TradingChart({
 
   return (
     <div className="trading-chart" data-stream={streamStatus}>
-      {/* Replay chrome — CandleKit's native ReplayControls is the entire replay
-          UI (play/pause/step/speed/seek/progress); AURA adds only the entry
-          button and Exit (the demo hardcodes both), styled with CandleKit's
-          own .ck-replay-btn class. Slim top row, in flow — no floating dock. */}
+      {/* Replay chrome — the top bar keeps ONLY the entry button (stable 42px
+          row: entering replay never shifts the layout). While a session is
+          active, CandleKit's native ReplayControls + Exit render as a floating
+          dock bottom-center INSIDE the plot area (.replay-dock), so the header
+          chrome and the right price scale are never covered. */}
       <div className="replay-bar">
-        {session ? (
-          <>
-            <ReplayControls controller={session.rc} formatTime={formatManilaHHMMSS} />
-            <button type="button" className="ck-replay-btn" onClick={exitReplay}>
-              Exit Replay
-            </button>
-          </>
-        ) : (
-          data.length > 0 && (
-            <button
-              type="button"
-              className="ck-replay-btn"
-              onClick={() => setPicking((v) => !v)}
-            >
-              {picking ? "Click a candle to start Replay…" : "Replay"}
-            </button>
-          )
+        {!session && data.length > 0 && (
+          <button
+            type="button"
+            className="ck-replay-btn"
+            onClick={() => setPicking((v) => !v)}
+          >
+            {picking ? "Click a candle to start Replay…" : "Replay"}
+          </button>
         )}
       </div>
       <div className="chart-canvas-wrap">
@@ -1051,6 +1080,21 @@ export function TradingChart({
           resetKey={`${replaySymbol ?? ""}|${bucketSec}|${session ? "replay" : "live"}`}
           rightInset={priceScaleInset}
         />
+        {/* Replay dock — CandleKit's native ReplayControls + Exit, floating
+            bottom-center INSIDE the plot area so the top header chrome and the
+            right price scale stay unobstructed while a session is active.
+            Keyboard: → step forward · ← step back · Space play/pause. */}
+        {session && (
+          <div className="replay-dock" data-replay="active">
+            <ReplayControls controller={session.rc} formatTime={formatManilaHHMMSS} />
+            <span className="replay-dock-hint" aria-hidden="true">
+              ← → step · Space play/pause
+            </span>
+            <button type="button" className="ck-replay-btn" onClick={exitReplay}>
+              Exit Replay
+            </button>
+          </div>
+        )}
       </div>
       <div className="chart-footer">
         <div className="chart-footer-context">

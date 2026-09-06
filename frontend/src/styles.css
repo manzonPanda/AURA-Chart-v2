@@ -554,9 +554,8 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 }
 
 /* ── Candle Replay (CandleKit-native) ─────────────────────────────────────── */
-/* Slim chrome row above the canvas: the entry button, or CandleKit's own
-   ReplayControls panel + an Exit button (styled with CandleKit's own
-   .ck-replay-btn class). All panel styling comes from
+/* Top bar: entry button only (stable 42px row — entering replay never shifts
+   the layout). All CandleKit panel styling comes from
    @getcandlekit/charts/styles.css, themed via the --ck-* variables above. */
 .replay-bar {
   display: flex;
@@ -567,10 +566,55 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   border-bottom: 1px solid var(--border);
   background: linear-gradient(90deg, rgba(17, 28, 40, 0.92), rgba(13, 20, 29, 0.58));
 }
-.replay-bar .ck-replay {
+.replay-bar .ck-replay-btn {
+  height: 26px;
+}
+
+/* Active-session dock: CandleKit's ReplayControls + Exit float bottom-center
+   INSIDE the plot area (.chart-canvas-wrap is the positioning context), so the
+   header chrome and the right price scale stay unobstructed. Sits above the
+   time-axis strip; the hotkey hint is decorative and hidden on narrow screens. */
+.replay-dock {
+  position: absolute;
+  left: 50%;
+  bottom: 34px;
+  transform: translateX(-50%);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 24px);
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: linear-gradient(90deg, rgba(17, 28, 40, 0.95), rgba(13, 20, 29, 0.9));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(4px);
+}
+.replay-dock .ck-replay {
   flex: 0 1 440px;
   min-width: 0;
 }
-.replay-bar .ck-replay-btn {
+.replay-dock .ck-replay-btn {
   height: 26px;
+  flex: none;
+}
+.replay-dock-hint {
+  font-size: 0.66rem;
+  color: var(--muted);
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+@media (max-width: 860px) {
+  .replay-dock {
+    bottom: 30px;
+    gap: 6px;
+    padding: 5px 8px;
+  }
+  .replay-dock .ck-replay {
+    flex-basis: 300px;
+  }
+  .replay-dock-hint {
+    display: none;
+  }
 }
