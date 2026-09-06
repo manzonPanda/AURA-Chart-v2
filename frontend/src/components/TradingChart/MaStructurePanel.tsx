@@ -175,30 +175,33 @@ export function MaStructurePanel({
       <div className="ma-structure-sub">EMA9 • EMA20 • SMA20</div>
 
       <div className="ma-structure-section">
-        <div className="ma-structure-kicker">SLOPE</div>
-        <div className="ma-structure-slopes">
-          {(["EMA9", "EMA20", "SMA20"] as const).map((id) => (
-            <span className="ma-structure-slope" key={id} title={`${id} slope`}>
-              {id}
-              <b className={slopeClass(slopes[id])}>{slopes[id]}</b>
-            </span>
-          ))}
-        </div>
-      </div>
-
-      <div className="ma-structure-section">
-        <div className="ma-structure-kicker">CURRENT STRUCTURE</div>
-        {snapshot.structureLabel !== null ? (
-          <>
-            <div className={`ma-structure-state ${snapshot.structureTone ?? "none"}`}>
-              <span className="ma-dot">{snapshot.structureDot}</span>
-              {snapshot.structureLabel}
+        <div className="ma-structure-2col">
+          <div className="ma-structure-col">
+            <div className="ma-structure-kicker">CURRENT STRUCTURE</div>
+            {snapshot.structureLabel !== null ? (
+              <>
+                <div className={`ma-structure-state ${snapshot.structureTone ?? "none"}`}>
+                  <span className="ma-dot">{snapshot.structureDot}</span>
+                  {snapshot.structureLabel}
+                </div>
+                <div className="ma-structure-order">{snapshot.orderLabel}</div>
+              </>
+            ) : (
+              <div className="ma-structure-state none">— awaiting EMA20 / SMA20…</div>
+            )}
+          </div>
+          <div className="ma-structure-col">
+            <div className="ma-structure-kicker">SLOPE</div>
+            <div className="ma-structure-slopes ma-structure-slopes--stack">
+              {(["EMA9", "EMA20", "SMA20"] as const).map((id) => (
+                <span className="ma-structure-slope" key={id} title={`${id} slope`}>
+                  {id}
+                  <b className={slopeClass(slopes[id])}>{slopes[id]}</b>
+                </span>
+              ))}
             </div>
-            <div className="ma-structure-order">{snapshot.orderLabel}</div>
-          </>
-        ) : (
-          <div className="ma-structure-state none">— awaiting EMA20 / SMA20…</div>
-        )}
+          </div>
+        </div>
       </div>
 
       <div className="ma-structure-section">

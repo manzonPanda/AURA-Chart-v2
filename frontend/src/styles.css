@@ -440,11 +440,26 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   margin-top: 5px; font-size: 0.66rem; font-weight: 700; letter-spacing: 0.05em;
   color: var(--muted);
 }
+/* Vertical variant: one row per indicator (the SLOPE column beside
+   CURRENT STRUCTURE). */
+.ma-structure-slopes--stack {
+  flex-direction: column; align-items: flex-start; gap: 2px; flex-wrap: nowrap;
+  margin-top: 6px;
+}
 .ma-structure-slope { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
 .ma-structure-slope b { font-size: 0.78rem; font-weight: 800; }
 .ma-structure-slope b.rising { color: var(--up); }
 .ma-structure-slope b.falling { color: var(--down); }
 .ma-structure-slope b.flat { color: var(--muted); opacity: 0.65; }
+
+/* CURRENT STRUCTURE || SLOPE two-column block. */
+.ma-structure-2col {
+  display: grid; grid-template-columns: 1fr auto; column-gap: 14px;
+  align-items: start; margin-top: 5px;
+}
+.ma-structure-col { min-width: 0; }
+.ma-structure-col .ma-structure-state { margin-top: 5px; }
+.ma-structure-col .ma-structure-order { margin-top: 2px; }
 
 /* Convergence bar — subtle 10-cell glyph of how close to the pair's own
    recent gap range. Contextual, never a probability readout. */
