@@ -13,6 +13,9 @@ import {
   pairDirection,
   relationshipStatus,
   gapTrend,
+  calculateSlope,
+  gapConvergence,
+  seedGapHistory,
   updateGapSamples,
   emptyGapSamples,
   emptyGapHistory,
@@ -335,15 +338,26 @@ function lastOf(points) {
   return points.length > 0 ? points[points.length - 1].value : null;
 }
 
-/** Feed real indicator series through the engine — the app's exact data flow. */
-function evaluateCandles(candles, history = emptyGapHistory(), liveCandle = null) {
+function secondLastOf(points) {
+  return points.length > 1 ? points[points.length - 2].value : null;
+}
+
+/** Feed real indicator series through the engine — the app's exact data flow.
+ *  withSeries mirrors the panel: it hands the indicator SERIES to the engine so
+ *  slopes + seeded convergence history are computed (default off keeps the
+ *  original engine-only semantics for the pre-existing tests). */
+function evaluateCandles(candles, history = emptyGapHistory(), liveCandle = null, withSeries = false) {
   const closes = effectiveCloseSeries(candles, liveCandle, 60);
+  const ema9Series = calculateEMA(closes, 9);
+  const ema20Series = calculateEMA(closes, 20);
+  const sma20Series = calculateSMA(closes, 20);
   return evaluateMaStructure({
-    ema9: lastOf(calculateEMA(closes, 9)),
-    ema20: lastOf(calculateEMA(closes, 20)),
-    sma20: lastOf(calculateSMA(closes, 20)),
+    ema9: lastOf(ema9Series),
+    ema20: lastOf(ema20Series),
+    sma20: lastOf(sma20Series),
     ts: closes.length > 0 ? closes[closes.length - 1].ts : null,
     history,
+    ...(withSeries ? { series: { EMA9: ema9Series, EMA20: ema20Series, SMA20: sma20Series } } : {}),
   });
 }
 
@@ -536,5 +550,287 @@ test("display contract: relationships are exactly MA_PAIR_KEYS in order (panel k
   const warming = evaluateCandles(candles.slice(0, 5));
   assert.equal(warming.snapshot.relationships.length, 3);
   assert.deepEqual(warming.snapshot.relationships, [null, null, null]);
+});
+
+// ── 9. Slope (calculateSlope) ────────────────────────────────────────────────
+
+test("calculateSlope: current > previous → ↗, current < previous → ↘, equal → --", () => {
+  assert.equal(calculateSlope(101, 100), "↗");
+  assert.equal(calculateSlope(100, 101), "↘");
+  assert.equal(calculateSlope(100, 100), "--");
+});
+
+test("calculateSlope: tiny float noise inside the epsilon cannot flip the glyph", () => {
+  // The engine's structure epsilon convention (1e-9): arithmetic jitter from
+  // EMA recursion lands here — a clean flat must READ flat, not start flickering
+  // ↗ ↘ ↗ ↘ on every recalculation.
+  assert.equal(calculateSlope(100.5 + 1e-11, 100.5), "--");
+  assert.equal(calculateSlope(100.5, 100.5 + 1e-11), "--");
+  assert.equal(calculateSlope(100.5 - 1e-11, 100.5), "--");
+  // A REAL movement just outside the tiny epsilon still classifies normally —
+  // no large arbitrary threshold was introduced.
+  assert.equal(calculateSlope(100.5 + 1e-6, 100.5), "↗");
+  assert.equal(calculateSlope(100.5 - 1e-6, 100.5), "↘");
+});
+
+test("calculateSlope: insufficient / non-finite data reads --", () => {
+  assert.equal(calculateSlope(null, 100), "--");
+  assert.equal(calculateSlope(100, null), "--");
+  assert.equal(calculateSlope(NaN, 100), "--");
+  assert.equal(calculateSlope(100, Infinity), "--");
+});
+
+// ── 10. Convergence (gapConvergence + the fold) ──────────────────────────────
+
+test("gapConvergence: decreasing distance → convergence rises toward the recent max", () => {
+  // recent closed gaps [2.40, 1.85, 1.31, 0.72], current 0.31 → 1 − 0.31/2.40.
+  const c = gapConvergence([2.4, 1.85, 1.31, 0.72], 0.31);
+  assert.ok(c !== null && c > 0.8 && c < 0.9, `expected ≈0.87, got ${c}`);
+});
+
+test("gapConvergence: increasing distance → divergence (0), never a false positive", () => {
+  assert.equal(gapConvergence([0.31, 0.72, 1.31], 1.85), 0);
+  assert.equal(gapConvergence([0.5, 0.9, 1.4], 2.0), 0);
+  // Current AT the recent max scores 0 — there is no recently-closed range the
+  // pair sits closer to than its own widest observation.
+  assert.equal(gapConvergence([1, 2, 3], 3), 0);
+});
+
+test("gapConvergence: a small-but-widening gap is NOT converging", () => {
+  // 0.09 → 0.15 → 0.27: numerically tiny, still WIDENING. The current gap sits at
+  // (or beyond) the recent max, so convergence must read 0 — never "nearing"
+  // just because the numbers are small.
+  let state = emptyGapSamples();
+  const distances = [0.09, 0.15, 0.27];
+  let last = null;
+  for (let i = 0; i < distances.length; i += 1) {
+    state = updateGapSamples(state, 1000 + i * 60_000, distances[i]);
+    if (i > 0) {
+      const c = gapConvergence(state.samples, state.forming);
+      assert.equal(c, 0, `step ${i} must read 0, got ${c}`);
+      last = c;
+    }
+  }
+  assert.equal(last, 0);
+});
+
+test("gapConvergence: folding the user's example sequence is strong convergence (monotone up)", () => {
+  const seq = [2.4, 1.85, 1.31, 0.72, 0.31];
+  let state = emptyGapSamples();
+  let prev = 0;
+  let got = null;
+  for (let i = 0; i < seq.length; i += 1) {
+    state = updateGapSamples(state, 1000 + i * 60_000, seq[i]);
+    const c = gapConvergence(state.samples, state.forming);
+    if (state.samples.length > 0) {
+      assert.ok(
+        c !== null && c + 1e-12 >= prev,
+        `convergence must rise monotonically at step ${i} (got ${c}, prev ${prev})`,
+      );
+      prev = c;
+      got = c;
+    }
+  }
+  assert.ok(got !== null && got > 0.8, `strong convergence expected ≈0.87, got ${got}`);
+});
+
+test("gapConvergence: divergence sequence stays at 0 throughout the fold", () => {
+  const seq = [0.31, 0.72, 1.31, 1.85];
+  let state = emptyGapSamples();
+  const reads = [];
+  for (let i = 0; i < seq.length; i += 1) {
+    state = updateGapSamples(state, 1000 + i * 60_000, seq[i]);
+    if (state.samples.length > 0) reads.push(gapConvergence(state.samples, state.forming));
+  }
+  for (const c of reads) assert.equal(c, 0, "divergence must never register convergence");
+});
+
+test("gapConvergence: no recent closed history → null (nothing to calibrate against)", () => {
+  assert.equal(gapConvergence([], 1.5), null);
+  assert.equal(gapConvergence([], null), null);
+});
+
+// ── 11. Series seeding (history load → ready-to-render visuals) ──────────────
+
+test("seedGapHistory: a fresh history seeds the closed gap window from the loaded series", () => {
+  const candles = makeCandles(60, { start: 100, drift: 0.05, seed: 13 });
+  const once = evaluateCandles(candles, emptyGapHistory(), null, true);
+  // The loaded CLOSED buckets fill the trend window immediately (not 1 sample),
+  // so the convergence/trend visuals have recent history on first paint.
+  assert.ok(
+    once.history.EMA9_EMA20.samples.length >= 2,
+    `expected seeded closed samples, got ${once.history.EMA9_EMA20.samples.length}`,
+  );
+  assert.equal(once.history.EMA9_EMA20.samples.length, GAP_TREND_WINDOW);
+  assert.ok(
+    once.snapshot.relationships[0] !== null &&
+      once.snapshot.relationships[0].convergence !== null,
+    "convergence must be available right after history load",
+  );
+});
+
+test("seedGapHistory: re-folding the same bucket replaces in place (idempotent)", () => {
+  const candles = makeCandles(60, { start: 100, drift: 0.05, seed: 13 });
+  const closes = effectiveCloseSeries(candles, null, 60);
+  const ema9Series = calculateEMA(closes, 9);
+  const ema20Series = calculateEMA(closes, 20);
+  const sma20Series = calculateSMA(closes, 20);
+  const input = {
+    ema9: lastOf(ema9Series),
+    ema20: lastOf(ema20Series),
+    sma20: lastOf(sma20Series),
+    ts: closes[closes.length - 1].ts,
+    history: emptyGapHistory(),
+    series: { EMA9: ema9Series, EMA20: ema20Series, SMA20: sma20Series },
+  };
+  const first = evaluateMaStructure(input);
+  const second = evaluateMaStructure({ ...input, history: first.history });
+  assert.equal(second.history.EMA9_EMA20.samples.length, first.history.EMA9_EMA20.samples.length);
+  assert.equal(second.history.EMA9_EMA20.forming, first.history.EMA9_EMA20.forming);
+  assert.equal(second.history.EMA9_EMA20.ts, first.history.EMA9_EMA20.ts);
+});
+
+test("seedGapHistory: already-folded or live histories are never re-seeded", () => {
+  const candles = makeCandles(60, { start: 100, drift: 0.05, seed: 13 });
+  const closes = effectiveCloseSeries(candles, null, 60);
+  const ema9Series = calculateEMA(closes, 9);
+  const ema20Series = calculateEMA(closes, 20);
+  const sma20Series = calculateSMA(closes, 20);
+  // A history that already carries one folded forming sample must never be
+  // back-seeded from the series — the sample clock stays exactly where the
+  // live fold left it (only the same-bucket forming value is refreshed).
+  const folded = updateGapSamples(emptyGapSamples(), closes[closes.length - 1].ts, 1.23);
+  const evaled = evaluateMaStructure({
+    ema9: lastOf(ema9Series),
+    ema20: lastOf(ema20Series),
+    sma20: lastOf(sma20Series),
+    ts: closes[closes.length - 1].ts,
+    history: { ...emptyGapHistory(), EMA9_EMA20: folded },
+    series: { EMA9: ema9Series, EMA20: ema20Series, SMA20: sma20Series },
+  });
+  assert.equal(
+    evaled.history.EMA9_EMA20.samples.length,
+    0,
+    "non-pristine history must not gain a seeded closed window",
+  );
+  // The fold DOES refresh the same-bucket forming value (measured from the
+  // series) — the normal live contract, not a re-seed.
+  assert.equal(
+    evaled.history.EMA9_EMA20.forming,
+    Math.abs(lastOf(ema9Series) - lastOf(ema20Series)),
+  );
+});
+
+// ── 12. Slopes + convergence through the engine (real indicator series) ──────
+
+test("slopes follow the selected-timeframe indicator series (indicator movement, not candle wording)", () => {
+  // Accelerating rally → EMA9 genuinely rising (↗); accelerating selloff → falling (↘).
+  const rally = makeCandles(130, { start: 100, drift: 0.05, curve: 0.005, seed: 7, jitter: 0.1 });
+  const selloff = makeCandles(130, { start: 160, drift: -0.045, curve: -0.005, seed: 11, jitter: 0.1 });
+  const bull = evaluateCandles(rally, emptyGapHistory(), null, true).snapshot;
+  const bear = evaluateCandles(selloff, emptyGapHistory(), null, true).snapshot;
+
+  assert.equal(bull.structure, "BULLISH");
+  assert.equal(bear.structure, "BEARISH");
+  assert.equal(bull.relationships[0].firstSlope, "↗");
+  assert.equal(bear.relationships[0].firstSlope, "↘");
+  // All three relationships carry the new fields.
+  for (const rel of bull.relationships) {
+    assert.ok(rel !== null);
+    assert.ok(["↗", "↘", "--"].includes(rel.firstSlope), rel.firstSlope);
+    assert.ok(["↗", "↘", "--"].includes(rel.secondSlope), rel.secondSlope);
+    assert.equal(typeof rel.convergence, "number");
+  }
+});
+
+test("timeframe: 1m rally and 3m selloff use their own selected-timeframe series", () => {
+  const flat = makeCandles(30, { start: 100, seed: 21, jitter: 0.1 });
+  const rally1m = [...flat, ...makeCandles(100, { start: 115.4, drift: 0.05, curve: 0.005, seed: 21, jitter: 0.1 })];
+  const decline1m = [...flat, ...makeCandles(100, { start: 114.6, drift: -0.05, curve: -0.005, seed: 22, jitter: 0.1 })];
+  const bear3m = to3m(decline1m);
+
+  const oneMinute = evaluateCandles(rally1m, emptyGapHistory(), null, true).snapshot;
+  const threeMinute = evaluateCandles(bear3m, emptyGapHistory(), null, true).snapshot;
+
+  assert.equal(oneMinute.structure, "BULLISH");
+  assert.equal(threeMinute.structure, "BEARISH");
+  assert.equal(oneMinute.relationships[0].firstSlope, "↗");
+  assert.equal(threeMinute.relationships[0].firstSlope, "↘");
+});
+
+test("pair independence: EMA9/EMA20 convergence never affects EMA20/SMA20", () => {
+  // Deterministic synthetic series bundle — pair0 converges, pair2 diverges,
+  // sharing identical buckets. Each pair must normalize ONLY against its own
+  // recent gap history.
+  const mk = (vals, start = 1000) => vals.map((v, i) => ({ ts: start + i * 60_000, value: v }));
+  const ema9Series = mk([106.5, 106.0, 105.4, 105.0]); // falls toward pinned EMA20
+  const ema20Series = mk([105.0, 105.0, 105.0, 105.0]);
+  const sma20Series = mk([106.0, 106.4, 106.9, 107.5]); // runs away (widening)
+
+  const evaled = evaluateMaStructure({
+    ema9: 105.0,
+    ema20: 105.0,
+    sma20: 107.5,
+    ts: 1000 + 3 * 60_000,
+    history: emptyGapHistory(),
+    series: { EMA9: ema9Series, EMA20: ema20Series, SMA20: sma20Series },
+  });
+  const [pair0, , pair2] = evaled.snapshot.relationships;
+
+  // pair0 (EMA9/EMA20): 1.5 → 1.0 → 0.4 → 0.0 — strong convergence.
+  assert.ok(pair0.convergence !== null && pair0.convergence >= 0.99, `got ${pair0.convergence}`);
+  // pair2 (EMA20/SMA20): 1.0 → 1.4 → 1.9 → 2.5 — pure divergence.
+  assert.equal(pair2.convergence, 0);
+  // Slopes from indicator movement: EMA9 falling ↘, EMA20 flat --, SMA20 rising ↗.
+  assert.equal(pair0.firstSlope, "↘");
+  assert.equal(pair0.secondSlope, "--");
+  assert.equal(pair2.secondSlope, "↗");
+  // Their histories are independent — the converging window never leaks into
+  // the diverging pair's samples.
+  assert.equal(evaled.history.EMA9_EMA20.samples.length, 3);
+  assert.equal(evaled.history.EMA20_SMA20.samples.length, 3);
+  assert.notEqual(
+    evaled.history.EMA9_EMA20.samples[0],
+    evaled.history.EMA20_SMA20.samples[0],
+  );
+});
+
+test("replay: slopes + convergence derive from the replay slice — nothing leaks from live", () => {
+  const candles = makeCandles(90, { start: 100, drift: 0.05, seed: 17 });
+  // LIVE side: full data with series → seeded live history + live slopes.
+  const live = evaluateCandles(candles, emptyGapHistory(), null, true);
+  assert.ok(live.history.EMA9_EMA20.samples.length >= 2, "live history populated");
+
+  // Replay enters on a backward cursor slice (the app resets historyRef, so the
+  // engine sees a PRISTINE history + the slice's series).
+  const slice = candles.slice(15, 55);
+  const closes = effectiveCloseSeries(slice, null, 60);
+  const ema9Series = calculateEMA(closes, 9);
+  const ema20Series = calculateEMA(closes, 20);
+  const sma20Series = calculateSMA(closes, 20);
+  const replay = evaluateMaStructure({
+    ema9: lastOf(ema9Series),
+    ema20: lastOf(ema20Series),
+    sma20: lastOf(sma20Series),
+    ts: closes[closes.length - 1].ts,
+    history: emptyGapHistory(),
+    series: { EMA9: ema9Series, EMA20: ema20Series, SMA20: sma20Series },
+  });
+  // Convergence + samples come from the REPLAY slice, forward-folded from a
+  // fresh history — none of the live window survives.
+  assert.equal(replay.history.EMA9_EMA20.samples.length, GAP_TREND_WINDOW);
+  assert.ok(
+    replay.snapshot.relationships[0].convergence !== null,
+    "replay convergence derived from replay gap history",
+  );
+  assert.equal(
+    replay.snapshot.relationships[0].firstSlope,
+    calculateSlope(lastOf(ema9Series), secondLastOf(ema9Series)),
+  );
+  // Replay EXIT: a fresh evaluation against the full LIVE series re-seeds from
+  // live data — slopes/conv reflect live again, never a replay residue.
+  const liveAgain = evaluateCandles(candles, emptyGapHistory(), null, true);
+  assert.equal(liveAgain.snapshot.relationships[0].firstSlope, live.snapshot.relationships[0].firstSlope);
+  assert.equal(liveAgain.snapshot.relationships[0].signedGap, live.snapshot.relationships[0].signedGap);
 });
 

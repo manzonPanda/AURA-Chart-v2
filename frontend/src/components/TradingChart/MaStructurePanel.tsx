@@ -10,6 +10,7 @@ import {
   MA_STRUCTURE_EMA_SLOW,
   MA_STRUCTURE_SMA_PERIOD,
   type MaGapHistory,
+  type MaSlope,
   type MaStructureEvaluation,
   type MaTone,
 } from "../../services/movingAverageStructure";
@@ -56,6 +57,17 @@ const lastValue = (points: readonly { value: number }[]): number | null =>
 const toneClass = (tone: MaTone | null): string =>
   tone === "bull" ? "bull" : tone === "bear" ? "bear" : tone === "warn" ? "warn" : "none";
 
+const slopeClass = (slope: MaSlope): string =>
+  slope === "↗" ? "rising" : slope === "↘" ? "falling" : "flat";
+
+/** Cells of the subtle 10-cell convergence bar (0 = no recent history to show). */
+const MA_CONVERGENCE_CELLS = 10;
+const convergenceCells = (convergence: number | null): number => {
+  if (convergence === null) return 0;
+  const ratio = Math.max(0, Math.min(1, convergence));
+  return Math.round(ratio * MA_CONVERGENCE_CELLS);
+};
+
 /**
  * Trader-facing Moving Average Structure panel (EMA9 • EMA20 • SMA20).
  *
@@ -85,12 +97,19 @@ export function MaStructurePanel({
   const evaluation = useMemo<MaStructureEvaluation>(() => {
     const closes = effectiveCloseSeries(bars, liveCandle, bucketSec);
     const lastTs = closes.length > 0 ? closes[closes.length - 1].ts : null;
+    // The SAME series the last values come from are handed to the engine so it
+    // can derive per-MA slope (current vs previous point) and seed the gap
+    // window from loaded history — no extra indicator math anywhere.
+    const ema9Series = calculateEMA(closes, MA_STRUCTURE_EMA_FAST);
+    const ema20Series = calculateEMA(closes, MA_STRUCTURE_EMA_SLOW);
+    const sma20Series = calculateSMA(closes, MA_STRUCTURE_SMA_PERIOD);
     return evaluateMaStructure({
-      ema9: lastValue(calculateEMA(closes, MA_STRUCTURE_EMA_FAST)),
-      ema20: lastValue(calculateEMA(closes, MA_STRUCTURE_EMA_SLOW)),
-      sma20: lastValue(calculateSMA(closes, MA_STRUCTURE_SMA_PERIOD)),
+      ema9: lastValue(ema9Series),
+      ema20: lastValue(ema20Series),
+      sma20: lastValue(sma20Series),
       ts: lastTs,
       history: historyRef.current,
+      series: { EMA9: ema9Series, EMA20: ema20Series, SMA20: sma20Series },
     });
   }, [bars, liveCandle, bucketSec]);
 
@@ -143,25 +162,58 @@ export function MaStructurePanel({
             above the real ones and survived steps/seek/exit until a full page
             reload. Stable per-pair keys keep the list exactly three rows
             through every lifecycle transition. */}
-        {snapshot.relationships.map((rel, i) => (
-          <div className="ma-pair" key={MA_PAIR_KEYS[i]}>
-            <div className="ma-pair-name">
-              {rel ? `${rel.firstLabel} / ${rel.secondLabel}` : "—"}
-            </div>
-            <div className={`ma-pair-status ${toneClass(rel?.tone ?? null)}`}>
-              <span className="ma-dot">{rel?.dot ?? "·"}</span>
-              {rel?.label ?? "—"}
-            </div>
-            <div className="ma-pair-right">
-              <div className="ma-pair-gap">
-                {rel ? `Gap ${fmtSigned(rel.signedGap)} pts` : "Gap —"}
+        {snapshot.relationships.map((rel, i) => {
+          const filled = convergenceCells(rel?.convergence ?? null);
+          return (
+            <div className="ma-pair" key={MA_PAIR_KEYS[i]}>
+              <div className="ma-pair-name">
+                {rel ? `${rel.firstLabel} / ${rel.secondLabel}` : "—"}
               </div>
-              <div className={`ma-pair-trend ${rel?.gapTrend.toLowerCase() ?? "none"}`}>
-                {rel?.gapTrend ?? "—"}
+              <div className={`ma-pair-status ${toneClass(rel?.tone ?? null)}`}>
+                <span className="ma-dot">{rel?.dot ?? "·"}</span>
+                {rel?.label ?? "—"}
+              </div>
+              <div className="ma-pair-right">
+                <div className="ma-pair-gap">
+                  {rel ? `Gap ${fmtSigned(rel.signedGap)} pts` : "Gap —"}
+                </div>
+                <div className={`ma-pair-trend ${rel?.gapTrend.toLowerCase() ?? "none"}`}>
+                  {rel?.gapTrend ?? "—"}
+                </div>
+              </div>
+              {/* Per-MA slope — symbols only (↗ / ↘ / --), why the gap is moving. */}
+              <div className="ma-pair-slopes">
+                {rel ? (
+                  <>
+                    <span className="ma-pair-slope" title={`${rel.firstLabel} slope`}>
+                      {rel.firstLabel}
+                      <b className={slopeClass(rel.firstSlope)}>{rel.firstSlope}</b>
+                    </span>
+                    <span className="ma-pair-slope" title={`${rel.secondLabel} slope`}>
+                      {rel.secondLabel}
+                      <b className={slopeClass(rel.secondSlope)}>{rel.secondSlope}</b>
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="ma-pair-slope">
+                      <b className="flat">--</b>
+                    </span>
+                    <span className="ma-pair-slope">
+                      <b className="flat">--</b>
+                    </span>
+                  </>
+                )}
+              </div>
+              {/* Convergence bar — how close to the pair's own recent gap range.
+                  Subtle 10-cell glyph, never a probability. */}
+              <div className="ma-pair-conv" aria-hidden="true">
+                <span className="ma-pair-conv-fill">{"█".repeat(filled)}</span>
+                <span className="ma-pair-conv-empty">{"░".repeat(MA_CONVERGENCE_CELLS - filled)}</span>
               </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
