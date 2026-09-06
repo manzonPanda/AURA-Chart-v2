@@ -44,6 +44,7 @@ import { CandleCountdown } from "./CandleCountdown";
 import { EmaBridge } from "./EmaBridge";
 import { InvertScaleBridge } from "./InvertScaleBridge";
 import { InvertDebugProbe } from "./invertDebug"; // ⚠ TEMP debug probe (?debugInvert)
+import { MaStructurePanel } from "./MaStructurePanel";
 import { OHLCReadout } from "./OHLCReadout";
 import { PineBridge } from "./PineBridge";
 import { SmaBridge } from "./SmaBridge";
@@ -990,6 +991,19 @@ export function TradingChart({
           )
         )}
         {loading && <div className="chart-spinner">…</div>}
+        {/* Moving Average Structure (EMA9 • EMA20 • SMA20) — trader-facing
+            overlay panel. Same anti-look-ahead contract as the bridges: the
+            bars are the replay cursor slice during Replay and the forming
+            candle's live truth is withheld, so structure/gaps can never see
+            the future or mix replay state into live data. resetKey re-seeds
+            the gap-trend history on instrument / timeframe / replay streams. */}
+        <MaStructurePanel
+          bars={visibleBars}
+          liveCandle={session ? null : liveCandle}
+          bucketSec={bucketSec}
+          replayActive={session !== null}
+          resetKey={`${replaySymbol ?? ""}|${bucketSec}|${session ? "replay" : "live"}`}
+        />
       </div>
       <div className="chart-footer">
         <div className="chart-footer-context">

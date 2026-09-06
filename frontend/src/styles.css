@@ -349,6 +349,57 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .history-more:disabled { cursor: default; opacity: 0.6; color: var(--accent); }
 .history-more--end { cursor: default; opacity: 0.55; color: var(--text); }
 
+/* ── MA Structure panel (EMA9 • EMA20 • SMA20) ─────────────
+   Compact trader-facing overlay, top-right of the chart. Pure display:
+   pointer-events none so chart panning / replay candle-picking pass through.
+   Shows the structural STATE and the pairwise POINT GAPS (never raw indicator
+   values) — the gap + its trend is the crossover-proximity information. */
+.ma-structure {
+  position: absolute; top: 44px; right: 12px; z-index: 5;
+  width: 252px; padding: 10px 12px 11px;
+  background: rgba(9, 13, 20, 0.88);
+  border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.35);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.ma-structure-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.ma-structure-title { color: var(--accent); font-size: 0.6rem; font-weight: 800; letter-spacing: 0.12em; }
+.ma-structure-badge { font-size: 0.56rem; font-weight: 800; letter-spacing: 0.08em; }
+.ma-structure-badge.live { color: var(--up); }
+.ma-structure-badge.replay { color: var(--ck-warn); }
+.ma-structure-sub { margin-top: 2px; color: var(--muted); font-size: 0.6rem; letter-spacing: 0.07em; }
+.ma-structure-section { margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--border); }
+.ma-structure-kicker { color: var(--muted); font-size: 0.55rem; font-weight: 800; letter-spacing: 0.12em; }
+.ma-structure-state { margin-top: 5px; font-size: 0.86rem; font-weight: 800; letter-spacing: 0.04em; }
+.ma-structure-state .ma-dot { margin-right: 6px; }
+.ma-structure-state.bull { color: var(--up); }
+.ma-structure-state.bear { color: var(--down); }
+.ma-structure-state.warn { color: var(--ck-warn); }
+.ma-structure-state.none { color: var(--muted); font-size: 0.76rem; font-weight: 600; }
+.ma-structure-order { margin-top: 2px; color: var(--muted); font-size: 0.66rem; }
+.ma-pair {
+  display: grid; grid-template-columns: 1fr auto; column-gap: 10px; row-gap: 1px;
+  align-items: baseline; margin-top: 8px;
+}
+.ma-pair-name {
+  grid-column: 1 / -1;
+  color: var(--text); opacity: 0.85; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.08em;
+}
+.ma-pair-status { font-size: 0.74rem; font-weight: 700; }
+.ma-pair-status .ma-dot { margin-right: 5px; }
+.ma-pair-status.bull { color: var(--up); }
+.ma-pair-status.bear { color: var(--down); }
+.ma-pair-status.warn { color: var(--ck-warn); }
+.ma-pair-status.none { color: var(--muted); }
+.ma-pair-right { display: flex; flex-direction: column; align-items: flex-end; }
+.ma-pair-gap { color: var(--text); font-size: 0.7rem; font-weight: 700; }
+.ma-pair-trend { color: var(--muted); font-size: 0.56rem; font-weight: 800; letter-spacing: 0.1em; }
+.ma-pair-trend.narrowing { color: var(--ck-warn); }
+.ma-pair-trend.widening { color: var(--muted); }
+.ma-pair-trend.flat { color: var(--muted); opacity: 0.7; }
+
+
 /* ── OHLC strip ──────────────────────────────────────────── */
 .chart-footer { border-top: 1px solid var(--border); background: rgba(13, 20, 29, 0.96); padding: 10px 14px; min-height: 64px; flex-shrink: 0; display: flex; align-items: center; gap: 16px; }
 .chart-footer-context { display: flex; flex-direction: column; gap: 3px; min-width: 112px; padding-right: 16px; border-right: 1px solid var(--border); }
