@@ -1082,15 +1082,11 @@ export function TradingChart({
         />
         {/* Replay dock — CandleKit's native ReplayControls + Exit, floating
             bottom-center INSIDE the plot area so the top header chrome and the
-            right price scale stay unobstructed while a session is active.
-            Keyboard: → step forward · ← step back · Space play/pause. */}
+            right price scale stay unobstructed while a session is active. */}
         {session && (
           <div className="replay-dock" data-replay="active">
             <ReplayControls controller={session.rc} formatTime={formatManilaHHMMSS} />
-            <span className="replay-dock-hint" aria-hidden="true">
-              ← → step · Space play/pause
-            </span>
-            <button type="button" className="ck-replay-btn" onClick={exitReplay}>
+            <button type="button" className="replay-dock-exit" onClick={exitReplay}>
               Exit Replay
             </button>
           </div>

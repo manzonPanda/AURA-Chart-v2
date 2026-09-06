@@ -599,11 +599,31 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   height: 26px;
   flex: none;
 }
-.replay-dock-hint {
-  font-size: 0.66rem;
+/* Exit Replay — AURA-native (replaces CandleKit's default button look so the
+   dock reads as one control strip: same height/radius as the ck controls,
+   muted until hover, --down red tint on hover to signal leaving the session). */
+.replay-dock-exit {
+  height: 26px;
+  flex: none;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
   color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   white-space: nowrap;
-  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.replay-dock-exit:hover,
+.replay-dock-exit:focus-visible {
+  color: var(--down);
+  border-color: rgba(255, 107, 114, 0.45);
+  background: rgba(255, 107, 114, 0.08);
+  outline: none;
 }
 @media (max-width: 860px) {
   .replay-dock {
@@ -614,7 +634,7 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   .replay-dock .ck-replay {
     flex-basis: 300px;
   }
-  .replay-dock-hint {
-    display: none;
+  .replay-dock-exit {
+    padding: 0 9px;
   }
 }
