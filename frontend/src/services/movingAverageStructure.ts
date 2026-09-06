@@ -272,10 +272,14 @@ export interface GapSampleState {
   forming: number | null;
   /** Bucket start (epoch ms) of `forming` — the sample clock. */
   ts: number | null;
+  /** Last committed pair direction (BULLISH/BEARISH/null) — used to detect
+   *  crossovers (sign flips) so the trend window can reset instead of lagging
+   *  ~8 closed candles through the LS slope on small-gap pairs like EMA20/SMA20. */
+  lastDirection: "BULLISH" | "BEARISH" | null;
 }
 
 export function emptyGapSamples(): GapSampleState {
-  return { samples: [], forming: null, ts: null };
+  return { samples: [], forming: null, ts: null, lastDirection: null };
 }
 
 /**
@@ -291,21 +295,21 @@ export function updateGapSamples(
   ts: number,
   distance: number,
 ): GapSampleState {
-  if (!Number.isFinite(ts) || !Number.isFinite(distance)) return prev;
+    if (!Number.isFinite(ts) || !Number.isFinite(distance)) return prev;
   if (prev.ts === null || ts < prev.ts) {
     // Seed, or a backward jump (history replace / replay seek) → fresh window.
-    return { samples: [], forming: distance, ts };
+    return { samples: [], forming: distance, ts, lastDirection: prev.lastDirection };
   }
   if (ts === prev.ts) {
     // Same bucket → replace in place (history continuity across reloads).
-    return { samples: prev.samples, forming: distance, ts };
+    return { samples: prev.samples, forming: distance, ts, lastDirection: prev.lastDirection };
   }
   // Bucket rollover → commit the closed bucket's final distance.
   const samples =
     prev.forming === null
       ? prev.samples
       : [...prev.samples, prev.forming].slice(-GAP_TREND_WINDOW);
-  return { samples, forming: distance, ts };
+  return { samples, forming: distance, ts, lastDirection: prev.lastDirection };
 }
 
 // ── Series seeding (history load / stream reset → ready-to-render visuals) ───
@@ -321,7 +325,12 @@ export type MaSeriesInput = Readonly<Partial<Record<MaSeriesId, readonly MaSerie
 
 /** Pristine = never seeded and never folded (fresh stream / page load). */
 function isPristineGapSamples(state: GapSampleState): boolean {
-  return state.ts === null && state.forming === null && state.samples.length === 0;
+  return (
+    state.ts === null &&
+    state.forming === null &&
+    state.samples.length === 0 &&
+    state.lastDirection === null
+  );
 }
 
 /**
@@ -358,11 +367,11 @@ function seedGapSamples(
     i += 1;
     j += 1;
   }
-  if (lastTs === null || lastDistance === null) return null;
-  return {
+    return {
     samples: closed.slice(-GAP_TREND_WINDOW),
     forming: lastDistance,
     ts: lastTs,
+    lastDirection: null,
   };
 }
 
@@ -645,20 +654,41 @@ export function evaluateMaStructure(input: MaStructureInput): MaStructureEvaluat
     ) {
       return null; // insufficient history — pair hidden, its samples untouched
     }
-    const { signedGap, distance } = pairwiseGap(firstValue, secondValue);
-    const samples = updateGapSamples(nextHistory[key], ts, distance);
-    nextHistory[key] = samples;
+      const { signedGap, distance } = pairwiseGap(firstValue, secondValue);
+      const direction = pairDirection(signedGap);
 
-    const window =
-      samples.forming === null ? samples.samples : [...samples.samples, samples.forming];
-    const { trend } = gapTrend(window);
-    const distanceDelta =
-      samples.forming !== null && samples.samples.length > 0
-        ? samples.forming - samples.samples[samples.samples.length - 1]
-        : null;
-    const direction = pairDirection(signedGap);
-    const status = relationshipStatus(direction, trend);
-    const meta = status !== null ? RELATIONSHIP_META[status] : null;
+      // Crossover reset: when the signed gap changes sign ON A NEW CLOSED bucket,
+      // AND the trend window is full (the regime was fully established), the
+      // previous trend no longer applies. Drop the committed samples so the
+      // window turns over immediately instead of lagging through the full LS
+      // window — most visible on small-gap pairs like EMA20/SMA20 where the
+      // 8-sample turnover is slow. Only fires on a genuine bucket rollover with
+      // a fully-filled window; same-bucket forming ticks and fresh/partial
+      // windows must NOT trigger it (an in-tick sign wobble or a single
+      // committed sample can't be a "lagging" regime).
+      const prevState = nextHistory[key];
+      const rolledOver = prevState.ts !== null && ts > prevState.ts;
+      const folded = updateGapSamples(prevState, ts, distance);
+      const crossed =
+        rolledOver &&
+        direction !== null &&
+        folded.lastDirection !== null &&
+        direction !== folded.lastDirection &&
+        folded.samples.length >= GAP_TREND_WINDOW;
+      const samples = crossed
+        ? { samples: [], forming: distance, ts, lastDirection: direction }
+        : { ...folded, lastDirection: direction ?? folded.lastDirection };
+      nextHistory[key] = samples;
+
+      const window =
+        samples.forming === null ? samples.samples : [...samples.samples, samples.forming];
+      const { trend } = gapTrend(window);
+      const distanceDelta =
+        samples.forming !== null && samples.samples.length > 0
+          ? samples.forming - samples.samples[samples.samples.length - 1]
+          : null;
+      const status = relationshipStatus(direction, trend);
+      const meta = status !== null ? RELATIONSHIP_META[status] : null;
     return {
       pair: key,
       firstLabel: first,
