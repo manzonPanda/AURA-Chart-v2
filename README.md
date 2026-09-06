@@ -433,7 +433,8 @@ Indicators
   1); indicator VALUES are always recomputed client-side and never stored.
 - **Runtime safety.** User scripts are untrusted. AURA never `eval()`s them —
   PineTS is the sandboxed transpile/runtime boundary. Static pre-checks reject
-  oversized scripts (>20k chars), non-indicator declarations, `strategy()*`,
+  oversized scripts (>100k chars — real-world LuxAlgo-class scripts reach
+  ~85k), non-indicator declarations, `strategy()*`,
   `request.*` and Pine v<5; failures surface as human-readable messages (raw
   stacks go to the console only). One bad indicator can never break the chart.
 - **Performance** (500 × 1m bars, this machine):

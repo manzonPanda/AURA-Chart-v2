@@ -33,8 +33,15 @@ import {
 
 // ── Limits (robustness — one bad import must never hurt the chart) ─────────
 
-/** Maximum accepted Pine source length (chars). TradingView scripts are rarely > 8k. */
-export const MAX_PINE_SOURCE_LENGTH = 20_000;
+/**
+ * Maximum accepted Pine source length (chars). Real-world scripts regularly
+ * exceed 8k — LuxAlgo-class scripts reach ~85k — so the cap is generous
+ * (100k) yet still bounded: one runaway paste must never hurt the chart or
+ * the localStorage envelope. Single source of truth — the import modal's
+ * counter + typing cap, the static size check and the persisted-record
+ * sanitizer all read THIS constant; never hardcode the number elsewhere.
+ */
+export const MAX_PINE_SOURCE_LENGTH = 100_000;
 /** Maximum number of imported indicators kept in localStorage + rendered. */
 export const MAX_IMPORTED_INDICATORS = 10;
 /** Maximum line plots rendered per imported indicator (rest are ignored). */

@@ -614,6 +614,62 @@ test("safety: oversized scripts are rejected before any transpile", async () => 
   assert.match(outcome.issue.message, /limit/);
 });
 
+// ── Script-size limits (MAX_PINE_SOURCE_LENGTH = 100k) ──────────────────────
+
+/**
+ * A syntactically valid indicator padded with comment chars to EXACTLY
+ * `total` characters — the size-limit tests' shared fixture.
+ */
+function paddedScript(total) {
+  const head = `//@version=6\nindicator("size probe", overlay=true)\nplot(ta.ema(close, 9), "EMA 9")\n// `;
+  return head + "x".repeat(Math.max(0, total - head.length - 1)) + "\n";
+}
+
+test("safety: a script just below the size limit compiles end-to-end", async () => {
+  const src = paddedScript(MAX_PINE_SOURCE_LENGTH - 1);
+  assert.equal(src.length, MAX_PINE_SOURCE_LENGTH - 1);
+  const outcome = await compile(src);
+  assert.equal(outcome.ok, true, `${outcome.issue?.kind}: ${outcome.issue?.message}`);
+  assert.equal(outcome.indicator.source, src, "source round-trips verbatim — never altered");
+});
+
+test("safety: a script exactly at the size limit is accepted", async () => {
+  const src = paddedScript(MAX_PINE_SOURCE_LENGTH);
+  assert.equal(src.length, MAX_PINE_SOURCE_LENGTH);
+  const outcome = await compile(src);
+  assert.equal(outcome.ok, true, `${outcome.issue?.kind}: ${outcome.issue?.message}`);
+  assert.equal(outcome.indicator.source, src, "source round-trips verbatim — never altered");
+  assert.ok(outcome.indicator.plotMeta.some((p) => p.type === "line"), "plots still extracted");
+});
+
+test("safety: one character over the size limit is rejected with the configured limit", async () => {
+  const src = paddedScript(MAX_PINE_SOURCE_LENGTH + 1);
+  assert.equal(src.length, MAX_PINE_SOURCE_LENGTH + 1);
+  const outcome = await compile(src);
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.issue.kind, "too-large");
+  assert.match(outcome.issue.message, /characters.*limit/s);
+});
+
+test("safety: a real-world ~83,000-character script imports without truncation", async () => {
+  const src = paddedScript(83_457);
+  assert.equal(src.length, 83_457);
+  const outcome = await compile(src);
+  assert.equal(outcome.ok, true, `${outcome.issue?.kind}: ${outcome.issue?.message}`);
+  assert.equal(outcome.indicator.source, src, "83k source stored verbatim — no truncation/minification");
+  assert.equal(outcome.indicator.source.length, 83_457);
+});
+
+test("persistence: an ~83,000-character script round-trips localStorage verbatim", () => {
+  const storage = memoryStorage();
+  const source = paddedScript(83_457);
+  saveImportedPineIndicators([sampleIndicator({ id: "pine-big-real", source })], storage);
+  const loaded = loadImportedPineIndicators(storage);
+  assert.equal(loaded.length, 1, "83k record survives the persisted-record sanitizer");
+  assert.equal(loaded[0].source, source);
+  assert.equal(loaded[0].source.length, 83_457);
+});
+
 test("safety: empty script is rejected with a helpful message", async () => {
   const outcome = await compile("   \n  ");
   assert.equal(outcome.ok, false);
