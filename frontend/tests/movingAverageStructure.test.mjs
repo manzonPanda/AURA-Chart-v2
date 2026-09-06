@@ -20,6 +20,7 @@ import {
   structureCycleDistance,
   STRUCTURE_CYCLE,
   GAP_TREND_WINDOW,
+  MA_PAIR_KEYS,
   MA_STRUCTURE_EMA_FAST,
   MA_STRUCTURE_EMA_SLOW,
   MA_STRUCTURE_SMA_PERIOD,
@@ -507,5 +508,33 @@ test("integration: effectiveCloseSeries merges the live truth into its own bucke
     60,
   );
   assert.equal(stale.length, candles.length);
+});
+
+// ── 8. Display contract: exactly THREE relationship rows, stable identity ────
+
+test("display contract: relationships are exactly MA_PAIR_KEYS in order (panel keys rows by this)", () => {
+  // The panel keys each .ma-pair row by MA_PAIR_KEYS[i] — the fixed pair
+  // identity — so a pending (null) row keeps the SAME key as the real row it
+  // becomes. Regressing to a shared placeholder key ("pending" for every null)
+  // made React's reconciler duplicate/orphan rows across the live→replay
+  // boundary (blank "—" rows stacked above the real ones). These assertions
+  // pin the contract the panel's index-keyed rendering relies on.
+  assert.deepEqual(MA_PAIR_KEYS, ["EMA9_EMA20", "EMA9_SMA20", "EMA20_SMA20"]);
+
+  const candles = makeCandles(60, { start: 100, drift: 0.05, seed: 23 });
+  const full = evaluateCandles(candles);
+  assert.equal(full.snapshot.relationships.length, 3, "exactly three relationship rows");
+  assert.deepEqual(
+    full.snapshot.relationships.map((rel) => rel?.pair ?? null),
+    [...MA_PAIR_KEYS],
+  );
+
+  // Warm-up (fewer bars than any period): still exactly three entries — all
+  // pending (null). The PANEL keys these by MA_PAIR_KEYS[i], so each pending
+  // row keeps the identity of the real row it becomes; the engine's contract
+  // is "three slots, in the fixed order".
+  const warming = evaluateCandles(candles.slice(0, 5));
+  assert.equal(warming.snapshot.relationships.length, 3);
+  assert.deepEqual(warming.snapshot.relationships, [null, null, null]);
 });
 

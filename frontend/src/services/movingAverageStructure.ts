@@ -419,6 +419,18 @@ export interface MaStructureInput extends MaTriple {
   history: MaGapHistory;
 }
 
+/**
+ * Fixed pair display order — the ONE source of truth for the three tracked
+ * pairs. The panel keys its rows by THIS identity (not by a placeholder) so a
+ * pending row keeps the same key as the real row it becomes. Exported for the
+ * panel + tests; `PAIRS` below must stay in exactly this order.
+ */
+export const MA_PAIR_KEYS: readonly MaPairKey[] = [
+  "EMA9_EMA20",
+  "EMA9_SMA20",
+  "EMA20_SMA20",
+];
+
 /** Fixed pair order (first reads bullish when above second). */
 const PAIRS: readonly { key: MaPairKey; first: MaSeriesId; second: MaSeriesId }[] = [
   { key: "EMA9_EMA20", first: "EMA9", second: "EMA20" },

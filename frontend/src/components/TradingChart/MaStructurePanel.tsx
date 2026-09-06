@@ -5,6 +5,7 @@ import { calculateSMA } from "../../services/sma";
 import {
   evaluateMaStructure,
   emptyGapHistory,
+  MA_PAIR_KEYS,
   MA_STRUCTURE_EMA_FAST,
   MA_STRUCTURE_EMA_SLOW,
   MA_STRUCTURE_SMA_PERIOD,
@@ -134,8 +135,16 @@ export function MaStructurePanel({
 
       <div className="ma-structure-section">
         <div className="ma-structure-kicker">LIVE RELATIONSHIPS</div>
-        {snapshot.relationships.map((rel) => (
-          <div className="ma-pair" key={rel?.pair ?? "pending"}>
+        {/* Key = the FIXED pair identity (MA_PAIR_KEYS[i] === rel.pair when the
+            row is real). Never key a pending row by a shared placeholder: on
+            the live→replay boundary the engine briefly returns all-null
+            relationships, and duplicate "pending" keys made React's reconciler
+            orphan the real rows' previous DOM nodes — blank "—" rows stacked
+            above the real ones and survived steps/seek/exit until a full page
+            reload. Stable per-pair keys keep the list exactly three rows
+            through every lifecycle transition. */}
+        {snapshot.relationships.map((rel, i) => (
+          <div className="ma-pair" key={MA_PAIR_KEYS[i]}>
             <div className="ma-pair-name">
               {rel ? `${rel.firstLabel} / ${rel.secondLabel}` : "—"}
             </div>
