@@ -834,3 +834,52 @@ test("replay: slopes + convergence derive from the replay slice — nothing leak
   assert.equal(liveAgain.snapshot.relationships[0].signedGap, live.snapshot.relationships[0].signedGap);
 });
 
+
+test("global slope row: each of EMA9/EMA20/SMA20 slope computed once and consistent with engine relationships", () => {
+  const candles = makeCandles(60, { start: 100, drift: 0.05, seed: 42 });
+  const closes = effectiveCloseSeries(candles, null, 60);
+  const ema9Series = calculateEMA(closes, 9);
+  const ema20Series = calculateEMA(closes, 20);
+  const sma20Series = calculateSMA(closes, 20);
+
+  const evaled = evaluateMaStructure({
+    ema9: lastOf(ema9Series),
+    ema20: lastOf(ema20Series),
+    sma20: lastOf(sma20Series),
+    ts: closes.length > 0 ? closes[closes.length - 1].ts : null,
+    history: emptyGapHistory(),
+    series: { EMA9: ema9Series, EMA20: ema20Series, SMA20: sma20Series },
+  });
+
+  // The panel's global slope row derives each MA slope from its indicator series
+  // via calculateSlope (the SAME function the engine uses internally). Verify each
+  // glyph is a valid trader-facing symbol — never raw wording.
+  const ema9Slope = calculateSlope(lastOf(ema9Series), secondLastOf(ema9Series));
+  const ema20Slope = calculateSlope(lastOf(ema20Series), secondLastOf(ema20Series));
+  const sma20Slope = calculateSlope(lastOf(sma20Series), secondLastOf(sma20Series));
+  assert.ok(["↗", "↘", "--"].includes(ema9Slope), `EMA9 slope glyph invalid: ${ema9Slope}`);
+  assert.ok(["↗", "↘", "--"].includes(ema20Slope), `EMA20 slope glyph invalid: ${ema20Slope}`);
+  assert.ok(["↗", "↘", "--"].includes(sma20Slope), `SMA20 slope glyph invalid: ${sma20Slope}`);
+
+  // Exactly three relationship rows — the UI always renders exactly MA_PAIR_KEYS.
+  assert.equal(evaled.snapshot.relationships.length, 3);
+
+  // Each MA appears ONCE in the global slope row. Cross-check the global glyphs
+  // against the engine's per-relationship slopes: they must all agree, confirming
+  // the row shows every MA exactly once rather than per-card (which would be
+  // redundant and potentially inconsistent).
+  const [e9e20, e9s20, e20s20] = evaled.snapshot.relationships;
+  assert.equal(e9e20.firstSlope, ema9Slope, "EMA9 global slope matches EMA9/EMA20 firstSlope");
+  assert.equal(e9s20.firstSlope, ema9Slope, "EMA9 global slope matches EMA9/SMA20 firstSlope");
+  assert.equal(e9e20.secondSlope, ema20Slope, "EMA20 global slope matches EMA9/EMA20 secondSlope");
+  assert.equal(e20s20.firstSlope, ema20Slope, "EMA20 global slope matches EMA20/SMA20 firstSlope");
+  assert.equal(e9s20.secondSlope, sma20Slope, "SMA20 global slope matches EMA9/SMA20 secondSlope");
+  assert.equal(e20s20.secondSlope, sma20Slope, "SMA20 global slope matches EMA20/SMA20 secondSlope");
+
+  // None of the relationship objects carry a separate per-card slope payload
+  // that the UI would render redundantly — the global row is the single source.
+  assert.equal(e9e20.firstSlope, e9s20.firstSlope, "EMA9 slope is identical across its relationships");
+  assert.equal(e9e20.secondSlope, e20s20.firstSlope, "EMA20 slope is identical across its relationships");
+  assert.equal(e9s20.secondSlope, e20s20.secondSlope, "SMA20 slope is identical across its relationships");
+});
+

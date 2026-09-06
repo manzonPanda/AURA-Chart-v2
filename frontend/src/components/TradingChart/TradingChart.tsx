@@ -151,9 +151,15 @@ interface TimeScaleApi {
   fitContent(): void;
   subscribeVisibleTimeRangeChange(cb: () => void): void;
   unsubscribeVisibleTimeRangeChange(cb: () => void): void;
+  subscribeSizeChange(cb: () => void): void;
+  unsubscribeSizeChange(cb: () => void): void;
+}
+interface PriceScaleApi {
+  width(): number;
 }
 interface ChartApi {
   timeScale(): TimeScaleApi;
+  priceScale(id: string): PriceScaleApi;
   subscribeCrosshairMove(cb: (param: unknown) => void): void;
   unsubscribeCrosshairMove(cb: (param: unknown) => void): void;
 }
@@ -727,6 +733,12 @@ export function TradingChart({
   // AURA adds only what the demo doesn't have: live-paint suppression,
   // cursor-scoped indicator inputs, candle-pick entry and a clean exit.
   const [chartApi, setChartApi] = useState<ChartViewApi | null>(null);
+  /**
+   * Rendered width of the right price scale (px; 0 = not measurable yet). The
+   * MA Structure overlay anchors LEFT of it so the panel never covers the price
+   * axis — re-measured on chart resize / timeframe switch via the effect below.
+   */
+  const [priceScaleInset, setPriceScaleInset] = useState(0);
   const [session, setSession] = useState<{
     rc: ReplayController;
     manifest: Parameters<ReplayController["load"]>[0];
@@ -738,6 +750,40 @@ export function TradingChart({
   // The bump (not the value) is what matters: it re-renders the ref-reads
   // (visibleBars / replayCursorCandle) after every engine state change.
   const [, bumpVisible] = useReducer((n: number) => n + 1, 0);
+
+  // Measure the right price scale's ACTUAL rendered width once the chart is
+  // ready, and keep it current as the chart resizes (browser width, chart
+  // width, timeframe switches all flow through LWC's size-change event). The
+  // MA Structure panel consumes this as its right inset — never an arbitrary
+  // fixed offset — so the axis labels always stay readable.
+  useEffect(() => {
+    if (!chartApi) return;
+    const chart = chartApi.controller.getChart() as unknown as ChartApi | null;
+    if (!chart) return;
+    const report = (): void => {
+      try {
+        const w = chart.priceScale("right").width();
+        setPriceScaleInset(Number.isFinite(w) && w > 0 ? Math.ceil(w) : 0);
+      } catch {
+        /* price-scale API unsupported — the CSS fallback offset stays */
+      }
+    };
+    report();
+    // Let LWC settle its layout after the first paint, then re-measure.
+    const raf = requestAnimationFrame(() => requestAnimationFrame(report));
+    const timeScale = chart.timeScale();
+    if (timeScale && typeof timeScale.subscribeSizeChange === "function") {
+      timeScale.subscribeSizeChange(report);
+    }
+    return () => {
+      cancelAnimationFrame(raf);
+      try {
+        timeScale?.unsubscribeSizeChange?.(report);
+      } catch {
+        /* chart already torn down */
+      }
+    };
+  }, [chartApi, bucketSec]);
 
   // ── Incremental history ("Load More History") ───────────────────────────────
   // App owns the fetch/merge; this component owns the VIEWPORT CONTRACT and the
@@ -1003,6 +1049,7 @@ export function TradingChart({
           bucketSec={bucketSec}
           replayActive={session !== null}
           resetKey={`${replaySymbol ?? ""}|${bucketSec}|${session ? "replay" : "live"}`}
+          rightInset={priceScaleInset}
         />
       </div>
       <div className="chart-footer">

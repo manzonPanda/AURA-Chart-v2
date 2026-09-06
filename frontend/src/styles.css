@@ -350,10 +350,13 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .history-more--end { cursor: default; opacity: 0.55; color: var(--text); }
 
 /* ── MA Structure panel (EMA9 • EMA20 • SMA20) ─────────────
-   Compact trader-facing overlay, top-right of the chart. Pure display:
+   Compact trader-facing overlay, upper-right of the chart plot area. Anchored
+   LEFT of the right price scale via a measured inset (see TradingChart's
+   priceScaleInset feed into .ma-structure's inline right). Pure display:
    pointer-events none so chart panning / replay candle-picking pass through.
-   Shows the structural STATE and the pairwise POINT GAPS (never raw indicator
-   values) — the gap + its trend is the crossover-proximity information. */
+   Shows ONE global SLOPE row, the structural STATE, and the pairwise POINT
+   GAPS (never raw indicator values) — the gap + trend + convergence bar is
+   the crossover-proximity information. */
 .ma-structure {
   position: absolute; top: 44px; right: 12px; z-index: 5;
   width: 252px; padding: 10px 12px 11px;
@@ -399,18 +402,18 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .ma-pair-trend.widening { color: var(--muted); }
 .ma-pair-trend.flat { color: var(--muted); opacity: 0.7; }
 
-/* Per-MA slope row (↗ / ↘ / --) — why the gap is moving. */
-.ma-pair-slopes {
-  grid-column: 1 / -1;
-  display: flex; gap: 16px; margin-top: 3px;
-  font-size: 0.62rem; font-weight: 700; letter-spacing: 0.05em;
+/* Global MA slope row (↗ / ↘ / --) — the three indicators shown once at the
+   top of the panel; the relationship cards never repeat it. */
+.ma-structure-slopes {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 14px;
+  margin-top: 5px; font-size: 0.66rem; font-weight: 700; letter-spacing: 0.05em;
   color: var(--muted);
 }
-.ma-pair-slope { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; }
-.ma-pair-slope b { font-size: 0.68rem; font-weight: 800; }
-.ma-pair-slope b.rising { color: var(--up); }
-.ma-pair-slope b.falling { color: var(--down); }
-.ma-pair-slope b.flat { color: var(--muted); opacity: 0.65; }
+.ma-structure-slope { display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap; }
+.ma-structure-slope b { font-size: 0.78rem; font-weight: 800; }
+.ma-structure-slope b.rising { color: var(--up); }
+.ma-structure-slope b.falling { color: var(--down); }
+.ma-structure-slope b.flat { color: var(--muted); opacity: 0.65; }
 
 /* Convergence bar — subtle 10-cell glyph of how close to the pair's own
    recent gap range. Contextual, never a probability readout. */
@@ -455,6 +458,12 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   .toolbar-group { padding-left: 8px; gap: 5px; }
   .topbar-actions { gap: 5px; }
   .invert-toggle { max-width: 142px; overflow: hidden; text-overflow: ellipsis; }
+  /* Narrower viewports: reduce the MA panel's internal spacing before it can
+     collide with the price scale (the measured inset keeps it clear of the
+     axis regardless). */
+  .ma-structure { width: 232px; padding: 8px 10px 9px; }
+  .ma-structure-section { margin-top: 7px; padding-top: 6px; }
+  .ma-structure-slopes { gap: 10px; }
 }
 
 @media (max-width: 860px) {

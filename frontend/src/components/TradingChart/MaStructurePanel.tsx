@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { calculateEMA, effectiveCloseSeries } from "../../services/ema";
 import { calculateSMA } from "../../services/sma";
 import {
+  calculateSlope,
   evaluateMaStructure,
   emptyGapHistory,
   MA_PAIR_KEYS,
@@ -10,6 +11,7 @@ import {
   MA_STRUCTURE_EMA_SLOW,
   MA_STRUCTURE_SMA_PERIOD,
   type MaGapHistory,
+  type MaSeriesId,
   type MaSlope,
   type MaStructureEvaluation,
   type MaTone,
@@ -41,6 +43,13 @@ interface Props {
   /** Drives the badge (LIVE vs REPLAY) — the panel itself stays replay-scoped. */
   replayActive?: boolean;
   /**
+   * Rendered right-price-scale width (px) measured from the chart. The panel
+   * anchors itself LEFT of the price scale (right offset = inset + breathing
+   * gap) so the axis labels are never covered. 0 = chart not measured yet →
+   * the CSS fallback offset applies.
+   */
+  rightInset?: number;
+  /**
    * Changing this key (instrument / timeframe / replay boundary) resets the
    * gap-trend history, so samples can never leak across streams.
    */
@@ -68,6 +77,16 @@ const convergenceCells = (convergence: number | null): number => {
   return Math.round(ratio * MA_CONVERGENCE_CELLS);
 };
 
+/** Global per-MA slope row — the three indicator directions shown ONCE. */
+type MaSlopes = Record<MaSeriesId, MaSlope>;
+
+/** Slope of one indicator series (current vs previous point) via the engine's
+ *  calculateSlope — the SAME math the engine uses per pair. */
+const slopeOfSeries = (points: readonly { value: number }[]): MaSlope =>
+  points.length >= 2
+    ? calculateSlope(points[points.length - 1].value, points[points.length - 2].value)
+    : "--";
+
 /**
  * Trader-facing Moving Average Structure panel (EMA9 • EMA20 • SMA20).
  *
@@ -88,22 +107,27 @@ export function MaStructurePanel({
   bucketSec,
   replayActive = false,
   resetKey = "",
+  rightInset = 0,
 }: Props) {
   /** Gap-trend sample history — persisted between frames, keyed by pair. */
   const historyRef = useRef<MaGapHistory>(emptyGapHistory());
   const resetRef = useRef(resetKey);
 
   // Pure derivation per candle frame (same cadence as the indicator bridges).
-  const evaluation = useMemo<MaStructureEvaluation>(() => {
+  const { evaluation, slopes } = useMemo<{
+    evaluation: MaStructureEvaluation;
+    slopes: MaSlopes;
+  }>(() => {
     const closes = effectiveCloseSeries(bars, liveCandle, bucketSec);
     const lastTs = closes.length > 0 ? closes[closes.length - 1].ts : null;
     // The SAME series the last values come from are handed to the engine so it
-    // can derive per-MA slope (current vs previous point) and seed the gap
-    // window from loaded history — no extra indicator math anywhere.
+    // can derive per-pair slopes + seed the gap window from loaded history —
+    // no extra indicator math anywhere. The global slope row reads the SAME
+    // series through the engine's calculateSlope.
     const ema9Series = calculateEMA(closes, MA_STRUCTURE_EMA_FAST);
     const ema20Series = calculateEMA(closes, MA_STRUCTURE_EMA_SLOW);
     const sma20Series = calculateSMA(closes, MA_STRUCTURE_SMA_PERIOD);
-    return evaluateMaStructure({
+    const evaluation = evaluateMaStructure({
       ema9: lastValue(ema9Series),
       ema20: lastValue(ema20Series),
       sma20: lastValue(sma20Series),
@@ -111,6 +135,14 @@ export function MaStructurePanel({
       history: historyRef.current,
       series: { EMA9: ema9Series, EMA20: ema20Series, SMA20: sma20Series },
     });
+    return {
+      evaluation,
+      slopes: {
+        EMA9: slopeOfSeries(ema9Series),
+        EMA20: slopeOfSeries(ema20Series),
+        SMA20: slopeOfSeries(sma20Series),
+      },
+    };
   }, [bars, liveCandle, bucketSec]);
 
   // Commit AFTER render (refs may not be written during render). On a stream
@@ -128,7 +160,12 @@ export function MaStructurePanel({
   const { snapshot } = evaluation;
 
   return (
-    <div className="ma-structure" role="status" aria-label="Moving Average Structure">
+    <div
+      className="ma-structure"
+      role="status"
+      aria-label="Moving Average Structure"
+      style={rightInset > 0 ? { right: rightInset + 12 } : undefined}
+    >
       <div className="ma-structure-head">
         <span className="ma-structure-title">MOVING AVERAGE STRUCTURE</span>
         <span className={`ma-structure-badge ${replayActive ? "replay" : "live"}`}>
@@ -136,6 +173,18 @@ export function MaStructurePanel({
         </span>
       </div>
       <div className="ma-structure-sub">EMA9 • EMA20 • SMA20</div>
+
+      <div className="ma-structure-section">
+        <div className="ma-structure-kicker">SLOPE</div>
+        <div className="ma-structure-slopes">
+          {(["EMA9", "EMA20", "SMA20"] as const).map((id) => (
+            <span className="ma-structure-slope" key={id} title={`${id} slope`}>
+              {id}
+              <b className={slopeClass(slopes[id])}>{slopes[id]}</b>
+            </span>
+          ))}
+        </div>
+      </div>
 
       <div className="ma-structure-section">
         <div className="ma-structure-kicker">CURRENT STRUCTURE</div>
@@ -180,30 +229,6 @@ export function MaStructurePanel({
                 <div className={`ma-pair-trend ${rel?.gapTrend.toLowerCase() ?? "none"}`}>
                   {rel?.gapTrend ?? "—"}
                 </div>
-              </div>
-              {/* Per-MA slope — symbols only (↗ / ↘ / --), why the gap is moving. */}
-              <div className="ma-pair-slopes">
-                {rel ? (
-                  <>
-                    <span className="ma-pair-slope" title={`${rel.firstLabel} slope`}>
-                      {rel.firstLabel}
-                      <b className={slopeClass(rel.firstSlope)}>{rel.firstSlope}</b>
-                    </span>
-                    <span className="ma-pair-slope" title={`${rel.secondLabel} slope`}>
-                      {rel.secondLabel}
-                      <b className={slopeClass(rel.secondSlope)}>{rel.secondSlope}</b>
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <span className="ma-pair-slope">
-                      <b className="flat">--</b>
-                    </span>
-                    <span className="ma-pair-slope">
-                      <b className="flat">--</b>
-                    </span>
-                  </>
-                )}
               </div>
               {/* Convergence bar — how close to the pair's own recent gap range.
                   Subtle 10-cell glyph, never a probability. */}
