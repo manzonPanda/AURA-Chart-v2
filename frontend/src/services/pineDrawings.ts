@@ -393,7 +393,356 @@ export function extractLabelDrawings(rows: unknown, klines: readonly PineLabelBa
   return { labels, unsupported };
 }
 
+// ── Normalized line / box models ─────────────────────────────────────────────
+//
+// Same registry-driven model as labels: PineTS keeps every `line.new()` /
+// `box.new()` as a stable object whose full lifecycle (`set_xy`-family,
+// `set_color`, `set_extend`, `delete`, `copy`) mutates it in place, filters
+// `_deleted` objects on sync, and exposes the LIVE snapshots through the
+// `__lines__` / `__lines_overlay__` / `__boxes__` / `__boxes_overlay__`
+// collectors. Normalized anchors are chart-space (timeMs + price + logical),
+// never pixels — identical positioning contract to labels.
+
+export type PineLineXloc = "bar_index" | "bar_time";
+/** Pine `extend.*` — how the drawing extends beyond its anchors. */
+export type PineLineExtend = "none" | "left" | "right" | "both";
+/** Normalized line/border style (PineTS `style_*` line constants). */
+export type PineLineStyleName =
+  | "solid"
+  | "dotted"
+  | "dashed"
+  | "arrow_left"
+  | "arrow_right"
+  | "arrow_both";
+
+export interface PineLineDrawing {
+  /** Stable PineTS object id — one `line.new()` = one id. */
+  id: number;
+  /** First endpoint, epoch ms (`bar_index` → openTime; future → extrapolated; `bar_time` → raw ms). */
+  time1Ms: number;
+  price1: number;
+  /** Raw bar index for `xloc.bar_index` (exact logical-bar pinning), else null. */
+  logical1: number | null;
+  /** Second endpoint, epoch ms. */
+  time2Ms: number;
+  price2: number;
+  logical2: number | null;
+  xloc: PineLineXloc;
+  extend: PineLineExtend;
+  /** PineTS hex (`""` → renderer default). */
+  color: string;
+  style: PineLineStyleName;
+  /** 1–5 (Pine's linewidth domain, clamped). */
+  width: number;
+  forceOverlay: boolean;
+}
+
+export interface PineBoxDrawing {
+  /** Stable PineTS object id — one `box.new()` = one id. */
+  id: number;
+  leftMs: number;
+  rightMs: number;
+  topPrice: number;
+  bottomPrice: number;
+  /** Raw bar indexes for `xloc.bar_index`, else null. */
+  leftLogical: number | null;
+  rightLogical: number | null;
+  xloc: PineLineXloc;
+  extend: PineLineExtend;
+  borderColor: string;
+  borderStyle: PineLineStyleName;
+  borderWidth: number;
+  /** Box fill — PineTS hex (`""` → renderer default translucent fill). */
+  bgcolor: string;
+  /** Optional centered box label (Pine v5+ `text=`). */
+  text: string;
+  textColor: string;
+  textSize: PineLabelSizeName;
+  textHalign: PineLabelAlign;
+  textValign: "top" | "middle" | "bottom";
+  forceOverlay: boolean;
+}
+
+/** PineTS abbreviations for the shared positioning enums (verified 0.9.33). */
+const LINE_XLOC_ALIASES: Record<string, PineLineXloc> = {
+  bi: "bar_index",
+  bar_index: "bar_index",
+  bt: "bar_time",
+  bar_time: "bar_time",
+};
+
+const EXTEND_ALIASES: Record<string, PineLineExtend> = {
+  none: "none",
+  n: "none",
+  left: "left",
+  l: "left",
+  right: "right",
+  r: "right",
+  both: "both",
+  b: "both",
+};
+
+/** PineTS line styles + accepted aliases (`linestyle_*` is the plot-namespace twin). */
+const LINE_STYLE_ALIASES: Record<string, PineLineStyleName> = {
+  style_solid: "solid",
+  linestyle_solid: "solid",
+  solid: "solid",
+  style_dotted: "dotted",
+  linestyle_dotted: "dotted",
+  dotted: "dotted",
+  style_dashed: "dashed",
+  linestyle_dashed: "dashed",
+  dashed: "dashed",
+  style_arrow_left: "arrow_left",
+  linestyle_arrow_left: "arrow_left",
+  style_arrow_right: "arrow_right",
+  linestyle_arrow_right: "arrow_right",
+  style_arrow_both: "arrow_both",
+  linestyle_arrow_both: "arrow_both",
+};
+
+/** Pine's line.new default (v5/v6): style_solid, width 1. */
+export const PINE_DEFAULT_LINE_STYLE: PineLineStyleName = "solid";
+/** TradingView's line.new default color (color.blue). */
+export const PINE_DEFAULT_LINE_COLOR = "#2962FF";
+/** Pine's box.new default border color (color.blue). */
+export const PINE_DEFAULT_BOX_BORDER_COLOR = "#2962FF";
+
+function clampDrawWidth(w: unknown, fallback: number): number {
+  if (typeof w !== "number" || !Number.isFinite(w)) return fallback;
+  return Math.max(1, Math.min(5, Math.round(w)));
+}
+
+/**
+ * Map one raw Pine x anchor to chart space. `bar_index` keeps the raw index
+ * (logical) for exact bar-slot pinning AND its openTime (portable truth);
+ * `bar_time` x is a Pine epoch-SECOND timestamp → ms.
+ */
+function anchorFor(
+  rawX: number,
+  xloc: PineLineXloc,
+  klines: readonly PineLabelBar[],
+): { timeMs: number; logical: number | null } {
+  if (xloc === "bar_time") return { timeMs: rawX * 1000, logical: null };
+  const index = Math.trunc(rawX);
+  return { timeMs: barIndexToTimeMs(index, klines), logical: index };
+}
+
+interface LineSnapshotLike {
+  id?: unknown;
+  x1?: unknown;
+  y1?: unknown;
+  x2?: unknown;
+  y2?: unknown;
+  xloc?: unknown;
+  extend?: unknown;
+  color?: unknown;
+  style?: unknown;
+  width?: unknown;
+  force_overlay?: unknown;
+}
+
+/**
+ * Normalize one PineTS line snapshot. Returns `null` (after recording the
+ * reason) when the line cannot be positioned faithfully — unknown xloc would
+ * place the drawing at a WRONG location.
+ */
+function normalizeLine(
+  raw: LineSnapshotLike,
+  klines: readonly PineLabelBar[],
+  unsupported: PineDrawingUnsupported[],
+): PineLineDrawing | null {
+  const x1 = asFinite(raw.x1);
+  const y1 = asFinite(raw.y1);
+  const x2 = asFinite(raw.x2);
+  const y2 = asFinite(raw.y2);
+  const xlocRaw = typeof raw.xloc === "string" ? raw.xloc : "";
+  const xloc = LINE_XLOC_ALIASES[xlocRaw];
+  if (x1 === null || y1 === null || x2 === null || y2 === null) {
+    bumpUnsupported(unsupported, 'line.new anchor "na"');
+    return null;
+  }
+  if (!xloc) {
+    bumpUnsupported(unsupported, `line.new xloc "${xlocRaw.slice(0, 24)}"`);
+    return null;
+  }
+  // Unknown extend/style fall back to Pine's documented default (reported).
+  let extend: PineLineExtend = "none";
+  const extendRaw = typeof raw.extend === "string" ? raw.extend : "none";
+  if (EXTEND_ALIASES[extendRaw]) extend = EXTEND_ALIASES[extendRaw];
+  else bumpUnsupported(unsupported, `line.new extend "${extendRaw.slice(0, 24)}"`);
+  let style = PINE_DEFAULT_LINE_STYLE;
+  const styleRaw = typeof raw.style === "string" && raw.style.length > 0 ? raw.style : "style_solid";
+  if (LINE_STYLE_ALIASES[styleRaw]) style = LINE_STYLE_ALIASES[styleRaw];
+  else bumpUnsupported(unsupported, `line.new style "${styleRaw.slice(0, 24)}"`);
+  const a1 = anchorFor(x1, xloc, klines);
+  const a2 = anchorFor(x2, xloc, klines);
+  return {
+    id: typeof raw.id === "number" && Number.isFinite(raw.id) ? raw.id : -1,
+    time1Ms: a1.timeMs,
+    price1: y1,
+    logical1: a1.logical,
+    time2Ms: a2.timeMs,
+    price2: y2,
+    logical2: a2.logical,
+    xloc,
+    extend,
+    color: asHexColor(raw.color),
+    style,
+    width: clampDrawWidth(raw.width, 1),
+    forceOverlay: typeof raw.force_overlay === "boolean" ? raw.force_overlay : false,
+  };
+}
+
+/** Extract the line drawings from one PineTS run (`__lines__` collector rows). */
+export function extractLineDrawings(
+  rows: unknown,
+  klines: readonly PineLabelBar[],
+): { lines: PineLineDrawing[]; unsupported: PineDrawingUnsupported[] } {
+  const lines: PineLineDrawing[] = [];
+  const unsupported: PineDrawingUnsupported[] = [];
+  if (!Array.isArray(rows) || klines.length === 0) return { lines, unsupported };
+  const seen = new Set<number>();
+  for (const row of rows) {
+    const value = (row as { value?: unknown } | null)?.value;
+    if (!Array.isArray(value)) continue;
+    for (const raw of value) {
+      if (raw === null || typeof raw !== "object") continue;
+      const normalized = normalizeLine(raw as LineSnapshotLike, klines, unsupported);
+      if (normalized && !seen.has(normalized.id)) {
+        seen.add(normalized.id);
+        lines.push(normalized);
+      }
+    }
+  }
+  return { lines, unsupported };
+}
+
+interface BoxSnapshotLike {
+  id?: unknown;
+  left?: unknown;
+  top?: unknown;
+  right?: unknown;
+  bottom?: unknown;
+  xloc?: unknown;
+  extend?: unknown;
+  border_color?: unknown;
+  border_style?: unknown;
+  border_width?: unknown;
+  bgcolor?: unknown;
+  text?: unknown;
+  text_color?: unknown;
+  text_size?: unknown;
+  text_halign?: unknown;
+  text_valign?: unknown;
+  force_overlay?: unknown;
+}
+
+/** Map a Pine box `text_size` (size constant or point size) to the AURA scale. */
+function normalizeBoxTextSize(raw: unknown, unsupported: PineDrawingUnsupported[]): PineLabelSizeName {
+  if (typeof raw === "string" && SIZE_NAMES.has(raw)) return raw as PineLabelSizeName;
+  // Pine's `text_size_auto` default — PineTS normalizes it to "auto". It means
+  // "fit automatically" → the closest AURA behavior is the default scale.
+  if (typeof raw === "string" && (raw === "auto" || raw === "size_auto")) return PINE_DEFAULT_LABEL_SIZE;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    // Numeric point size (Pine v6) → nearest AURA bucket.
+    if (raw <= 10) return "tiny";
+    if (raw <= 12) return "small";
+    if (raw <= 15) return "normal";
+    if (raw <= 18) return "large";
+    return "huge";
+  }
+  if (typeof raw === "string" && raw.length > 0) {
+    bumpUnsupported(unsupported, `box.new text_size "${raw.slice(0, 24)}"`);
+  }
+  return PINE_DEFAULT_LABEL_SIZE;
+}
+
+/**
+ * Normalize one PineTS box snapshot. Returns `null` (after recording the
+ * reason) when the box cannot be positioned faithfully.
+ */
+function normalizeBox(
+  raw: BoxSnapshotLike,
+  klines: readonly PineLabelBar[],
+  unsupported: PineDrawingUnsupported[],
+): PineBoxDrawing | null {
+  const left = asFinite(raw.left);
+  const top = asFinite(raw.top);
+  const right = asFinite(raw.right);
+  const bottom = asFinite(raw.bottom);
+  const xlocRaw = typeof raw.xloc === "string" ? raw.xloc : "";
+  const xloc = LINE_XLOC_ALIASES[xlocRaw];
+  if (left === null || top === null || right === null || bottom === null) {
+    bumpUnsupported(unsupported, 'box.new anchor "na"');
+    return null;
+  }
+  if (!xloc) {
+    bumpUnsupported(unsupported, `box.new xloc "${xlocRaw.slice(0, 24)}"`);
+    return null;
+  }
+  let extend: PineLineExtend = "none";
+  const extendRaw = typeof raw.extend === "string" ? raw.extend : "none";
+  if (EXTEND_ALIASES[extendRaw]) extend = EXTEND_ALIASES[extendRaw];
+  else bumpUnsupported(unsupported, `box.new extend "${extendRaw.slice(0, 24)}"`);
+  let borderStyle = PINE_DEFAULT_LINE_STYLE;
+  const borderRaw =
+    typeof raw.border_style === "string" && raw.border_style.length > 0 ? raw.border_style : "style_solid";
+  if (LINE_STYLE_ALIASES[borderRaw]) borderStyle = LINE_STYLE_ALIASES[borderRaw];
+  else bumpUnsupported(unsupported, `box.new border_style "${borderRaw.slice(0, 24)}"`);
+  const aLeft = anchorFor(left, xloc, klines);
+  const aRight = anchorFor(right, xloc, klines);
+  const halignRaw = typeof raw.text_halign === "string" ? raw.text_halign : "center";
+  const valignRaw = typeof raw.text_valign === "string" ? raw.text_valign : "center";
+  return {
+    id: typeof raw.id === "number" && Number.isFinite(raw.id) ? raw.id : -1,
+    leftMs: aLeft.timeMs,
+    rightMs: aRight.timeMs,
+    topPrice: top,
+    bottomPrice: bottom,
+    leftLogical: aLeft.logical,
+    rightLogical: aRight.logical,
+    xloc,
+    extend,
+    borderColor: asHexColor(raw.border_color),
+    borderStyle,
+    borderWidth: clampDrawWidth(raw.border_width, 1),
+    bgcolor: asHexColor(raw.bgcolor),
+    text: typeof raw.text === "string" ? raw.text : "",
+    textColor: asHexColor(raw.text_color),
+    textSize: normalizeBoxTextSize(raw.text_size, unsupported),
+    textHalign: ALIGN_ALIASES[halignRaw] ?? "center",
+    textValign: valignRaw === "top" ? "top" : valignRaw === "bottom" ? "bottom" : "middle",
+    forceOverlay: typeof raw.force_overlay === "boolean" ? raw.force_overlay : false,
+  };
+}
+
+/** Extract the box drawings from one PineTS run (`__boxes__` collector rows). */
+export function extractBoxDrawings(
+  rows: unknown,
+  klines: readonly PineLabelBar[],
+): { boxes: PineBoxDrawing[]; unsupported: PineDrawingUnsupported[] } {
+  const boxes: PineBoxDrawing[] = [];
+  const unsupported: PineDrawingUnsupported[] = [];
+  if (!Array.isArray(rows) || klines.length === 0) return { boxes, unsupported };
+  const seen = new Set<number>();
+  for (const row of rows) {
+    const value = (row as { value?: unknown } | null)?.value;
+    if (!Array.isArray(value)) continue;
+    for (const raw of value) {
+      if (raw === null || typeof raw !== "object") continue;
+      const normalized = normalizeBox(raw as BoxSnapshotLike, klines, unsupported);
+      if (normalized && !seen.has(normalized.id)) {
+        seen.add(normalized.id);
+        boxes.push(normalized);
+      }
+    }
+  }
+  return { boxes, unsupported };
+}
+
 // ── Balloon geometry (pure — unit-testable, no canvas) ──────────────────────
+
 
 /** Pre-computed balloon + pointer geometry in pixels (top-left origin, Y down). */
 export interface LabelLayout {

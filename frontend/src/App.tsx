@@ -39,6 +39,7 @@ import {
   type PineImportOutcome,
   type PineRunStatus,
   type PineSymbolMeta,
+  type PineCompileStage,
 } from "./services/pineImport";
 import { useRealtimeStream, resolutionToBucketSec } from "./services/realtime";
 import { iso } from "./services/diagnostics";
@@ -288,9 +289,13 @@ export default function App() {
       .finally(() => setPushWorking(false));
   }, []);
 
-  /** Compile pipeline for the import modal — runs against the CURRENT chart candles. */
+    /** Compile pipeline for the import modal — runs against the CURRENT chart candles. */
   const handlePineImport = useCallback(
-    async (name: string, source: string): Promise<PineImportOutcome> => {
+    async (
+      name: string,
+      source: string,
+      onStage?: (stage: PineCompileStage) => void,
+    ): Promise<PineImportOutcome> => {
       if (importedPine.length >= MAX_IMPORTED_INDICATORS) {
         return {
           ok: false,
@@ -307,6 +312,7 @@ export default function App() {
         liveCandle: realtime.candle,
         bucketSec: resolutionToBucketSec(timeframe),
         symbol: pineSymbol,
+        onStage,
       });
       return outcome;
     },

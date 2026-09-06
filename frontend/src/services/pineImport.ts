@@ -52,6 +52,20 @@ export const MAX_PLOT_SERIES_PER_INDICATOR = 8;
 /** Maximum input widgets per imported indicator (sanity cap). */
 export const MAX_PINE_INPUTS = 32;
 
+/**
+ * Real pipeline stages of `compileImportedPine` — driven by the actual code
+ * path, never a timer. The import modal renders these as a stage checklist
+ * (the current stage pulses, completed stages get a checkmark; "rendering"
+ * is the stage the caller transitions into when the review panel appears).
+ */
+export type PineCompileStage =
+  | "preparing"
+  | "validating"
+  | "transpiling"
+  | "executing"
+  | "extracting"
+  | "rendering";
+
 // ── Storage ─────────────────────────────────────────────────────────────────
 
 /** localStorage key — Pine source + settings ONLY (never calculated data). */
@@ -568,6 +582,8 @@ export interface CompileImportedPineArgs {
   bucketSec: number;
   /** Active instrument metadata → PineTS `syminfo` (mintick etc.) for the preview run. */
   symbol?: PineSymbolMeta | null;
+  /** Real pipeline-stage progress reporter (drives the modal's compile checklist). */
+  onStage?: (stage: PineCompileStage) => void;
 }
 
 /**
@@ -581,16 +597,19 @@ export interface CompileImportedPineArgs {
  * UI-safe issue instead.
  */
 export async function compileImportedPine(args: CompileImportedPineArgs): Promise<PineImportOutcome> {
-  const { source, bars, liveCandle = null, bucketSec, symbol = null } = args;
+  const { source, bars, liveCandle = null, bucketSec, symbol = null, onStage } = args;
 
   // 1. Static checks (size / version / declaration / strategy / request.*).
+  onStage?.("preparing");
   const staticIssue = staticValidateSource(source);
+  onStage?.("validating");
   if (staticIssue) return { ok: false, issue: staticIssue };
   const hasVersion = VERSION_RE.test(source);
   let warning = hasVersion ? undefined : "No //@version declared — AURA assumes Pine v5/v6 semantics.";
 
   // 2. Transpile-only check: syntax errors surface here with line:column.
   let inputs: PineInputMetaSnapshot[] = [];
+  onStage?.("transpiling");
   try {
     const probe = new Indicator(source);
     probe.prepare();
@@ -633,6 +652,9 @@ export async function compileImportedPine(args: CompileImportedPineArgs): Promis
         (info) => {
           if (typeof info?.overlay === "boolean") runtimeOverlay = info.overlay;
         },
+        // The engine emits "executing" before the run and "extracting" after
+        // visuals are pulled — the real progress, not a timer.
+        (stage) => onStage?.(stage as PineCompileStage),
       );
       if (run === null) {
         console.error(`[pineImport] PineTS run failed: ${runError}`);
@@ -669,6 +691,10 @@ export async function compileImportedPine(args: CompileImportedPineArgs): Promis
   warning = notes.length > 0 ? notes.join(" ") : undefined;
   const overlay = runtimeOverlay ?? staticOverlayHint(source);
   const name = (args.name ?? "").trim().slice(0, 80) || guessPineTitle(source) || "Imported indicator";
+  // Final stage: the renderable snapshot (plotMeta) is being assembled — the
+  // modal's checklist marks every stage done right before the review panel
+  // (or instant import) replaces the progress display.
+  onStage?.("rendering");
 
   const inputs0: Record<string, unknown> = {};
   for (const m of inputs) inputs0[m.varId] = sanitizeInputValue(m, undefined);

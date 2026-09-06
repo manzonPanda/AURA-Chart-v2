@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   MAX_PINE_SOURCE_LENGTH,
   type ImportedPineIndicator,
+  type PineCompileStage,
   type PineImportOutcome,
 } from "../../services/pineImport";
 
@@ -18,7 +19,11 @@ plot(emaSlow, "EMA 20")`;
 
 interface Props {
   /** Runs the full compile pipeline against the current chart candles (App-owned). */
-  onCompile: (name: string, source: string) => Promise<PineImportOutcome>;
+  onCompile: (
+    name: string,
+    source: string,
+    onStage?: (stage: PineCompileStage) => void,
+  ) => Promise<PineImportOutcome>;
   /** Adds the reviewed indicator (App-owned state + persistence). */
   onImportConfirm: (indicator: ImportedPineIndicator) => void;
   onClose: () => void;
@@ -49,7 +54,39 @@ const TYPE_LABEL: Record<string, string> = {
   area: "area",
   horizontal: "hline",
   marker: "markers",
+  labels: "labels",
+  lines: "lines",
+  boxes: "boxes",
 };
+
+/** Ordered pipeline stages — the modal renders a checklist in this order. */
+const STAGE_ORDER: PineCompileStage[] = [
+  "preparing",
+  "validating",
+  "transpiling",
+  "executing",
+  "extracting",
+  "rendering",
+];
+
+/** Human label per stage for the compile progress checklist. */
+const STAGE_LABEL: Record<PineCompileStage, string> = {
+  preparing: "Preparing source",
+  validating: "Validating PineScript",
+  transpiling: "Transpiling",
+  executing: "Executing Pine engine",
+  extracting: "Extracting visuals",
+  rendering: "Rendering preview",
+};
+
+/** Map a stage to its visual status (current / done / pending). */
+function stageStatus(
+  stage: PineCompileStage,
+  current: PineCompileStage,
+): "current" | "done" | "pending" {
+  if (stage === current) return "current";
+  return STAGE_ORDER.indexOf(stage) < STAGE_ORDER.indexOf(current) ? "done" : "pending";
+}
 
 /**
  * Import Pine Script modal — name + code editor + Compile/Clear/Cancel.
@@ -66,6 +103,8 @@ export function PineImportModal({ onCompile, onImportConfirm, onClose }: Props) 
   /** Successful compile awaiting user confirmation (diagnostics review). */
   const [review, setReview] = useState<ImportedPineIndicator | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Current compile pipeline stage — powers the progress checklist. */
+  const [compileStage, setCompileStage] = useState<PineCompileStage>("preparing");
   const sourceRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
@@ -88,8 +127,9 @@ export function PineImportModal({ onCompile, onImportConfirm, onClose }: Props) 
     setIssue(null);
     setWarning(null);
     setReview(null);
+    setCompileStage("preparing");
     try {
-      const outcome = await onCompile(name, source);
+      const outcome = await onCompile(name, source, setCompileStage);
       if (outcome.ok && outcome.indicator) {
         if (outcome.warning) setWarning(outcome.warning);
         const d = outcome.indicator.diagnostics;
@@ -171,6 +211,32 @@ export function PineImportModal({ onCompile, onImportConfirm, onClose }: Props) 
         <div className="pine-editor-meta">
           {source.length.toLocaleString()} / {MAX_PINE_SOURCE_LENGTH.toLocaleString()} chars · Pine v5/v6 · indicator() scripts only
         </div>
+
+        {busy && (
+          <div className="pine-compile-progress" role="status" aria-label="Compiling Pine Script…">
+            <div className="pine-compile-progress-title">
+              <span className="pine-compile-stage-dot" data-status="current" />
+              COMPILING
+            </div>
+            <ul className="pine-compile-checklist">
+              {STAGE_ORDER.map((s) => {
+                const st = stageStatus(s, compileStage);
+                return (
+                  <li key={s} className={`pine-compile-stage pine-compile-stage--${st}`}>
+                    <span
+                      className="pine-compile-stage-dot"
+                      data-status={st}
+                      aria-hidden={st === "pending"}
+                    >
+                      {st === "done" ? "✓" : st === "current" ? "●" : "○"}
+                    </span>
+                    <span className="pine-compile-stage-label">{STAGE_LABEL[s]}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
 
         {review && review.diagnostics && (
           <div className="pine-diag" role="status">
@@ -266,6 +332,7 @@ export function PineImportModal({ onCompile, onImportConfirm, onClose }: Props) 
               setSource("");
               setIssue(null);
               setWarning(null);
+              setCompileStage("preparing");
               sourceRef.current?.focus();
             }}
             disabled={busy}

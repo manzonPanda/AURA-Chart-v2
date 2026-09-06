@@ -54,9 +54,13 @@ import {
   type EmaSourceBar,
 } from "./ema.ts";
 import {
+  extractBoxDrawings,
   extractLabelDrawings,
+  extractLineDrawings,
+  type PineBoxDrawing,
   type PineLabelBar,
   type PineLabelDrawing,
+  type PineLineDrawing,
 } from "./pineDrawings.ts";
 import {
   PINE_INDICATORS,
@@ -125,9 +129,13 @@ export interface PineSeries {
 //   label.new(…)/label.set_*/delete → __labels__ / __labels_overlay__ collectors whose
 //                                      rows carry the LIVE drawing-registry snapshots
 //                                      (normalized by services/pineDrawings.ts → "labels"
-//                                      PineVisual → Label adding is a first-class primitive)
-//   line.new / fill()                → internal `__lines__` / `__linefills__` collectors —
-//                                      still inspected, reported as unsupported
+//                                      PineVisual → Label is a first-class primitive)
+//   line.new(…)/line.set_*/delete  → __lines__ / __lines_overlay__ → "lines" PineVisual
+//                                      (same pineDrawings adapter + canvas primitive)
+//   box.new(…)/box.set_*/delete    → __boxes__ / __boxes_overlay__ → "boxes" PineVisual
+//   fill() / polyline / table      → internal `__linefills__` / `__polylines__` /
+//                                      `__tables__` collectors — still inspected,
+//                                      reported as unsupported
 //   display=display.none             → plot options { display: "none" } (data still present)
 //
 // Every supported construct maps to one normalized `PineVisual`; everything
@@ -135,7 +143,15 @@ export interface PineSeries {
 // faked or silently dropped.
 
 /** Visual kinds AURA can currently render for imported Pine scripts. */
-export type PineVisualType = "line" | "histogram" | "area" | "horizontal" | "marker" | "labels";
+export type PineVisualType =
+  | "line"
+  | "histogram"
+  | "area"
+  | "horizontal"
+  | "marker"
+  | "labels"
+  | "lines"
+  | "boxes";
 
 /** LWC-marker domain for Pine shapes/chars. */
 export interface PineMarkerPoint {
@@ -185,6 +201,22 @@ export type PineVisual =
       labels: PineLabelDrawing[];
       /** `force_overlay=true` labels — always pinned to the main price pane. */
       overlayLabels: PineLabelDrawing[];
+    }
+  | {
+      /** Pine `line.new()` drawings (same drawing-object architecture as labels). */
+      type: "lines";
+      key: string;
+      title: string;
+      lines: PineLineDrawing[];
+      overlayLines: PineLineDrawing[];
+    }
+  | {
+      /** Pine `box.new()` drawings (same drawing-object architecture as labels). */
+      type: "boxes";
+      key: string;
+      title: string;
+      boxes: PineBoxDrawing[];
+      overlayBoxes: PineBoxDrawing[];
     };
 
 /** What one PineTS run produced / could NOT produce (runtime half of the import diagnostics). */
@@ -220,14 +252,23 @@ const PINE_SHAPE_TO_MARKER: Record<string, PineMarkerPoint["shape"]> = {
 
 /** Internal PineTS drawing-collector keys → human-readable unsupported kinds. */
 const INTERNAL_PLOT_KIND: Record<string, string> = {
-  // NOTE: __labels__ / __labels_overlay__ are NOT here — labels are a fully
-  // rendered drawing primitive (see extractVisuals → "labels" PineVisual).
-  __lines__: "line.new drawings",
-  __boxes__: "box.new drawings",
+  // NOTE: __labels__ / __lines__ / __boxes__ (+ their _overlay_ twins) are NOT
+  // here — label/line/box are fully rendered drawing primitives (see
+  // extractVisuals → "labels"/"lines"/"boxes" PineVisuals).
   __polylines__: "polyline drawings",
   __linefills__: "fill() fills",
   __tables__: "table drawings",
 };
+
+/** Drawing collectors consumed by the pre-pass (never surfaced as raw plots). */
+const DRAWING_COLLECTOR_KEYS: ReadonlySet<string> = new Set([
+  "__labels__",
+  "__labels_overlay__",
+  "__lines__",
+  "__lines_overlay__",
+  "__boxes__",
+  "__boxes_overlay__",
+]);
 
 /** Ad-hoc indicator spec — the generic entry point for imported Pine scripts. */
 export interface PineScriptSpec {
@@ -718,26 +759,45 @@ export function extractVisuals(
   };
   if (!ctx?.plots) return { visuals, diagnostics };
 
-  // ── label.new() → first-class "labels" visual (drawing object registry) ─
-  // PineTS 0.9.33 merges ALL labels (including force_overlay=true) into the
-  // single `__labels__` collector, flagging each snapshot with `force_overlay`.
-  // We split by that per-label flag so overlay labels render on the main pane.
+  // ── drawing objects → first-class PineVisuals (drawing object registry) ──
+  // PineTS keeps every live drawing as a stable object (`*.new()` → new id,
+  // `*.set_*`/`*.delete()` mutate it, `_deleted` filtered on sync) and syncs
+  // the collectors from that same registry — so creation, updates AND deletes
+  // all reconcile through this single read. Anchors are resolved to chart
+  // space (timeMs + price + logical bar index) by the pineDrawings adapter,
+  // never to pixels. Each drawing kind splits by its per-object
+  // `force_overlay` flag so overlay drawings render on the main pane.
   const marketData = (ctx as { marketData?: unknown }).marketData;
   const klines: PineLabelBar[] = Array.isArray(marketData) ? (marketData as PineLabelBar[]) : [];
   const paneLabels: PineLabelDrawing[] = [];
   const overlayLabels: PineLabelDrawing[] = [];
-  for (const collector of ["__labels__", "__labels_overlay__"]) {
-    const plot = ctx.plots[collector];
-    if (!plot) continue;
-    const rows = Array.isArray(plot.data) ? plot.data : [];
-    const { labels, unsupported } = extractLabelDrawings(rows, klines);
+  const paneLines: PineLineDrawing[] = [];
+  const overlayLines: PineLineDrawing[] = [];
+  const paneBoxes: PineBoxDrawing[] = [];
+  const overlayBoxes: PineBoxDrawing[] = [];
+  const mergeUnsupported = (unsupported: { kind: string; count: number }[]): void => {
     for (const u of unsupported) {
       const found = diagnostics.unsupported.find((d) => d.kind === u.kind);
       if (found) found.count += u.count;
       else diagnostics.unsupported.push({ kind: u.kind, count: u.count });
     }
-    for (const lbl of labels) {
-      (lbl.forceOverlay ? overlayLabels : paneLabels).push(lbl);
+  };
+  for (const collector of DRAWING_COLLECTOR_KEYS) {
+    const plot = ctx.plots[collector];
+    if (!plot) continue;
+    const rows = Array.isArray(plot.data) ? plot.data : [];
+    if (collector === "__labels__" || collector === "__labels_overlay__") {
+      const { labels, unsupported } = extractLabelDrawings(rows, klines);
+      mergeUnsupported(unsupported);
+      for (const lbl of labels) (lbl.forceOverlay ? overlayLabels : paneLabels).push(lbl);
+    } else if (collector === "__lines__" || collector === "__lines_overlay__") {
+      const { lines, unsupported } = extractLineDrawings(rows, klines);
+      mergeUnsupported(unsupported);
+      for (const ln of lines) (ln.forceOverlay ? overlayLines : paneLines).push(ln);
+    } else {
+      const { boxes, unsupported } = extractBoxDrawings(rows, klines);
+      mergeUnsupported(unsupported);
+      for (const bx of boxes) (bx.forceOverlay ? overlayBoxes : paneBoxes).push(bx);
     }
   }
   if (paneLabels.length > 0 || overlayLabels.length > 0) {
@@ -749,10 +809,28 @@ export function extractVisuals(
       overlayLabels,
     });
   }
+  if (paneLines.length > 0 || overlayLines.length > 0) {
+    visuals.push({
+      type: "lines",
+      key: "lines",
+      title: "Line drawings",
+      lines: paneLines,
+      overlayLines,
+    });
+  }
+  if (paneBoxes.length > 0 || overlayBoxes.length > 0) {
+    visuals.push({
+      type: "boxes",
+      key: "boxes",
+      title: "Box drawings",
+      boxes: paneBoxes,
+      overlayBoxes,
+    });
+  }
 
   for (const [key, plot] of Object.entries(ctx.plots)) {
-    // Label collectors were fully consumed by the pre-pass above.
-    if (key === "__labels__" || key === "__labels_overlay__") continue;
+    // Drawing collectors were fully consumed by the pre-pass above.
+    if (DRAWING_COLLECTOR_KEYS.has(key)) continue;
     // Remaining internal drawing collectors — count only when drawings were
     // actually used.
     if (isInternalPlotKey(key)) {
@@ -1029,6 +1107,8 @@ export class PineIndicatorEngine {
     params: PineParams = {},
     onError?: (message: string) => void,
     onContext?: (info: { overlay?: boolean; title?: string }) => void,
+    /** Progress stages for the import modal (no-op outside the UI flow). */
+    onStage?: (stage: string) => void,
   ): Promise<{ visuals: PineVisual[]; diagnostics: PineRuntimeDiagnostics } | null> {
     if (this.pine === null || this.klines.length === 0 || this.dataSig === null) {
       return null;
@@ -1039,7 +1119,7 @@ export class PineIndicatorEngine {
     if (cached) return cached;
 
     const compiled = this.getCompiled(spec, params);
-
+    onStage?.("executing");
     let ctx: any;
     try {
       ctx = await this.pine.run(compiled.indicator, this.klines.length);
@@ -1049,6 +1129,7 @@ export class PineIndicatorEngine {
       onError?.(msg);
       return null;
     }
+    onStage?.("extracting");
 
     try {
       if (onContext && ctx?.indicator) {

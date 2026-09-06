@@ -17,6 +17,7 @@ import {
   type PineImportOutcome,
   type PineInputMetaSnapshot,
   type PineRunStatus,
+  type PineCompileStage,
 } from "../../services/pineImport";
 import { PineImportModal } from "./PineImportModal";
 
@@ -32,7 +33,11 @@ interface Props {
   pineStatuses: Record<string, PineRunStatus>;
   onImportedChange: (next: ImportedPineIndicator[]) => void;
   /** Full compile pipeline against the current chart candles (App-owned). */
-  onCompile: (name: string, source: string) => Promise<PineImportOutcome>;
+  onCompile: (
+    name: string,
+    source: string,
+    onStage?: (stage: PineCompileStage) => void,
+  ) => Promise<PineImportOutcome>;
   /** Confirm-import AFTER the user reviews the diagnostics panel. */
   onImportConfirm: (indicator: ImportedPineIndicator) => void;
 }
@@ -47,6 +52,8 @@ const VISUAL_LABEL: Record<string, string> = {
   horizontal: "hline",
   marker: "markers",
   labels: "label drawings",
+  lines: "line drawings",
+  boxes: "box drawings",
 };
 
 /** "2 lines · 4 markers" style summary (or a no-output notice). */

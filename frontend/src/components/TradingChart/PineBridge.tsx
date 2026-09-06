@@ -34,6 +34,7 @@ import {
 } from "../../services/pineEngine";
 import type { RealtimeCandleMsg } from "../../services/realtime";
 import { PineLabelPrimitive } from "./pineLabelPrimitive";
+import { PineLineBoxPrimitive } from "./pineLineBoxPrimitive";
 
 interface Props {
   /** The chart's bucket-aligned candles (history or live-only accumulation). */
@@ -76,6 +77,10 @@ type IndicatorChartState = {
   labelPrimitives: Map<number, PineLabelPrimitive>;
   /** Renderer primitive for `force_overlay=true` labels (always pinned to the main pane). */
   overlayLabelPrimitive: PineLabelPrimitive | null;
+  /** Renderer primitives for this indicator's `line.new()`/`box.new()` drawings, per pane host. */
+  drawingPrimitives: Map<number, PineLineBoxPrimitive>;
+  /** Overlay primitive for `force_overlay=true` lines/boxes (main pane). */
+  overlayDrawingPrimitive: PineLineBoxPrimitive | null;
   priceLines: IPriceLine[];
   priceLineSig: string;
   priceLineHost: ISeriesApi<"Line"> | null;
@@ -99,6 +104,8 @@ type IndicatorChartState = {
  *                           kept; char renders as circle + its character as
  *                           text (LWC cannot draw arbitrary glyphs — documented
  *                           limitation, never faked as lines).
+ *   label.new()           → pineLabelPrimitive canvas balloons
+ *   line.new()/box.new()  → pineLineBoxPrimitive canvas lines/boxes
  *
  * Data flow (identical guarantees as EmaBridge — doji-bug safe):
  *   IG tick → WS candle snapshot → liveCandle prop → effectiveCloseSeries()
@@ -130,6 +137,8 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, symbol, on
     markerPlugins: new Map(),
     labelPrimitives: new Map(),
     overlayLabelPrimitive: null,
+    drawingPrimitives: new Map(),
+    overlayDrawingPrimitive: null,
     priceLines: [],
     priceLineSig: "",
     priceLineHost: null,
@@ -180,6 +189,20 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, symbol, on
     if (st.overlayLabelPrimitive) {
       try {
         st.overlayLabelPrimitive.setLabels([]);
+      } catch {
+        /* primitive gone */
+      }
+    }
+    for (const prim of st.drawingPrimitives.values()) {
+      try {
+        prim.setDrawings([], []);
+      } catch {
+        /* primitive gone */
+      }
+    }
+    if (st.overlayDrawingPrimitive) {
+      try {
+        st.overlayDrawingPrimitive.setDrawings([], []);
       } catch {
         /* primitive gone */
       }
@@ -256,6 +279,8 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, symbol, on
   };
 
   type HorizontalVisual = Extract<PineVisual, { type: "horizontal" }>;
+type LinesVisual = Extract<PineVisual, { type: "lines" }>;
+type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
 
   /**
    * Sync one indicator's chart state to a fresh PineVisual[] — creates series/
@@ -276,6 +301,13 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, symbol, on
     let paintedAny = false;
     /** True when THIS run carried a labels visual — its absence clears old drawings. */
     let seenLabels = false;
+    /** True when THIS run carried a line/box visual — its absence clears old drawings. */
+    let seenDrawings = false;
+    // Merged line/box drawings for this run (both visuals feed ONE primitive).
+    const paneLines: LinesVisual["lines"] = [];
+    const overlayLines: LinesVisual["lines"] = [];
+    const paneBoxes: BoxesVisual["boxes"] = [];
+    const overlayBoxes: BoxesVisual["boxes"] = [];
 
     for (const v of visuals) {
       if (v.type === "line" || v.type === "histogram" || v.type === "area") {
@@ -398,6 +430,36 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, symbol, on
             paintedAny = true;
           }
         }
+      } else if (v.type === "lines") {
+        // Pine line.new() drawings → canvas primitives (same host + lifecycle
+        // as labels). Both line and box visuals are MERGED into one primitive
+        // per pane so their draw order stays coherent.
+        seenDrawings = true;
+        for (const ln of v.lines) paneLines.push(ln);
+        for (const ln of v.overlayLines) overlayLines.push(ln);
+      } else if (v.type === "boxes") {
+        seenDrawings = true;
+        for (const bx of v.boxes) paneBoxes.push(bx);
+        for (const bx of v.overlayBoxes) overlayBoxes.push(bx);
+      }
+    }
+
+    // Lines + boxes merged → one setDrawings per host (only when non-empty;
+    // the seenDrawings-clear below handles the vanished case).
+    if (paneLines.length > 0 || paneBoxes.length > 0) {
+      const host = labelHostFor(chart, st, candleSeries, barsNow);
+      if (host) {
+        const prim = ensureDrawingPrimitive(host, st, st.paneIndex);
+        prim.setDrawings(paneLines, paneBoxes);
+        paintedAny = true;
+      }
+    }
+    if (overlayLines.length > 0 || overlayBoxes.length > 0) {
+      const overlayHost = candleSeries ?? ensureCarrier(chart, st, barsNow);
+      if (overlayHost) {
+        const prim = ensureOverlayDrawingPrimitive(overlayHost, st);
+        prim.setDrawings(overlayLines, overlayBoxes);
+        paintedAny = true;
       }
     }
     // Markers: LWC requires time-sorted arrays; one merged set per pane.
@@ -477,6 +539,26 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, symbol, on
       if (st.overlayLabelPrimitive) {
         try {
           st.overlayLabelPrimitive.setLabels([]);
+        } catch {
+          /* primitive gone */
+        }
+      }
+    }
+
+    // Same lifecycle for line/box drawings: a run without a lines/boxes
+    // visual (replay before the drawing conditions fire, script edit) clears
+    // every previously-painted line/box.
+    if (!seenDrawings) {
+      for (const prim of st.drawingPrimitives.values()) {
+        try {
+          prim.setDrawings([], []);
+        } catch {
+          /* primitive gone */
+        }
+      }
+      if (st.overlayDrawingPrimitive) {
+        try {
+          st.overlayDrawingPrimitive.setDrawings([], []);
         } catch {
           /* primitive gone */
         }
@@ -696,6 +778,40 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, symbol, on
     try {
       host.attachPrimitive(prim);
       st.overlayLabelPrimitive = prim;
+    } catch {
+      /* older LWC without primitive support */
+    }
+    return prim;
+  };
+
+  /** One line/box primitive per pane host (mirrors label primitives). */
+  const ensureDrawingPrimitive = (
+    host: ISeriesApi<"Line">,
+    st: IndicatorChartState,
+    paneIndex: number,
+  ): PineLineBoxPrimitive => {
+    const existing = st.drawingPrimitives.get(paneIndex);
+    if (existing) return existing;
+    const prim = new PineLineBoxPrimitive();
+    try {
+      host.attachPrimitive(prim);
+      st.drawingPrimitives.set(paneIndex, prim);
+    } catch {
+      /* older LWC without primitive support — drawings degrade silently */
+    }
+    return prim;
+  };
+
+  /** Overlay primitive for force_overlay=true lines/boxes — main pane host. */
+  const ensureOverlayDrawingPrimitive = (
+    host: ISeriesApi<"Line">,
+    st: IndicatorChartState,
+  ): PineLineBoxPrimitive => {
+    if (st.overlayDrawingPrimitive) return st.overlayDrawingPrimitive;
+    const prim = new PineLineBoxPrimitive();
+    try {
+      host.attachPrimitive(prim);
+      st.overlayDrawingPrimitive = prim;
     } catch {
       /* older LWC without primitive support */
     }

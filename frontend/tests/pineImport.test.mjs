@@ -758,3 +758,55 @@ test("safety: plot extraction is capped at the per-indicator series limit", asyn
   const map = await runScript(`//@version=6\nindicator("many", overlay=true)\n${plots}`, bars);
   assert.equal(map.size, MAX_PLOT_SERIES_PER_INDICATOR, "excess plots ignored");
 });
+// ── Compile progress: real pipeline stages (no timer-based fake %) ──────────
+
+test("compile progress: onStage fires the real pipeline stages in order", async () => {
+  const stages = [];
+  const outcome = await compileImportedPine({
+    name: "stages",
+    source: EMA_SCRIPT,
+    bars: make1m(80),
+    liveCandle: null,
+    bucketSec: 60,
+    onStage: (s) => stages.push(s),
+  });
+  assert.ok(outcome.ok, "compile succeeds");
+  const order = ["preparing", "validating", "transpiling", "executing", "extracting", "rendering"];
+  for (const s of order) assert.ok(stages.includes(s), `stage "${s}" reported`);
+  const idx = stages.map((s) => order.indexOf(s));
+  for (let i = 1; i < idx.length; i++) {
+    assert.ok(idx[i] >= idx[i - 1], `stages never move backwards at "${stages[i]}"`);
+  }
+});
+
+test("compile progress: a syntax failure reports early stages, never late ones", async () => {
+  const stages = [];
+  const outcome = await compileImportedPine({
+    name: "broken",
+    source: `//@version=6\nindicator("x")\nplot(close`, // unclosed paren → transpile error
+    bars: make1m(80),
+    liveCandle: null,
+    bucketSec: 60,
+    onStage: (s) => stages.push(s),
+  });
+  assert.equal(outcome.ok, false, "compile fails");
+  assert.ok(stages.includes("transpiling"), "transpile stage reached");
+  assert.ok(!stages.includes("executing"), "execution never started");
+  assert.ok(!stages.includes("rendering"), "rendering never started");
+});
+
+test("compile progress: a static-validation failure stops after validating", async () => {
+  const stages = [];
+  const outcome = await compileImportedPine({
+    name: "strategy",
+    source: `//@version=6\nstrategy("s")\nplot(close)`,
+    bars: make1m(80),
+    liveCandle: null,
+    bucketSec: 60,
+    onStage: (s) => stages.push(s),
+  });
+  assert.equal(outcome.ok, false, "strategy scripts are rejected");
+  assert.ok(stages.includes("validating"), "validation stage reached");
+  assert.ok(!stages.includes("transpiling"), "transpile never started");
+});
+

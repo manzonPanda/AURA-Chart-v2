@@ -247,6 +247,37 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   background: rgba(251, 140, 0, 0.1); border: 1px solid rgba(251, 140, 0, 0.35);
   border-radius: 8px; padding: 8px 12px; font-size: 0.74rem; color: #ffb74d;
 }
+
+/* ── Compile progress checklist (stage-based, no fake percentage) ───────── */
+.pine-compile-progress {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px; border-radius: 8px;
+  background: rgba(56, 189, 248, 0.06); border: 1px solid rgba(56, 189, 248, 0.35);
+}
+.pine-compile-progress-title {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+  color: #5ec2ff;
+}
+.pine-compile-checklist {
+  list-style: none; display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0;
+}
+.pine-compile-stage {
+  display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: var(--muted);
+}
+.pine-compile-stage--current { color: var(--text); font-weight: 600; }
+.pine-compile-stage--done .pine-compile-stage-label { color: #7ee787; }
+.pine-compile-stage-dot {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 14px; border-radius: 50%;
+  font-size: 0.65rem; line-height: 1;
+  color: var(--muted); background: transparent;
+}
+.pine-compile-stage--done .pine-compile-stage-dot { color: #7ee787; }
+.pine-compile-stage--current .pine-compile-stage-dot {
+  color: #06121b; background: var(--accent);
+  box-shadow: 0 0 6px rgba(56, 189, 248, 0.5);
+}
 .pine-actions { display: flex; align-items: center; gap: 8px; }
 .pine-actions-spacer { flex: 1; }
 .pine-btn {
