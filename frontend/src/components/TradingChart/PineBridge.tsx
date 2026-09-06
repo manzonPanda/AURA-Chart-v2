@@ -29,6 +29,7 @@ import {
   type PineBar,
   type PineLiveCandle,
   type PineMarkerPoint,
+  type PineSymbolMeta,
   type PineVisual,
 } from "../../services/pineEngine";
 import type { RealtimeCandleMsg } from "../../services/realtime";
@@ -43,6 +44,8 @@ interface Props {
   bucketSec: number;
   /** Imported Pine indicators (localStorage-persisted in App). */
   indicators: readonly ImportedPineIndicator[];
+  /** Active instrument metadata → PineTS `syminfo` (mintick etc.). */
+  symbol?: PineSymbolMeta | null;
   /** Runtime status reporter (status-change guarded; safe to call every frame). */
   onStatus?: (id: string, status: PineRunStatus) => void;
 }
@@ -106,7 +109,7 @@ type IndicatorChartState = {
  * "right", markers/price lines anchor to the candle series); overlay=false
  * scripts each get their own native LWC pane (addSeries(…, paneIndex)).
  */
-export function PineBridge({ bars, liveCandle, bucketSec, indicators, onStatus }: Props) {
+export function PineBridge({ bars, liveCandle, bucketSec, indicators, symbol, onStatus }: Props) {
   const api = useChartApi();
   const engineRef = useRef<PineIndicatorEngine>(new PineIndicatorEngine());
   /** Per-indicator chart state (series, markers, price lines). */
@@ -535,7 +538,7 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, onStatus }
           volume: liveCandle.volume,
         }
       : null;
-    engineRef.current.setCandles(pineBars, pineLive, bucketSec);
+    engineRef.current.setCandles(pineBars, pineLive, bucketSec, symbol ?? null);
 
     void Promise.all(
       desiredLayout(indicators).map(async (s) => {
@@ -591,7 +594,7 @@ export function PineBridge({ bars, liveCandle, bucketSec, indicators, onStatus }
       /* one bad indicator must not break the others */
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, bars, liveCandle, bucketSec, indicators]);
+  }, [api, bars, liveCandle, bucketSec, indicators, symbol]);
 
   // Pure chart-side bridge: nothing rendered into the DOM.
   return null;

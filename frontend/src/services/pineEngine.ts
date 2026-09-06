@@ -18,9 +18,10 @@
  *   Supabase 1m/3m candles ─┐
  *   RealtimeCandleMsg (WS) ├→ effectiveCloseSeries() ─→ authoritative closes
  *                          ↓
- *                   PineIndicatorEngine.setCandles(bars, live, bucketSec)
+ *                   PineIndicatorEngine.setCandles(bars, live, bucketSec, symbol)
  *                          ↓
- *               new PineTS(klines)  +  cached compiled Indicator  (ta.ema)
+ *               new PineTS({getMarketData, getSymbolInfo})  +  cached compiled Indicator
+ *               (getSymbolInfo → pine.syminfo: mintick from the instrument registry)
  *                          ↓
  *                    PinePoint[] { ts(ms), value }  ──→  EmaBridge → LWC LineSeries
  *
@@ -238,6 +239,121 @@ export interface PineScriptSpec {
   bindings: PineInputBinding[];
   /** Extract only these plot keys; omit/empty = extract every plain-line plot. */
   plotKeys?: string[];
+}
+
+// ── syminfo (symbol metadata) ────────────────────────────────────────────────
+//
+// PineTS populates the script-visible `syminfo` namespace ONLY from the data
+// source's optional `getSymbolInfo(tickerId)` contract (verified 0.9.33): a
+// plain-array source leaves `pine.syminfo` undefined and EVERY `syminfo.*`
+// read in a user script throws "Cannot read properties of undefined". The
+// engine therefore ALWAYS wraps its candles in that provider duck-type and
+// derives the metadata from the ACTIVE instrument registry (backend truth).
+
+/**
+ * AURA-side symbol metadata handed to the PineTS runtime. Built from the
+ * active instrument's registry entry — never a global guess.
+ */
+export interface PineSymbolMeta {
+  /** The active instrument EPIC (TradingView `syminfo.tickerid` analogue). */
+  tickerid: string;
+  /** Quoting precision in decimal places (DAX 1, Spot Gold 2) → mintick = 10^-decimals. */
+  decimals?: number;
+  /** Quote currency when the registry carries it; "" lets PineTS defaults apply. */
+  currency?: string;
+  /** Exchange timezone (IANA) from the instrument calendar; "UTC" when absent. */
+  timezone?: string;
+}
+
+function clampDecimals(decimals: number): number {
+  return typeof decimals === "number" && Number.isInteger(decimals) && decimals >= 0 && decimals <= 8
+    ? decimals
+    : 0;
+}
+
+/** Tick size implied by an instrument's quoting precision (0–8 decimals). */
+export function mintickFromDecimals(decimals: number): number {
+  return 10 ** -clampDecimals(decimals);
+}
+
+/**
+ * Data-derived mintick fallback (mirrors PineTS's own FMPProvider heuristic):
+ * the smallest observed price delta, snapped DOWN onto the standard tick grid
+ * {1, 2, 2.5, 5} × 10^n. Returns `null` when the candles carry no usable
+ * delta at all (degenerate flat data) — the caller owns the terminal fallback.
+ */
+export function estimateMintickFromCandles(
+  klines: readonly { open: number; high: number; low: number; close: number }[],
+): number | null {
+  let min = Infinity;
+  const consider = (d: number): void => {
+    if (Number.isFinite(d) && d > 0 && d < min) min = d;
+  };
+  for (let i = 0; i < klines.length; i++) {
+    const k = klines[i];
+    if (!k) continue;
+    consider(Math.abs(k.close - k.open));
+    consider(Math.abs(k.high - k.low));
+    const prev = klines[i - 1];
+    if (prev) consider(Math.abs(k.close - prev.close));
+  }
+  if (!Number.isFinite(min)) return null;
+  const exp = Math.floor(Math.log10(min));
+  const base = 10 ** exp;
+  const mantissa = min / base;
+  const grid = mantissa >= 5 ? 5 : mantissa >= 2.5 ? 2.5 : mantissa >= 2 ? 2 : 1;
+  return grid * base;
+}
+
+/** Terminal fallback for degenerate flat data (no decimals, no usable deltas). */
+const MINTICK_DATA_FLOOR = 0.0001;
+
+/**
+ * Build the full symbol-info object PineTS assigns to `pine.syminfo` on every
+ * run. mintick precedence: instrument `decimals` → candle-data estimate →
+ * documented degenerate floor. Never a global 0.01.
+ */
+export function buildPineSymbolInfo(
+  meta: PineSymbolMeta | null | undefined,
+  klines: readonly PineCandle[],
+): Record<string, unknown> {
+  const mintick =
+    meta?.decimals !== undefined && meta?.decimals !== null
+      ? mintickFromDecimals(meta.decimals)
+      : (estimateMintickFromCandles(klines) ?? MINTICK_DATA_FLOOR);
+  return {
+    // Identity (the fields scripts + PineTS's own namespaces read).
+    tickerid: meta?.tickerid ?? "",
+    ticker: meta?.tickerid ?? "",
+    main_tickerid: meta?.tickerid ?? "",
+    current_contract: meta?.tickerid ?? "",
+    root: "",
+    prefix: "",
+    isin: "",
+    // Classification — no registry data yet; left empty, never invented.
+    type: "",
+    description: "",
+    sector: "",
+    industry: "",
+    country: "",
+    basecurrency: "",
+    currency: meta?.currency ?? "",
+    // Session / time.
+    timezone: meta?.timezone ?? "UTC",
+    session: "",
+    expiration_date: NaN,
+    // Price grid — TradingView semantics: mintick = minmove / pricescale.
+    mintick,
+    minmove: 1,
+    pricescale: Math.round(1 / mintick),
+    pointvalue: 1,
+    mincontract: 1,
+    volumetype: "",
+    employees: 0,
+    shareholders: 0,
+    shares_outstanding_float: 0,
+    shares_outstanding_total: 0,
+  };
 }
 
 /** A PineScript-compatible candle — the Kline shape PineTS expects for an array source. */
@@ -746,6 +862,8 @@ export class PineIndicatorEngine {
   private pine: PineTS | null = null;
   private klines: PineCandle[] = [];
   private dataSig: string | null = null;
+  /** Signature of the symbol metadata the current runtime was built with. */
+  private symSig: string | null = null;
   private readonly compiled = new Map<string, CompiledIndicator>();
   private readonly resultCache = new Map<string, PinePoint[]>();
   private readonly scriptCache = new Map<string, Map<string, PineSeries>>();
@@ -761,20 +879,42 @@ export class PineIndicatorEngine {
     bars: readonly PineBar[],
     liveCandle: PineLiveCandle | null,
     bucketSec: number,
+    symbol: PineSymbolMeta | null = null,
   ): void {
     const klines = buildAuthoritativeSeries(bars, liveCandle, bucketSec);
     const sig = dataSignature(klines);
-    if (sig === this.dataSig && this.pine !== null) {
-      // Authoritative close stream unchanged — keep the existing PineTS instance
-      // and all cached results (guards against rAF/stale/redundant re-renders).
+    const symSig = JSON.stringify(symbol ?? null);
+    if (sig === this.dataSig && this.pine !== null && symSig === this.symSig) {
+      // Authoritative close stream + symbol metadata unchanged — keep the
+      // existing PineTS instance and all cached results (guards against
+      // rAF/stale/redundant re-renders).
       this.klines = klines;
       return;
     }
     this.klines = klines;
     this.dataSig = sig;
+    this.symSig = symSig;
     // New runtime over the new series. Compiled `Indicator`s are reused across
     // instances — only the runtime data view changes here.
-    this.pine = new PineTS(this.klines as unknown as PineCandle[], undefined, undefined);
+    //
+    // The candles are wrapped in PineTS's provider duck-type so the runtime's
+    // `getSymbolInfo()` contract is fulfilled: `pine.syminfo` then carries REAL
+    // symbol metadata (mintick from the instrument registry, fallback: candle
+    // data) instead of `undefined`, which crashed any `syminfo.*` read.
+    // `getSymbolInfo` NEVER rejects — PineTS's catch path would leave
+    // `_syminfo` unset again. PineTS awaits `ready()` before every run, so the
+    // (already-resolved) promise adds no perceptible latency.
+    const info = buildPineSymbolInfo(symbol, klines);
+    const tickerId = typeof info.tickerid === "string" && info.tickerid.length > 0 ? info.tickerid : undefined;
+    const source = {
+      getMarketData: async (): Promise<PineCandle[]> => klines,
+      getSymbolInfo: async (): Promise<unknown> => info,
+    };
+    this.pine = new PineTS(
+      source as unknown as ConstructorParameters<typeof PineTS>[0],
+      tickerId,
+      undefined,
+    );
     this.resultCache.clear();
     this.scriptCache.clear();
     this.scriptVisualsCache.clear();
@@ -798,7 +938,7 @@ export class PineIndicatorEngine {
       return null;
     }
 
-    const cacheKey = `${indicatorId}|${sourceSignature(spec.source)}|${this.dataSig}|${paramsSignature(params)}`;
+    const cacheKey = `${indicatorId}|${sourceSignature(spec.source)}|${this.dataSig}|${paramsSignature(params)}|${this.symSig ?? "-"}`;
     const cached = this.resultCache.get(cacheKey);
     if (cached) return cached;
 
@@ -841,7 +981,7 @@ export class PineIndicatorEngine {
       return null;
     }
 
-    const cacheKey = `${spec.id}|${sourceSignature(spec.source)}|${this.dataSig}|${paramsSignature(params)}`;
+    const cacheKey = `${spec.id}|${sourceSignature(spec.source)}|${this.dataSig}|${paramsSignature(params)}|${this.symSig ?? "-"}`;
     const cached = this.scriptCache.get(cacheKey);
     if (cached) return cached;
 
@@ -894,7 +1034,7 @@ export class PineIndicatorEngine {
       return null;
     }
 
-    const cacheKey = `${spec.id}|${sourceSignature(spec.source)}|${this.dataSig}|${paramsSignature(params)}`;
+    const cacheKey = `${spec.id}|${sourceSignature(spec.source)}|${this.dataSig}|${paramsSignature(params)}|${this.symSig ?? "-"}`;
     const cached = this.scriptVisualsCache.get(cacheKey);
     if (cached) return cached;
 
@@ -975,6 +1115,7 @@ export class PineIndicatorEngine {
     this.pine = null;
     this.klines = [];
     this.dataSig = null;
+    this.symSig = null;
   }
 }
 

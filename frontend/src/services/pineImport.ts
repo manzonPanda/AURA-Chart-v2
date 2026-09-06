@@ -29,7 +29,10 @@ import {
   type PineRuntimeDiagnostics,
   type PineVisual,
   type PineVisualType,
+  type PineSymbolMeta,
 } from "./pineEngine.ts";
+
+export type { PineSymbolMeta };
 
 // ── Limits (robustness — one bad import must never hurt the chart) ─────────
 
@@ -563,6 +566,8 @@ export interface CompileImportedPineArgs {
   liveCandle?: PineLiveCandle | null;
   /** Selected timeframe bucket size in seconds (60 = 1m, 180 = 3m). */
   bucketSec: number;
+  /** Active instrument metadata → PineTS `syminfo` (mintick etc.) for the preview run. */
+  symbol?: PineSymbolMeta | null;
 }
 
 /**
@@ -576,7 +581,7 @@ export interface CompileImportedPineArgs {
  * UI-safe issue instead.
  */
 export async function compileImportedPine(args: CompileImportedPineArgs): Promise<PineImportOutcome> {
-  const { source, bars, liveCandle = null, bucketSec } = args;
+  const { source, bars, liveCandle = null, bucketSec, symbol = null } = args;
 
   // 1. Static checks (size / version / declaration / strategy / request.*).
   const staticIssue = staticValidateSource(source);
@@ -610,7 +615,10 @@ export async function compileImportedPine(args: CompileImportedPineArgs): Promis
   if (bars.length > 0) {
     const engine = new PineIndicatorEngine();
     try {
-      engine.setCandles(bars, liveCandle, bucketSec);
+      // The preview run gets the SAME syminfo the live chart will use — a
+      // script reading syminfo.mintick compiles+runs here exactly as it does
+      // on the chart (no "compiles in the modal, crashes on the chart" gap).
+      engine.setCandles(bars, liveCandle, bucketSec, symbol);
       let runError: string | null = null;
       const run = await engine.computeScriptVisuals(
         {

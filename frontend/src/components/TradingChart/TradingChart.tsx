@@ -40,6 +40,7 @@ import { planLiveUpdate, type LiveBar } from "../../services/liveCandle";
 import { defaultEmaSettings, type EmaSettings } from "../../config/emaSettings";
 import type { SmaSettings } from "../../config/smaSettings";
 import type { ImportedPineIndicator, PineRunStatus } from "../../services/pineImport";
+import type { PineSymbolMeta } from "../../services/pineEngine";
 import { CandleCountdown } from "./CandleCountdown";
 import { EmaBridge } from "./EmaBridge";
 import { InvertScaleBridge } from "./InvertScaleBridge";
@@ -77,6 +78,8 @@ interface Props {
   smaSettings?: SmaSettings;
   /** Imported Pine indicators (localStorage-persisted in App). */
   pineIndicators?: ImportedPineIndicator[];
+  /** Active instrument metadata → PineTS `syminfo` (mintick etc.) for scripts. */
+  pineSymbol?: PineSymbolMeta | null;
   /** Runtime status reporter for imported Pine indicators. */
   onPineStatus?: (id: string, status: PineRunStatus) => void;
   /**
@@ -606,6 +609,7 @@ export function TradingChart({
   emaSettings = defaultEmaSettings(),
   smaSettings,
   pineIndicators = [],
+  pineSymbol = null,
   onPineStatus,
   invertScale = false,
   replaySymbol,
@@ -1036,6 +1040,7 @@ export function TradingChart({
             liveCandle={session ? null : liveCandle}
             bucketSec={bucketSec}
             indicators={pineIndicators}
+            symbol={pineSymbol}
             onStatus={onPineStatus}
           />
         </ChartView>

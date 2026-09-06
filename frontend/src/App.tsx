@@ -3,7 +3,7 @@
  * Priority: realtime stream (Lightstreamer → WS → chart) even if historical
  * REST is unavailable (e.g. IG_ALLOWANCE_EXHAUSTED).
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TradingChart } from "./components/TradingChart/TradingChart";
 import { IndicatorsMenu } from "./components/Indicators/IndicatorsMenu";
 import {
@@ -38,6 +38,7 @@ import {
   type ImportedPineIndicator,
   type PineImportOutcome,
   type PineRunStatus,
+  type PineSymbolMeta,
 } from "./services/pineImport";
 import { useRealtimeStream, resolutionToBucketSec } from "./services/realtime";
 import { iso } from "./services/diagnostics";
@@ -91,6 +92,22 @@ export default function App() {
   // an epic param → the backend serves its default (DAX): the historic behavior.
   const { catalog, selectedEpic, selected: selectedInstrument, selectInstrument } = useInstruments();
   const epic = selectedEpic;
+
+  /**
+   * Active instrument → PineTS `syminfo` metadata. Derived from the backend
+   * registry (NEVER hardcoded): `decimals` drives `syminfo.mintick` (DAX 1 →
+   * 0.1, Spot Gold 2 → 0.01) and the instrument calendar supplies the
+   * session timezone. Memoized on identity so per-frame renders hand the
+   * SAME object to PineBridge (whose engine guards re-runs by value anyway).
+   */
+  const pineSymbol: PineSymbolMeta | null = useMemo(() => {
+    if (!selectedInstrument) return null;
+    return {
+      tickerid: selectedInstrument.epic,
+      decimals: selectedInstrument.decimals,
+      ...(selectedInstrument.calendar?.timezone ? { timezone: selectedInstrument.calendar.timezone } : {}),
+    };
+  }, [selectedInstrument]);
   /** Epic reported by the last successful history load (display fallback). */
   const [historyEpic, setHistoryEpic] = useState<string>("");
   const [loading, setLoading] = useState(false);
@@ -289,10 +306,11 @@ export default function App() {
         bars: candles,
         liveCandle: realtime.candle,
         bucketSec: resolutionToBucketSec(timeframe),
+        symbol: pineSymbol,
       });
       return outcome;
     },
-    [candles, realtime.candle, timeframe],
+    [candles, realtime.candle, timeframe, pineSymbol],
   );
 
   /**
@@ -644,6 +662,7 @@ export default function App() {
           emaSettings={emaSettings}
           smaSettings={smaSettings}
           pineIndicators={importedPine}
+          pineSymbol={pineSymbol}
           onPineStatus={handlePineStatus}
           invertScale={chartSettings.invertScale}
           replaySymbol={selectedEpic || undefined}
