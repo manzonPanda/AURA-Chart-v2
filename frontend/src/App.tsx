@@ -632,15 +632,13 @@ export default function App() {
           <OHLCReadout candle={quoteCandle} invertScale={chartSettings.invertScale} />
         </div>
         <div className="topbar-actions">
-          {/* Feed statistics — relocated from the removed bottom statusbar. */}
+          {/* Feed statistics — relocated from the removed bottom statusbar.
+              The dot alone reads as "feed alive" (full label lives in title). */}
           <div className="market-stats" aria-label="Market feed status">
-            <div className="market-stats-brand" title="Market feed">
-              <span className="market-stats-dot" />
-              <span className="market-stats-name">Market feed</span>
-            </div>
+            <span className="market-stats-dot" title="Market feed" />
             <span className="status-metric"><span className="status-label">ENV</span><strong>{health?.environment ?? "…"}</strong></span>
-            <span className="status-metric"><span className="status-label">BARS</span><strong>{barsCount}</strong></span>
-            <span className="status-metric"><span className="status-label">TICKS</span><strong>{realtime.ticks}</strong></span>
+            <span className="status-metric status-metric--bars"><span className="status-label">BARS</span><strong>{barsCount}</strong></span>
+            <span className="status-metric status-metric--ticks"><span className="status-label">TICKS</span><strong>{realtime.ticks}</strong></span>
             {lastTickAge !== null && (
               <span className="status-metric status-metric--lasttick"><span className="status-label">LAST TICK</span><strong>{lastTickAge}s</strong></span>
             )}
@@ -722,7 +720,7 @@ export default function App() {
               setChartSettings((prev) => ({ ...prev, invertScale: !prev.invertScale }))
             }
           >
-            Invert Scale: {chartSettings.invertScale ? "ON" : "OFF"}
+            Invert: {chartSettings.invertScale ? "ON" : "OFF"}
           </button>
           <button
             className="refresh-btn"
