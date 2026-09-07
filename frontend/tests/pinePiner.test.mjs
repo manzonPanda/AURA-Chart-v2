@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { PinerPineEngine } from "../src/services/pinePinerEngine.ts";
 import { PinerWorkerEngine } from "../src/services/pineWorkerClient.ts";
 import { mintickFromDecimals } from "../src/services/pineMintick.ts";
-import { pineTimeframeStr } from "../src/services/pinePinerCore.ts";
+import { pineTimeframeStr, PINE_VALUE_SANITY_LIMIT } from "../src/services/pinePinerCore.ts";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
@@ -388,5 +388,102 @@ plot(syminfo.mintick * 1000, "tickx1000")`;
   assert.equal(run.diagnostics.unsupported.length, 0, "nothing silently unsupported");
   console.log(`[pinePiner] 83k compile+execute: ${elapsed.toFixed(0)}ms`);
   assert.ok(elapsed < 55_000, "83k script must complete inside the gate budget");
+  eng.dispose();
+});
+
+// ── autoscale safety: sentinel-class values must never reach a series ────────
+//
+// ROOT-CAUSE regression tests for the AURA price-scale explosion (the TV
+// ±11-billion class). The right price scale's auto-fit unions every visible
+// series' data range; the ONLY script-controlled contributor is the plot-series
+// values extracted in pinePinerCore (drawings → canvas primitives with no
+// autoscaleInfo; hlines → custom price lines and markers → excluded by
+// Lightweight Charts; display:none plots → never reach a series). One finite
+// ±1e10-class value therefore dominated the union and compressed candles to a
+// hairline. These tests pin the sentinel guard AND the killzone pattern the
+// user's fixed script uses (envelope boxes from ta.highest/ta.lowest).
+
+/** Simulates LWC's auto-fit union: candle envelope merged with every line-family visual. */
+function fitUnion(bars, visuals) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const b of bars) {
+    min = Math.min(min, b.low);
+    max = Math.max(max, b.high);
+  }
+  for (const v of visuals) {
+    if (v.type !== "line" && v.type !== "histogram" && v.type !== "area") continue;
+    for (const p of v.data) {
+      min = Math.min(min, p.value);
+      max = Math.max(max, p.value);
+    }
+  }
+  return { min, max };
+}
+
+test("autoscale: ±1e10 sentinel plots are stripped before reaching a series; legit plots survive", async () => {
+  const bars = makeBars(120, 0.01);
+  const src = `//@version=6
+indicator("sentinel probe", overlay = true)
+plot(ta.ema(close, 9), "ema9")
+plot(1e10, "sentinel-top")
+plot(-1e10, "sentinel-bottom")`;
+  const eng = engineOver(bars, { tickerid: "CS.D.GOLDCGD.TODAY.IP", decimals: 2 });
+  const run = await eng.computeScriptVisuals(SPEC(src));
+  assert.ok(run, "script must run");
+  assert.equal(
+    run.visuals.filter((v) => v.type === "line" && v.title.startsWith("sentinel")).length,
+    0,
+    "sentinel-class plots must not produce series data",
+  );
+  const ema = run.visuals.find((v) => v.type === "line" && v.title === "ema9");
+  assert.ok(ema && ema.data.length > 0, "legitimate EMA plot survives the guard");
+  // Auto-fit outcome: the union the right scale would fit stays near the candle envelope.
+  const union = fitUnion(bars, run.visuals);
+  const hi = Math.max(...bars.map((b) => b.high));
+  const lo = Math.min(...bars.map((b) => b.low));
+  assert.ok(Number.isFinite(union.min) && Number.isFinite(union.max), "union must be finite");
+  assert.ok(
+    union.max - union.min <= (hi - lo) * 50,
+    `fit union height ${union.max - union.min} must stay within 50× the candle envelope ${hi - lo}`,
+  );
+  eng.dispose();
+});
+
+test("autoscale: fixed killzone pattern (envelope boxes + label + plots + markers) keeps a sane fit", async () => {
+  const bars = makeBars(600, 0.01);
+  const src = `//@version=6
+indicator("killzone replica", overlay = true)
+top = ta.highest(high, 500)
+bottom = ta.lowest(low, 500)
+if barstate.islast
+    box.new(bar_index - 60, top, bar_index, bottom, border_color = color.orange, bgcolor = color.new(color.orange, 85))
+    label.new(bar_index, top, "KZ", style = label.style_label_down, textcolor = color.white, force_overlay = true)
+plot(ta.ema(close, 9), "ema9")
+plotshape(ta.crossover(close, ta.ema(close, 9)), style = shape.triangleup, location = location.belowbar, color = color.green)`;
+  const eng = engineOver(bars, { tickerid: "CS.D.GOLDCGD.TODAY.IP", decimals: 2 });
+  const run = await eng.computeScriptVisuals(SPEC(src));
+  assert.ok(run, "script must run");
+  // Killzone drawings are preserved (primitives — never part of autoscale)…
+  const boxVisual = run.visuals.find((v) => v.type === "boxes");
+  assert.ok(boxVisual && boxVisual.boxes.length > 0, "killzone box survives");
+  for (const bx of boxVisual.boxes) {
+    assert.ok(
+      Math.abs(bx.topPrice) <= PINE_VALUE_SANITY_LIMIT && Math.abs(bx.bottomPrice) <= PINE_VALUE_SANITY_LIMIT,
+      "box coordinates stay price-like (envelope, not sentinels)",
+    );
+  }
+  assert.ok(
+    run.visuals.some((v) => v.type === "labels" && v.overlayLabels.length > 0),
+    "force_overlay label survives",
+  );
+  // …and the auto-fit union (candles + line-family visuals) keeps candles visible.
+  const union = fitUnion(bars, run.visuals);
+  const hi = Math.max(...bars.map((b) => b.high));
+  const lo = Math.min(...bars.map((b) => b.low));
+  assert.ok(
+    union.max - union.min <= (hi - lo) * 50,
+    `fit union height ${union.max - union.min} must stay within 50× the candle envelope ${hi - lo}`,
+  );
   eng.dispose();
 });

@@ -62,6 +62,32 @@ import type {
 /** Extraction cap for the imported-script path (mirrors MAX_SCRIPT_SERIES). */
 export const PINER_MAX_VISUALS = 8;
 
+/**
+ * Sentinel-magnitude guard for script-produced PLOT values.
+ *
+ * ROOT CAUSE (AURA price-scale explosion, the TV ±11-billion class): the right
+ * price scale's auto-fit unions every visible series' data range. Audited
+ * contributors — candles, EMA/SMA, the marker/hline carrier (candle closes) —
+ * are legit; Pine DRAWINGS (lines/boxes/labels, killzones/macros) render via
+ * canvas primitives with no `autoscaleInfo`, hlines → LWC custom price lines
+ * and plotshape/plotchar markers are excluded by Lightweight Charts, and
+ * `display=display.none` plots never reach a series. The ONE script-controlled
+ * autoscale input is therefore the plot-series values below — finite-checked
+ * but, before this guard, magnitude-unchecked.
+ *
+ * AURA runs Piner, whose warmup/na semantics differ from TradingView's runtime,
+ * so a script carrying the ±1e10 sentinel class (as this script family
+ * demonstrably did) can still emit huge FINITE values where TV emits `na` —
+ * and a single such value dominates the union, compressing candles to a
+ * hairline. |v| ≤ 1e9 sits four-plus orders above any legitimate instrument
+ * price (Gold ~4.4e3, DAX ~2.4e4, BTC ~1.2e5) and far below the ±1e9+ sentinel
+ * class, so autoscaling stays fully dynamic below the ceiling while
+ * sentinel-class values are dropped exactly like the warmup `na` rows beside
+ * which this guard lives. NOT a fixed price range — the envelope of candles +
+ * legitimate indicators is untouched.
+ */
+export const PINE_VALUE_SANITY_LIMIT = 1e9;
+
 /** The opaque compiled-script handle Piner returns from `compile()`. */
 export type PinerCompiled = ReturnType<typeof compile>;
 
@@ -176,7 +202,9 @@ export async function pinerRunVisuals(args: {
     const points: { ts: number; value: number; color?: string }[] = [];
     for (let i = 0; i < p.data.length && i < klines.length; i++) {
       const v = p.data[i];
-      if (typeof v !== "number" || !Number.isFinite(v)) continue; // warmup na rows
+      // Warmup na rows AND sentinel-magnitude values (±1e10-class) are both
+      // dropped here — see PINE_VALUE_SANITY_LIMIT for the autoscale rationale.
+      if (typeof v !== "number" || !Number.isFinite(v) || Math.abs(v) > PINE_VALUE_SANITY_LIMIT) continue;
       const c = colors[i];
       if (dynamic && typeof c === "string" && c.length > 0) points.push({ ts: tsAt(i), value: v, color: c });
       else points.push({ ts: tsAt(i), value: v });
