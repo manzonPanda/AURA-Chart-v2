@@ -46,7 +46,6 @@ import { EmaBridge } from "./EmaBridge";
 import { InvertScaleBridge } from "./InvertScaleBridge";
 import { InvertDebugProbe } from "./invertDebug"; // ⚠ TEMP debug probe (?debugInvert)
 import { MaStructurePanel } from "./MaStructurePanel";
-import { OHLCReadout } from "./OHLCReadout";
 import { PineBridge } from "./PineBridge";
 import { SmaBridge } from "./SmaBridge";
 import {
@@ -99,13 +98,21 @@ interface Props {
   onLoadMoreHistory?: () => void;
   /** Incremental-history state for the edge control (loading/exhausted/error). */
   historyStatus?: HistoryStatus;
-  /** Compact live status values rendered alongside the OHLC readout. */
-  marketStatus?: {
-    environment: string;
-    bars: number;
-    ticks: number;
-    lastTickAge: number | null;
-  };
+  /**
+   * Quote-candle reporter — pushes the composed OHLC-readout candle
+   * (crosshair hover ?? replay cursor ?? latest bar) UP to App's unified
+   * header, which renders the strip. The chart remains the single source of
+   * truth; this is a presentation-only relocation of the old bottom footer.
+   */
+  onQuoteCandle?: (candle: Candle | null) => void;
+  /** Replay entry armed ("click a candle to start") — owned by App's header button. */
+  replayPicking?: boolean;
+  /** Arms/disarms the replay candle-pick (App header button toggle). */
+  onReplayPickingChange?: (picking: boolean) => void;
+  /** Reports replay UI state so App's header entry button can hide/disable:
+   *  `active` = a session is running (the in-plot dock owns the controls),
+   *  `canEnter` = there is data to replay. */
+  onReplayStateChange?: (state: { active: boolean; canEnter: boolean }) => void;
 }
 
 function asBar(c: { ts: number; open: number; high: number; low: number; close: number; volume?: number }): Bar {
@@ -127,6 +134,9 @@ function asBar(c: { ts: number; open: number; high: number; low: number; close: 
  * the full (future) history onto a replaying chart.
  */
 const NO_BARS: readonly Bar[] = [];
+
+/** Stable no-op for optional replay-pick wiring (keeps deps arrays honest). */
+const NOOP = (): void => {};
 
 /**
  * Smooth-tick animation for the forming (current) candle.
@@ -615,7 +625,10 @@ export function TradingChart({
   replaySymbol,
   onLoadMoreHistory,
   historyStatus,
-  marketStatus = { environment: "…", bars: 0, ticks: 0, lastTickAge: null },
+  onQuoteCandle,
+  replayPicking = false,
+  onReplayPickingChange,
+  onReplayStateChange,
 }: Props) {
   const [crosshairCandle, setCrosshairCandle] = useState<Candle | null>(null);
   // When history is empty (e.g. IG allowance exhausted), ChartView still needs
@@ -748,7 +761,11 @@ export function TradingChart({
     manifest: Parameters<ReplayController["load"]>[0];
     interval: string;
   } | null>(null);
-  const [picking, setPicking] = useState(false);
+  // Replay ENTRY state lives in App's unified header button (the old
+  // `.replay-bar` row is gone); this component only CONSUMES it for the
+  // candle-pick effect and disarms it when a session starts.
+  const picking = replayPicking;
+  const setPicking = onReplayPickingChange ?? NOOP;
     /** Replay-visible bars (cursor slice) feeding the indicator bridges + OHLC. */
   const visibleRef = useRef<readonly Bar[]>(NO_BARS);
   // The bump (not the value) is what matters: it re-renders the ref-reads
@@ -828,7 +845,7 @@ export function TradingChart({
       setPicking(false);
       setSession({ rc, manifest, interval });
     },
-    [chartApi, session, data, resolution, replaySymbol],
+    [chartApi, session, data, resolution, replaySymbol, setPicking],
   );
 
   const exitReplay = useCallback(() => setSession(null), []);
@@ -956,24 +973,32 @@ export function TradingChart({
   })();
   const replayActive = session !== null;
 
+  // ── Unified-header reporting (the old bottom `.chart-footer` is gone) ──────
+  // Quote candle (crosshair ?? replay cursor ?? latest) is pushed UP to App,
+  // which renders the OHLC strip in the top header. App's setter is
+  // value-guarded (ts/OHLC), so the fresh `last` object identities minted on
+  // renders that don't change any displayed value can never loop.
+  const quoteCandle = crosshairCandle ?? replayCursorCandle ?? last;
+  useEffect(() => {
+    onQuoteCandle?.(quoteCandle);
+  }, [onQuoteCandle, quoteCandle]);
+
+  // Replay UI state for the header entry button: hidden while a session is
+  // active (the in-plot dock takes over), disabled with nothing to replay.
+  const replayUiState = useMemo(
+    () => ({ active: session !== null, canEnter: data.length > 0 }),
+    [session, data.length],
+  );
+  useEffect(() => {
+    onReplayStateChange?.(replayUiState);
+  }, [onReplayStateChange, replayUiState]);
+
   return (
     <div className="trading-chart" data-stream={streamStatus}>
-      {/* Replay chrome — the top bar keeps ONLY the entry button (stable 42px
-          row: entering replay never shifts the layout). While a session is
+      {/* Replay entry lives in App's unified top header. While a session is
           active, CandleKit's native ReplayControls + Exit render as a floating
           dock bottom-center INSIDE the plot area (.replay-dock), so the header
           chrome and the right price scale are never covered. */}
-      <div className="replay-bar">
-        {!session && data.length > 0 && (
-          <button
-            type="button"
-            className="ck-replay-btn"
-            onClick={() => setPicking((v) => !v)}
-          >
-            {picking ? "Click a candle to start Replay…" : "Replay"}
-          </button>
-        )}
-      </div>
       <div className="chart-canvas-wrap">
         <ChartView
           data={session ? NO_BARS : data}
@@ -1096,25 +1121,6 @@ export function TradingChart({
             </button>
           </div>
         )}
-      </div>
-      <div className="chart-footer">
-        <div className="chart-footer-context">
-          <span className="chart-footer-kicker">MARKET DATA</span>
-          <span className="chart-footer-caption">{resolution === "MINUTE_1" ? "1 minute" : "3 minute"} candles</span>
-        </div>
-        <OHLCReadout candle={crosshairCandle ?? replayCursorCandle ?? last} invertScale={invertScale} />
-        <div className="statusbar-inline" aria-label="Market feed status">
-          <div className="statusbar-brand">
-            <span className="statusbar-dot" />
-            <span>Market feed</span>
-          </div>
-          <span className="status-metric"><span className="status-label">ENV</span><strong>{marketStatus.environment}</strong></span>
-          <span className="status-metric"><span className="status-label">BARS</span><strong>{marketStatus.bars}</strong></span>
-          <span className="status-metric"><span className="status-label">TICKS</span><strong>{marketStatus.ticks}</strong></span>
-          {marketStatus.lastTickAge !== null && (
-            <span className="status-metric"><span className="status-label">LAST TICK</span><strong>{marketStatus.lastTickAge}s</strong></span>
-          )}
-        </div>
       </div>
     </div>
   );

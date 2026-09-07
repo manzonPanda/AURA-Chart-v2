@@ -3,7 +3,8 @@ import { formatManilaDateTimeFull } from "../../services/timefmt";
 import { effectiveBullish } from "./candleColors";
 
 interface Props {
-  candle?: Candle;
+  /** The quote candle — null before any candle exists (header renders "—"). */
+  candle?: Candle | null;
   /** AURA inverted semantics — the rendered direction swaps when true. */
   invertScale?: boolean;
 }

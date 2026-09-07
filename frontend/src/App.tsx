@@ -45,6 +45,7 @@ import { useRealtimeStream, resolutionToBucketSec } from "./services/realtime";
 import { iso } from "./services/diagnostics";
 import type { Candle } from "./types/candle";
 import { EmaAlertControl } from "./components/EmaAlert/EmaAlertControl";
+import { OHLCReadout } from "./components/TradingChart/OHLCReadout";
 import {
   DEFAULT_EMA_ALERT_SETTINGS,
   fetchEmaAlert,
@@ -161,6 +162,50 @@ export default function App() {
   const [pushSubscribed, setPushSubscribed] = useState(false);
   const [pushWorking, setPushWorking] = useState(false);
   const [pushMessage, setPushMessage] = useState<string | null>(null);
+
+  // ── Unified header — market strip + replay entry (old bottom footer gone) ──
+  // `quoteCandle` (timestamp · O H L C · change · Range) is OWNED by
+  // TradingChart (crosshair hover ?? replay cursor ?? latest bar) and pushed up
+  // via onQuoteCandle; App only mirrors it for presentation. The setter is
+  // value-guarded on the rendered fields (ts/OHLC), so the fresh object
+  // identities the chart mints on renders that change no displayed value can
+  // never loop renders.
+  const [quoteCandle, setQuoteCandle] = useState<Candle | null>(null);
+  const handleQuoteCandle = useCallback((c: Candle | null) => {
+    setQuoteCandle((prev) => {
+      if (prev === c) return prev;
+      if (
+        prev && c &&
+        prev.ts === c.ts &&
+        prev.open === c.open &&
+        prev.high === c.high &&
+        prev.low === c.low &&
+        prev.close === c.close
+      ) {
+        return prev;
+      }
+      return c;
+    });
+  }, []);
+  // Replay ENTRY: the button lives in the unified header; the pick/entry
+  // logic stays inside TradingChart (single source of truth — App mirrors the
+  // armed flag for the label and the session/availability for visibility).
+  const [replayPicking, setReplayPicking] = useState(false);
+  const [replayUi, setReplayUi] = useState<{ active: boolean; canEnter: boolean }>({
+    active: false,
+    canEnter: false,
+  });
+  const handleReplayPickingChange = useCallback((picking: boolean) => {
+    setReplayPicking(picking);
+  }, []);
+  const handleReplayStateChange = useCallback(
+    (next: { active: boolean; canEnter: boolean }) => {
+      setReplayUi((prev) =>
+        prev.active === next.active && prev.canEnter === next.canEnter ? prev : next,
+      );
+    },
+    [],
+  );
 
   // Realtime stream for the SELECTED timeframe (backend /ws relay). Switching
   // the selector drops the socket and re-subscribes with the new `res=` — the
@@ -509,6 +554,14 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [candles]);
 
+  // Feed statistics for the unified header — the SAME sources the old bottom
+  // statusbar consumed via the removed `marketStatus` prop (App owns them all).
+  const barsCount = candles.length > 0 ? candles.length : realtime.candle ? 1 : 0;
+  const lastTickAge =
+    realtime.lastTickAt > 0
+      ? Math.max(0, Math.round((nowTick - realtime.lastTickAt) / 1000))
+      : null;
+
   return (
     <div className="app">
       <header className="topbar">
@@ -540,7 +593,76 @@ export default function App() {
             <span className="instrument-epic">{epic || historyEpic || "…"}</span>
           </div>
         </div>
+        {/* Market group — timeframe · LIVE status · quote readout (timestamp,
+            O H L C, change, Range) relocated from the removed bottom
+            `.chart-footer` into the ONE unified header. */}
+        <div className="topbar-market" aria-label="Market data">
+          {/* Timeframe selector — 1m (canonical persisted) | 3m (derived) */}
+          <div className="timeframes" role="tablist" aria-label="Chart timeframe">
+            {TIMEFRAMES.map((tf) => (
+              <button
+                key={tf.key}
+                role="tab"
+                aria-selected={timeframe === tf.key}
+                className={`tf-btn ${timeframe === tf.key ? "active" : ""}`}
+                title={`${tf.label} timeframe (${tf.bucketSec}s buckets)`}
+                onClick={() => setTimeframe(tf.key)}
+              >
+                {tf.label}
+              </button>
+            ))}
+          </div>
+          {(() => {
+            const sl = streamLabel(realtime.status, realtime.lastTickAt, nowTick);
+            const cls = sl.live ? "live" : sl.noTicks ? "noticks" : realtime.status.toLowerCase();
+            const ageTxt =
+              sl.ageSec !== null ? ` · last tick ${sl.ageSec}s ago` : " · no ticks received yet";
+            return (
+              <span
+                className={`stream-chip ${cls}`}
+                title={`IG Lightstreamer: ${realtime.status}${ageTxt} · ${realtime.ticks} ticks this session · ${epic || historyEpic || "—"}`}
+              >
+                <span className="dot" />
+                {sl.label}
+              </span>
+            );
+          })()}
+          {/* Quote strip — values come from the CHART (crosshair hover ??
+              replay cursor ?? latest bar) via onQuoteCandle; no duplicated state. */}
+          <OHLCReadout candle={quoteCandle} invertScale={chartSettings.invertScale} />
+        </div>
         <div className="topbar-actions">
+          {/* Feed statistics — relocated from the removed bottom statusbar. */}
+          <div className="market-stats" aria-label="Market feed status">
+            <div className="market-stats-brand" title="Market feed">
+              <span className="market-stats-dot" />
+              <span className="market-stats-name">Market feed</span>
+            </div>
+            <span className="status-metric"><span className="status-label">ENV</span><strong>{health?.environment ?? "…"}</strong></span>
+            <span className="status-metric"><span className="status-label">BARS</span><strong>{barsCount}</strong></span>
+            <span className="status-metric"><span className="status-label">TICKS</span><strong>{realtime.ticks}</strong></span>
+            {lastTickAge !== null && (
+              <span className="status-metric status-metric--lasttick"><span className="status-label">LAST TICK</span><strong>{lastTickAge}s</strong></span>
+            )}
+          </div>
+          {/* Replay entry — a first-class chart control in the unified header.
+              Hidden while a session is active (the in-plot dock takes over);
+              disabled while there is nothing to replay. */}
+          {!replayUi.active && (
+            <button
+              type="button"
+              className={`ck-replay-btn topbar-replay-btn${replayPicking ? " picking" : ""}`}
+              onClick={() => handleReplayPickingChange(!replayPicking)}
+              disabled={!replayUi.canEnter}
+              title={
+                replayPicking
+                  ? "Click a candle on the chart to start Replay from it"
+                  : "Replay history bar-by-bar — click a candle to choose the start"
+              }
+            >
+              {replayPicking ? "Click a candle to start Replay…" : "Replay"}
+            </button>
+          )}
           <div className="toolbar-group toolbar-group--analysis" aria-label="Chart analysis">
             {/* EMA/SMA indicator slots + Imported Pine Script section —
                 localStorage-persisted config */}
@@ -555,38 +677,8 @@ export default function App() {
               onCompile={handlePineImport}
               onImportConfirm={handlePineImportConfirm}
             />
-            {/* Timeframe selector — 1m (canonical persisted) | 3m (derived) */}
-            <div className="timeframes" role="tablist" aria-label="Chart timeframe">
-            {TIMEFRAMES.map((tf) => (
-              <button
-                key={tf.key}
-                role="tab"
-                aria-selected={timeframe === tf.key}
-                className={`tf-btn ${timeframe === tf.key ? "active" : ""}`}
-                title={`${tf.label} timeframe (${tf.bucketSec}s buckets)`}
-                onClick={() => setTimeframe(tf.key)}
-              >
-                {tf.label}
-              </button>
-            ))}
-            </div>
           </div>
           <div className="toolbar-group toolbar-group--status" aria-label="Connection status">
-            {(() => {
-              const sl = streamLabel(realtime.status, realtime.lastTickAt, nowTick);
-            const cls = sl.live ? "live" : sl.noTicks ? "noticks" : realtime.status.toLowerCase();
-            const ageTxt =
-              sl.ageSec !== null ? ` · last tick ${sl.ageSec}s ago` : " · no ticks received yet";
-            return (
-              <span
-                className={`stream-chip ${cls}`}
-                title={`IG Lightstreamer: ${realtime.status}${ageTxt} · ${realtime.ticks} ticks this session · ${epic || historyEpic || "—"}`}
-              >
-                <span className="dot" />
-                {sl.label}
-              </span>
-            );
-            })()}
             {/* EMA Reversal Alerts — server-side detection; this control only
                 configures (REST) + displays state streamed over /ws. */}
             <EmaAlertControl
@@ -674,14 +766,10 @@ export default function App() {
           replaySymbol={selectedEpic || undefined}
           onLoadMoreHistory={loadMoreHistory}
           historyStatus={historyStatus}
-          marketStatus={{
-            environment: health?.environment ?? "…",
-            bars: candles.length > 0 ? candles.length : realtime.candle ? 1 : 0,
-            ticks: realtime.ticks,
-            lastTickAge: realtime.lastTickAt > 0
-              ? Math.max(0, Math.round((nowTick - realtime.lastTickAt) / 1000))
-              : null,
-          }}
+          onQuoteCandle={handleQuoteCandle}
+          replayPicking={replayPicking}
+          onReplayPickingChange={handleReplayPickingChange}
+          onReplayStateChange={handleReplayStateChange}
         />
       </main>
     </div>
