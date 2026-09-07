@@ -93,7 +93,7 @@ function stageStatus(
  *
  * The "editor" is deliberately a plain monospace <textarea>: no heavyweight
  * editor dependency for phase 1 (bundle impact). Compile runs the script
- * through PineTS via App's pipeline; errors render in a friendly box.
+ * through the Piner engine via App's pipeline; errors render in a friendly box.
  */
 export function PineImportModal({ onCompile, onImportConfirm, onClose }: Props) {
   const [name, setName] = useState("");
@@ -161,7 +161,7 @@ export function PineImportModal({ onCompile, onImportConfirm, onClose }: Props) 
       <div className="pine-modal" role="dialog" aria-modal="true" aria-label="Import Pine Script">
         <div className="pine-modal-head">
           <h3>Import Pine Script</h3>
-          <span className="pine-modal-sub">Pine Script powered by PineTS, with AURA-supported features.</span>
+          <span className="pine-modal-sub">Pine Script powered by Piner, with AURA-supported features.</span>
         </div>
 
         <label className="pine-name">

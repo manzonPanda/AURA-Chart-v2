@@ -2,9 +2,9 @@
  * Shared mintick (tick-size) resolution for Pine engines.
  *
  * Single source of truth for how AURA derives `syminfo.mintick`-style metadata —
- * consumed by BOTH the retained PineTS path (pineEngine.ts) and the Piner path
- * (pinePinerCore.ts), so the two engines can never disagree about the active
- * instrument's tick grid. Pure + framework-free (worker-safe, Node-testable).
+ * consumed by the Piner engine path (pinePinerCore.ts / pineEngineTypes.ts), so
+ * every surface agrees about the active instrument's tick grid.
+ * Pure + framework-free (worker-safe, Node-testable).
  */
 
 function clampDecimals(decimals: number): number {
@@ -19,8 +19,8 @@ export function mintickFromDecimals(decimals: number): number {
 }
 
 /**
- * Data-derived mintick fallback (mirrors PineTS's own FMPProvider heuristic and
- * TradingView grid semantics): the smallest observed price delta, snapped DOWN
+ * Data-derived mintick fallback (standard tick-grid semantics, mirroring
+ * TradingView behavior): the smallest observed price delta, snapped DOWN
  * onto the standard tick grid {1, 2, 2.5, 5} × 10^n. Returns `null` when the
  * candles carry no usable delta at all (degenerate flat data) — the caller owns
  * the terminal fallback.
@@ -54,7 +54,7 @@ export const MINTICK_DATA_FLOOR = 0.0001;
 /**
  * Resolve the mintick for a run from an instrument's quoting precision first,
  * then the candle data, then the documented degenerate floor. Never a global
- * 0.01 — matches the precedent set by buildPineSymbolInfo (PineTS).
+ * 0.01 — matches the precedent set by buildPineSymbolInfo (pineEngineTypes.ts).
  */
 export function resolveMintickForRun(
   symbol: { decimals?: number } | null | undefined,

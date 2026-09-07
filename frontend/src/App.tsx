@@ -96,7 +96,7 @@ export default function App() {
   const epic = selectedEpic;
 
   /**
-   * Active instrument → PineTS `syminfo` metadata. Derived from the backend
+   * Active instrument → syminfo metadata. Derived from the backend
    * registry (NEVER hardcoded): `decimals` drives `syminfo.mintick` (DAX 1 →
    * 0.1, Spot Gold 2 → 0.01) and the instrument calendar supplies the
    * session timezone. Memoized on identity so per-frame renders hand the
@@ -127,7 +127,7 @@ export default function App() {
   const [smaSettings, setSmaSettings] = useState<SmaSettings>(loadSmaSettings);
   // Imported Pine indicators — script source + settings ONLY (localStorage,
   // versioned `aura.pine.indicators`). Values are always recomputed by the
-  // PineTS engine against the selected timeframe's candles.
+  // Piner engine against the selected timeframe's candles.
   const [importedPine, setImportedPine] = useState<ImportedPineIndicator[]>(loadImportedPineIndicators);
   // Chart display settings (e.g. Invert Scale) — localStorage-persisted in
   // App, frontend-only presentation state that never touches candle data.

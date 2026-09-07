@@ -14,7 +14,7 @@
  * the main thread only serializes JSON-shaped messages (83k scripts included).
  */
 import { PinerPineEngine } from "../services/pinePinerEngine.ts";
-import type { PineBar, PineLiveCandle, PineScriptSpec, PineSymbolMeta } from "../services/pineEngine.ts";
+import type { PineBar, PineLiveCandle, PineScriptSpec, PineSymbolMeta } from "../services/pineEngineTypes.ts";
 
 type PineWorkerRequest =
   | { kind: "setCandles"; id: number; bars: readonly PineBar[]; live: PineLiveCandle | null; bucketSec: number; symbol: PineSymbolMeta | null }

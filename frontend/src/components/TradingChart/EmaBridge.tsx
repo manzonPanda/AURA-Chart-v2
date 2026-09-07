@@ -15,12 +15,8 @@ import {
   effectiveCloseSeries,
   type EmaPoint,
 } from "../../services/ema";
-import {
-  PineIndicatorEngine,
-  type PineBar,
-  type PineLiveCandle,
-  type PinePoint,
-} from "../../services/pineEngine";
+import { PinerWorkerEngine } from "../../services/pineWorkerClient";
+import type { PineBar, PineLiveCandle, PinePoint, PineScriptEngine } from "../../services/pineEngineTypes";
 import { EMA_SLOTS, type EmaSettings } from "../../config/emaSettings";
 import type { RealtimeCandleMsg } from "../../services/realtime";
 
@@ -43,10 +39,10 @@ const toLineData = (p: EmaPoint) => ({ time: (p.ts / 1000) as UTCTimestamp, valu
  * main price pane (priceScaleId "right" → same scale as the candles). No
  * custom rendering primitives, no CandleKit indicator registry — just LWC.
  *
- * Data flow (authoritative-truth only, doji-bug safe):
+  * Data flow (authoritative-truth only, doji-bug safe):
  *   IG tick → WS candle snapshot → `liveCandle` prop → effectiveCloseSeries()
- *   (WS truth REPLACES the forming bucket's close) → PineIndicatorEngine
- *   (PineTS `ta.ema`) → line. If PineTS has insufficient history, the ema.ts
+ *   (WS truth REPLACES the forming bucket's close) → PinerWorkerEngine
+ *   (Piner `ta.ema` via worker) → line. If Piner has insufficient history, the ema.ts
  *   oracle is used as a fallback. The rAF-animated close is NEVER an input, so
  *   background-tab throttling and the cosmetic glide cannot skew EMA values;
  *   on tab return the next WS frame (a full server snapshot) re-anchors both
@@ -63,18 +59,20 @@ export function EmaBridge({ bars, liveCandle, bucketSec, settings }: Props) {
   const seriesRef = useRef<Map<string, ISeriesApi<"Line">>>(new Map());
   /** Per-slot painted shape, to decide setData (shape change) vs update (tick). */
   const paintedRef = useRef<Map<string, { count: number; firstTs: number; lastTs: number }>>(new Map());
-  /**
-   * PineTS indicator engine — held for the chart controller's life so the
-   * compiled PineScript `Indicator`(s) and runtime instance are reused across
-   * frames (no re-transpile, no per-frame instance creation). Recreated only
+    /**
+   * Piner indicator engine — held for the chart controller's life so the
+   * compiled PineScript indicators and runtime instance are reused across
+   * frames. Runs in a Web Worker (off the main thread); falls back to
+   * in-thread PinerPineEngine under Node/older browsers. Recreated only
    * when `api` (the chart controller) changes; disposed on teardown.
    */
-  const engineRef = useRef<PineIndicatorEngine>(new PineIndicatorEngine());
+  const engineRef = useRef<PineScriptEngine>(new PinerWorkerEngine());
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
 
-  // Series lifecycle — created once per chart controller, removed on teardown.
+    // Series lifecycle — created once per chart controller, removed on teardown.
   useEffect(() => {
+    if (!api) return;
     const chart: IChartApi = api.controller.getChart();
     const map = new Map<string, ISeriesApi<"Line">>();
     for (const slot of EMA_SLOTS) {
@@ -108,8 +106,8 @@ export function EmaBridge({ bars, liveCandle, bucketSec, settings }: Props) {
       }
       seriesRef.current = new Map();
       paintedRef.current = new Map();
-      engineRef.current.dispose();
-      engineRef.current = new PineIndicatorEngine();
+            engineRef.current.dispose();
+      engineRef.current = new PinerWorkerEngine();
     };
   }, [api]);
 
@@ -131,10 +129,10 @@ export function EmaBridge({ bars, liveCandle, bucketSec, settings }: Props) {
     }
   }, [settings]);
 
-  // Data — recompute from the authoritative candle state on every candle
+    // Data — recompute from the authoritative candle state on every candle
   // frame / history load / settings change.
   useEffect(() => {
-    // Keep the PineTS engine in lock-step with the chart's authoritative state.
+    // Keep the Piner engine in lock-step with the chart's authoritative state.
     // `setCandles` is a no-op when the close stream is unchanged, so rAF/stale
     // frames that didn't move the authoritative candle short-circuit cheaply.
     const pineBars = (bars as readonly Bar[]) as readonly PineBar[];
@@ -165,8 +163,8 @@ export function EmaBridge({ bars, liveCandle, bucketSec, settings }: Props) {
           return;
         }
 
-        // Primary path: PineTS ta.ema(). Fallback oracle: ema.ts — used only
-        // when PineTS has insufficient history (returns null) or fails.
+                // Primary path: Piner ta.ema(). Fallback oracle: ema.ts — used only
+        // when Piner has insufficient history (returns null) or fails.
         let points: EmaPoint[] = [];
         const pinePoints: PinePoint[] | null = await engineRef.current.compute("ema", { period: cfg.period });
         if (pinePoints && pinePoints.length > 0) {

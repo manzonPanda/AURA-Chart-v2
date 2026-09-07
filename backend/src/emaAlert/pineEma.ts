@@ -1,22 +1,24 @@
 /**
- * Server-side PineTS EMA adapter — the SAME engine + the SAME Pine Script
+ * Server-side Piner EMA adapter — the SAME engine + the SAME Pine Script
  * source the frontend uses for its EMA 9/20 overlays.
  *
- *   frontend: services/pineEngine.ts  →  PineIndicatorEngine  →  pinets ta.ema
- *   backend:  emaAlert/pineEma.ts     →  PineEmaSeries         →  pinets ta.ema
+ *   frontend: services/pinePinerEngine.ts → PinerPineEngine → Piner ta.ema
+ *   backend:  emaAlert/pineEma.ts         → PineEmaSeries   → Piner ta.ema
  *
+ * Piner (`@heyphat/piner`) is the sole Pine engine for AURA.
  * This is deliberately NOT a second EMA calculation: `ta.ema` (Pine Script)
  * remains the single source of EMA truth for AURA. The frontend keeps its
- * `services/ema.ts` oracle purely as a regression fallback; the server has no
- * fallback — if PineTS is unavailable the alert engine stays inert (never
+ * `services/ema.ts` oracle purely as a regression fallback; the server has
+ * no fallback — if the engine fails the alert engine stays inert (never
  * guesses).
  *
- * Node-build note (verified against pinets 0.9.33): plot rows arrive aligned
- * 1:1 with the klines array and carry `{ title, value, options }` — WITHOUT a
- * `time` field (the browser build includes one). Warm-up rows are non-finite.
- * Timestamps are therefore zipped positionally from `openTime`.
+ * Piner 0.13.0 notes (verified by the frontend probes + pinePiner tests):
+ * the script is compiled ONCE per series life; `inputs` are passed per run
+ * keyed by the input TITLE ("Period"); plot rows arrive aligned 1:1 with
+ * the feed bars as a plain `number[]` (non-finite = warm-up). Timestamps
+ * are zipped positionally from `openTime`.
  */
-import { PineTS, Indicator } from "pinets";
+import { ArrayFeed, compile, Engine, type CompiledScript } from "@heyphat/piner";
 
 /**
  * The EMA Pine Script — MUST stay byte-identical to `EMA_PINE_SOURCE` in
@@ -43,12 +45,21 @@ export interface EmaCandle {
 /** One aligned EMA series value (null = warm-up/insufficient history). */
 export type EmaValue = number | null;
 
+/** Bucket seconds → Pine `timeframe.period` string ("1", "3"). */
+function pineTimeframeStr(bucketSec: number): string {
+  if (!Number.isFinite(bucketSec) || bucketSec <= 0) return "1";
+  if (bucketSec % 60 === 0) return String(bucketSec / 60);
+  return `${bucketSec}S`;
+}
+
 export class PineEmaSeries {
-  private pine: PineTS | null = null;
   private candles: EmaCandle[] = [];
-  private readonly compiled = new Map<number, Indicator>();
+  private compiled: CompiledScript | null = null;
   private readonly cache = new Map<number, EmaValue[]>();
   private signature = "";
+
+  /** @param bucketSec timeframe bucket in seconds (drives the run identity only). */
+  constructor(private readonly bucketSec = 60) {}
 
   /** Current candle count (engine status surface). */
   get length(): number {
@@ -62,8 +73,9 @@ export class PineEmaSeries {
 
   /**
    * Replace the candle series. Returns true when the series actually changed
-   * (the runtime + caches are only rebuilt then — mirrors the frontend
-   * engine's signature guard).
+   * (caches are only cleared then — mirrors the frontend engine's signature
+   * guard). Piner has no persistent runtime to rebuild: each compute() runs
+   * a fresh deterministic Engine over the current slice.
    */
   setCandles(candles: EmaCandle[]): boolean {
     const last = candles[candles.length - 1];
@@ -78,55 +90,66 @@ export class PineEmaSeries {
     this.candles = [...candles];
     this.signature = sig;
     this.cache.clear();
-    this.pine = new PineTS(
-      this.candles.map((c) => ({
-        openTime: c.openTime,
-        open: c.open,
-        high: c.high,
-        low: c.low,
-        close: c.close,
-        volume: c.volume,
-        closeTime: c.closeTime,
-      })),
-    );
     return true;
   }
 
   /**
    * Compute (or fetch from cache) the EMA series for `period`, positionally
-   * aligned with the candles. Returns null when the series is empty or the
-   * runtime produced a misaligned plot (defensive — never guessed values).
+   * aligned with the candles. Returns null when the series is empty, the
+   * compile/run fails, or the plot arrives misaligned (defensive — never
+   * guessed values).
    */
   async compute(period: number): Promise<EmaValue[] | null> {
-    if (this.candles.length === 0 || this.pine === null) return null;
+    if (this.candles.length === 0) return null;
     const cached = this.cache.get(period);
     if (cached) return cached;
 
-    let indicator = this.compiled.get(period);
-    if (!indicator) {
-      indicator = new Indicator(EMA_PINE_SOURCE);
+    // Compile once per series life — the script never changes, and Piner
+    // binds `inputs` at RUN time (no per-period recompile).
+    if (!this.compiled) {
       try {
-        (indicator.input as Record<string, unknown>).Period = period;
+        this.compiled = compile(EMA_PINE_SOURCE);
       } catch {
-        /* frozen input — the script default (9) would apply; guarded below */
+        return null; // engine failure → unavailable, never guessed
       }
-      indicator.prepare();
-      this.compiled.set(period, indicator);
     }
 
-    let ctx: { plots?: Record<string, { data?: unknown[] }> };
+    // Piner feed bars: `{ time (epoch ms), open, high, low, close, volume }`.
+    const bars = this.candles.map((c) => ({
+      time: c.openTime,
+      open: c.open,
+      high: c.high,
+      low: c.low,
+      close: c.close,
+      volume: c.volume,
+    }));
+    const engine = new Engine(this.compiled, new ArrayFeed(bars), {
+      backend: "js",
+      inputs: { Period: period },
+    });
     try {
-      ctx = (await this.pine.run(indicator, this.candles.length)) as typeof ctx;
+      await engine.run({
+        symbol: "AURA:EMA-ALERT",
+        timeframe: pineTimeframeStr(this.bucketSec),
+      });
     } catch {
       return null; // runtime failure → unavailable, never guessed
     }
-    const data = ctx?.plots?.["ema"]?.data;
+
+    // Locate the titled plot ("ema") and read its aligned value rows.
+    let data: unknown = null;
+    for (const [, p] of engine.outputs.plots) {
+      const plot = p as { title?: unknown; data?: unknown };
+      if (plot.title === "ema") {
+        data = plot.data;
+        break;
+      }
+    }
     if (!Array.isArray(data) || data.length !== this.candles.length) return null;
 
-    const values: EmaValue[] = data.map((row) => {
-      const v = (row as { value?: unknown } | null)?.value;
-      return typeof v === "number" && Number.isFinite(v) ? v : null;
-    });
+    const values: EmaValue[] = data.map((v) =>
+      typeof v === "number" && Number.isFinite(v) ? v : null,
+    );
     this.cache.set(period, values);
     return values;
   }

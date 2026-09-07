@@ -14,7 +14,6 @@
     "@getcandlekit/charts": "^0.1.0",
     "@heyphat/piner": "^0.13.0",
     "lightweight-charts": "^5.0.0",
-    "pinets": "^0.9.33",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

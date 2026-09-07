@@ -212,7 +212,7 @@ test("warm-up reconstructs BOTH units: 1m directly, 3m derived from the same 1m 
   assert.equal(snap.states["MINUTE_1"]?.closedCandles, 210);
   assert.equal(snap.states["MINUTE_3"]?.closedCandles, 70, "3m unit derives 70 complete 3m candles from 210 1m rows");
   assert.equal(snap.states["MINUTE_3"]?.ready, true);
-  // Flat series → both EMAs converge on 20000 (real PineTS math on 3m candles).
+  // Flat series → both EMAs converge on 20000 (real Piner math on 3m candles).
   assert.ok(Math.abs((snap.states["MINUTE_3"]?.lastEma9 ?? 0) - 20000) < 1e-6);
 });
 

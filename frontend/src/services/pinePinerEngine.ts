@@ -38,7 +38,7 @@ import type {
   PineScriptSpec,
   PineSeries,
   PineSymbolMeta,
-} from "./pineEngine.ts";
+} from "./pineEngineTypes.ts";
 import type { PineEngineStage, PineScriptEngine, PineVisualRun } from "./pineEngineTypes.ts";
 import { PINE_INDICATORS } from "./pineIndicators.ts";
 
@@ -197,7 +197,7 @@ export class PinerPineEngine implements PineScriptEngine {
         onError?.(msg);
         return null;
       }
-      // Parity with the PineTS `extractSeries`: plain (non-step) lines only.
+      // Line-only contract: plain (non-step) lines only.
       const outMap = new Map<string, PineSeries>();
       for (const v of out.visuals) {
         if (outMap.size >= 8) break;

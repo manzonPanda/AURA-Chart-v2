@@ -2,15 +2,15 @@
  * Imported Pine Script indicators — validation, persistence and safety limits.
  *
  * ═══════════════════════════════════════════════════════════════════════════
- * "Pine Script powered by PineTS, with AURA-supported features."
+ * "Pine Script powered by Piner, with AURA-supported features."
  *
  * AURA is NOT a TradingView/Pine Script clone. User scripts are executed by
- * the existing PineTS engine (`services/pineEngine.ts`) — the sandboxed
- * compilation/runtime boundary. This module NEVER eval()s user code: it only
- * inspects metadata reported by PineTS (`getInputsMeta`,
- * `getDeclarationType`), validates statically, persists configuration and
- * maps engine failures to human-readable messages (stack traces stay in the
- * console, never in the UI).
+ * the Piner engine (`@heyphat/piner`) via the worker-hosted
+ * `PinerWorkerEngine`. This module NEVER eval()s user code: it only inspects
+ * metadata reported by Piner's compile output (input declarations, plot
+ * metadata), validates statically, persists configuration and maps engine
+ * failures to human-readable messages (stack traces stay in the console,
+ * never in the UI).
  *
  * Scope (phase 1): INDICATORS ONLY — `indicator()` declarations, `plot()`
  * lines. Strategies, order execution, alerts and webhooks are future phases.
@@ -20,7 +20,7 @@
  * data never lives here — only the script source + settings. Supabase is
  * untouched.
  */
-import { Indicator } from "pinets";
+import { compile, CompileError } from "@heyphat/piner";
 
 import {
   type PineBar,
@@ -29,7 +29,7 @@ import {
   type PineVisual,
   type PineVisualType,
   type PineSymbolMeta,
-} from "./pineEngine.ts";
+} from "./pineEngineTypes.ts";
 import { createPineEngine } from "./pineEngineFactory.ts";
 
 export type { PineSymbolMeta };
@@ -75,7 +75,7 @@ export const PINE_STORAGE_VERSION = 2;
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-/** Snapshot of one `input.*()` declaration (from PineTS `getInputsMeta`). */
+/** Snapshot of one `input.*()` declaration (from Piner compile metadata). */
 export interface PineInputMetaSnapshot {
   /** Canonical override key (the Pine variable name). */
   varId: string;
@@ -112,7 +112,7 @@ export interface PinePlotMetaSnapshot {
 export interface PineImportDiagnostics {
   /** Static source scan: construct → occurrence count (plot/hline/plotshape/…). */
   staticCounts: Record<string, number>;
-  /** Outputs AURA actually renders (from the compile-time PineTS run). */
+  /** Outputs AURA actually renders (from the compile-time engine run). */
   rendered: { key: string; title: string; type: PineVisualType }[];
   /** Detected-but-unrenderable outputs (drawings, exotic styles, …). */
   unsupported: { kind: string; count: number }[];
@@ -192,9 +192,8 @@ const OVERLAY_TRUE_RE = /\boverlay[ \t]*=[ \t]*true\b/i;
 const TITLE_RE = /(?:indicator|study)[ \t]*\([ \t]*"([^"]{1,120})"/;
 
 /**
- * Regex fallback for the declared `overlay` flag. ONLY used when the runtime
- * cannot report it — scripts without a `//@version` comment lose their
- * declaration args inside PineTS (verified quirk, see README).
+ * Regex fallback for the declared `overlay` flag. ONLY used when the engine
+ * cannot report it (e.g. a run that never happened because there were no bars).
  */
 export function staticOverlayHint(source: string): boolean {
   return OVERLAY_TRUE_RE.test(source);
@@ -225,7 +224,7 @@ const SCAN_PATTERNS: ReadonlyArray<readonly [string, RegExp]> = [
  * "Detected" section of the import diagnostics. Comments and string literals
  * are stripped first so a title like "plot()" doesn't inflate the counts.
  * Purely informational; the authoritative supported/unsupported split comes
- * from the PineTS runtime run.
+ * from the engine runtime run.
  */
 export function staticScanCounts(source: string): Record<string, number> {
   const counts: Record<string, number> = {};
@@ -267,7 +266,7 @@ export function staticValidateSource(source: string): PineImportIssue | null {
     if (!Number.isInteger(v) || v < 5) {
       return {
         kind: "version",
-        message: `Unsupported Pine Script version ${version[1]} — AURA supports Pine v5/v6 (via PineTS).`,
+              message: `Unsupported Pine Script version ${version[1]} — AURA supports Pine v5/v6 (via Piner).`,
       };
     }
   }
@@ -296,7 +295,7 @@ export function staticValidateSource(source: string): PineImportIssue | null {
 }
 
 /**
- * Map a raw PineTS failure to a UI-safe message. Stack traces are NEVER
+ * Map a raw engine failure to a UI-safe message. Stack traces are NEVER
  * returned — they stay in the console (callers log them).
  */
 export function friendlyPineError(raw: string): string {
@@ -306,8 +305,8 @@ export function friendlyPineError(raw: string): string {
   if (transpile) {
     return `Pine syntax error: ${msg.slice(transpile[0].length)}`;
   }
-  // Runtime unknown function: "ta.someFunction is not a function" (PineTS) or
-  // "$.ta.someFunction is not a function" (Piner) — engine-neutral UI text.
+  // Runtime unknown function: "$.ta.someFunction is not a function" —
+  // engine-neutral UI text.
   const notAFunction = /^\$?\.?([a-zA-Z_][\w.]*\.[a-zA-Z_]\w*) is not a function$/.exec(msg);
   if (notAFunction) {
     return `Unknown function: ${notAFunction[1]} — it is not available in AURA.`;
@@ -361,9 +360,56 @@ export function sanitizeInputMeta(raw: unknown): PineInputMetaSnapshot | null {
 }
 
 /**
+ * Map Piner's `InputDecl` (from `compile().metadata.inputs`) to AURA's
+ * `PineInputMetaSnapshot`. Piner's `kind` values that AURA's settings UI
+ * cannot edit (source, price, timeframe, symbol, session, time, text_area,
+ * enum) fall through to the read-only `defval` path.
+ */
+function sanitizePinerInput(decl: {
+  key: string;
+  title?: string;
+  kind: string;
+  default: number | boolean | string | null;
+  minval?: number;
+  maxval?: number;
+  step?: number;
+  options?: (string | number)[];
+}): PineInputMetaSnapshot | null {
+  if (!decl || typeof decl.key !== "string" || decl.key.length === 0) return null;
+  // Map Piner's kind values to AURA's expected type names.
+  let type: string;
+  switch (decl.kind) {
+    case "int": type = "int"; break;
+    case "float": type = "float"; break;
+    case "bool": type = "bool"; break;
+    case "color": type = "color"; break;
+    case "string": type = "string"; break;
+    default: type = decl.kind; // source, price, timeframe, symbol, … — read-only
+  }
+  const defval =
+    typeof decl.default === "number" || typeof decl.default === "boolean" || typeof decl.default === "string"
+      ? decl.default
+      : null;
+  const meta: PineInputMetaSnapshot = {
+    varId: decl.key,
+    title: typeof decl.title === "string" && decl.title.trim().length > 0 ? decl.title : decl.key,
+    type,
+    defval,
+  };
+  if (typeof decl.minval === "number" && Number.isFinite(decl.minval)) meta.minval = decl.minval;
+  if (typeof decl.maxval === "number" && Number.isFinite(decl.maxval)) meta.maxval = decl.maxval;
+  if (typeof decl.step === "number" && Number.isFinite(decl.step) && decl.step > 0) meta.step = decl.step;
+  if (Array.isArray(decl.options)) {
+    const opts = decl.options.filter((o): o is string => typeof o === "string").slice(0, 32);
+    if (opts.length > 0) meta.options = opts;
+  }
+  return meta;
+}
+
+/**
  * Validate a stored/user-edited input value against its metadata. Corrupted
  * values fall back to the script default — a bad localStorage entry can never
- * break compilation (PineTS enforces minval/maxval on writes as a second wall).
+  * break compilation (the engine enforces minval/maxval on writes as a second wall).
  */
 export function sanitizeInputValue(meta: PineInputMetaSnapshot, raw: unknown): unknown {
   const fallback = meta.defval;
@@ -581,7 +627,7 @@ export interface CompileImportedPineArgs {
   liveCandle?: PineLiveCandle | null;
   /** Selected timeframe bucket size in seconds (60 = 1m, 180 = 3m). */
   bucketSec: number;
-  /** Active instrument metadata → PineTS `syminfo` (mintick etc.) for the preview run. */
+  /** Active instrument metadata → engine `syminfo` (mintick etc.) for the preview run. */
   symbol?: PineSymbolMeta | null;
   /** Real pipeline-stage progress reporter (drives the modal's compile checklist). */
   onStage?: (stage: PineCompileStage) => void;
@@ -590,7 +636,7 @@ export interface CompileImportedPineArgs {
 /**
  * Full import pipeline for the "Compile" button:
  *
- *   static checks → PineTS transpile (syntax errors with line:col) →
+ *   static checks → Piner compile (syntax errors with line:col) →
  *   run against the current AURA candles → extract plots + inputs →
  *   ImportedPineIndicator record.
  *
@@ -608,21 +654,34 @@ export async function compileImportedPine(args: CompileImportedPineArgs): Promis
   const hasVersion = VERSION_RE.test(source);
   let warning = hasVersion ? undefined : "No //@version declared — AURA assumes Pine v5/v6 semantics.";
 
-  // 2. Transpile-only check: syntax errors surface here with line:column.
+  // 2. Compile-only check: syntax + semantic errors surface here with line:column.
+  //    Piner's compile() also yields the input.* metadata (settings schema).
   let inputs: PineInputMetaSnapshot[] = [];
   onStage?.("transpiling");
+  let compiledOverlay: boolean | null = null;
+  let compiledTitle: string | null = null;
   try {
-    const probe = new Indicator(source);
-    probe.prepare();
-    inputs = (probe.getInputsMeta() as unknown[])
-      .map(sanitizeInputMeta)
+    const compiled = compile(source);
+    compiledTitle = compiled.metadata.title;
+    compiledOverlay = compiled.metadata.overlay;
+    inputs = (compiled.metadata.inputs ?? [])
+      .map(sanitizePinerInput)
       .filter((m): m is PineInputMetaSnapshot => m !== null)
       .slice(0, MAX_PINE_INPUTS);
   } catch (e) {
-    console.error("[pineImport] transpile failed:", e);
+    console.error("[pineImport] compile failed:", e);
+    let msg = e instanceof Error ? e.message : String(e);
+    if (e instanceof CompileError && Array.isArray(e.diagnostics) && e.diagnostics.length > 0) {
+      const d = e.diagnostics[0];
+      msg = `Pine syntax error: ${d.message} (line ${d.line}:${d.col})`;
+    } else if (/^(parse|lex) error/i.test(msg)) {
+      // Piner surfaces lexer/parser failures as ParseError/LexError with the
+      // location embedded in the message.
+      msg = `Pine syntax error: ${msg}`;
+    }
     return {
       ok: false,
-      issue: { kind: "syntax", message: friendlyPineError(e instanceof Error ? e.message : String(e)) },
+      issue: { kind: "syntax", message: friendlyPineError(msg) },
     };
   }
 
@@ -658,7 +717,7 @@ export async function compileImportedPine(args: CompileImportedPineArgs): Promis
         (stage) => onStage?.(stage as PineCompileStage),
       );
       if (run === null) {
-        console.error(`[pineImport] PineTS run failed: ${runError}`);
+        console.error(`[pineImport] engine run failed: ${runError}`);
         return {
           ok: false,
           issue: { kind: "run", message: friendlyPineError(runError ?? "Pine Script execution failed") },
@@ -690,8 +749,8 @@ export async function compileImportedPine(args: CompileImportedPineArgs): Promis
     notes.push(`Only the first ${MAX_PLOT_SERIES_PER_INDICATOR} outputs are rendered.`);
   }
   warning = notes.length > 0 ? notes.join(" ") : undefined;
-  const overlay = runtimeOverlay ?? staticOverlayHint(source);
-  const name = (args.name ?? "").trim().slice(0, 80) || guessPineTitle(source) || "Imported indicator";
+  const overlay = runtimeOverlay ?? compiledOverlay ?? staticOverlayHint(source);
+  const name = (args.name ?? "").trim().slice(0, 80) || compiledTitle || guessPineTitle(source) || "Imported indicator";
   // Final stage: the renderable snapshot (plotMeta) is being assembled — the
   // modal's checklist marks every stage done right before the review panel
   // (or instant import) replaces the progress display.

@@ -208,7 +208,7 @@ function PineInputField({
  * Compact, trading-chart-style indicator control for the topbar.
  *
  *   Built-in  — the two fixed EMA slots (unchanged, first-class AURA indicators)
- *   Imported  — user Pine Scripts executed by the PineTS engine, with a
+ *   Imported  — user Pine Scripts executed by the Piner engine, with a
  *               "+ Import Pine Script" entry point and per-script input editors
  *
  * Configuration state lives in App (localStorage-persisted via emaSettings.ts
@@ -519,7 +519,7 @@ export function IndicatorsMenu({ settings, onChange, smaSettings, onSmaChange, i
             title={
               imported.length >= MAX_IMPORTED_INDICATORS
                 ? `Limit reached — at most ${MAX_IMPORTED_INDICATORS} imported indicators`
-                : "Compile a Pine Script indicator through the PineTS engine"
+                : "Compile a Pine Script indicator through the Piner engine"
             }
           >
             + Import Pine Script

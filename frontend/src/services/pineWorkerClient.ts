@@ -12,7 +12,7 @@
  * serializes per-script so the newest chart-state request always lands last.
  */
 import { PinerPineEngine } from "./pinePinerEngine.ts";
-import type { PineBar, PineLiveCandle, PinePoint, PineScriptSpec, PineSeries, PineSymbolMeta } from "./pineEngine.ts";
+import type { PineBar, PineLiveCandle, PinePoint, PineScriptSpec, PineSeries, PineSymbolMeta } from "./pineEngineTypes.ts";
 import type { PineEngineStage, PineScriptEngine, PineVisualRun } from "./pineEngineTypes.ts";
 
 interface Pending {

@@ -1,5 +1,5 @@
 /**
- * Pine Script indicator definitions for the PineTS engine.
+ * Pine Script indicator definitions for the Piner engine.
  *
  * GENERIC DESIGN (NOT EMA-specific): every indicator is just a registry entry
  * here — Pine Script v6 source + the metadata the engine needs to (a) bind
@@ -20,10 +20,9 @@
  *   indicator("<AURA name>", overlay = true)
  *   length = input.int(<default>, "<Title>", minval = 1)   // configurable param
  *   plot(<expr>, "<plotKey>", ...)                           // engine reads plotKey
- * Every configurable parameter is an `input.*()` call so the engine can bind
- * it onto a compiled `Indicator` (see `PineIndicatorEngine`) exactly once per
- * parameter set — PineTS bakes inputs at transpile time, and each compiled
- * instance is then cached and reused for every subsequent run.
+ * Every configurable parameter is an `input.*()` call so the engine binds it
+ * per parameter set — each configured instance is compiled once, cached and
+ * reused for every subsequent run.
  */
 
 /** Maps a Pine `input.*()` title to a key on the caller's params object. */
@@ -53,7 +52,7 @@ export interface PineIndicatorSpec {
 /**
  * EMA — the only Phase 1 indicator. The period is an `input.int("Period")` so
  * each configured period (9, 20, any custom value) compiles exactly once into
- * its own cached PineTS `Indicator`; Pine Script (`ta.ema`) is the source of
+ * its own cached instance; Pine Script (`ta.ema`) is the source of
  * truth here — `services/ema.ts` is kept ONLY as the regression-test oracle.
  */
 export const EMA_PINE_SOURCE = `//@version=6

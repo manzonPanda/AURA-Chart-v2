@@ -3,7 +3,7 @@
  *
  * Composes the {@link EmaReversalDetector} with the configuration gates and
  * the per-direction cooldown. This module is the unit-test surface for the
- * alert rules: the real engine only adds I/O (PineTS EMA values in, Web Push
+ * alert rules: the real engine only adds I/O (Piner EMA values in, Web Push
  * + WS broadcast out).
  *
  * Gate order for a CONFIRMED reversal:
@@ -23,7 +23,7 @@ import { EmaReversalDetector } from "./reversalDetector.js";
 import { isClosedCandleInSession } from "./nySession.js";
 import type { EmaAlertSettings } from "./emaAlertConfig.js";
 
-/** One CLOSED candle's alert-relevant data (EMA values from the PineTS run). */
+/** One CLOSED candle's alert-relevant data (EMA values from the engine run). */
 export interface ClosedSignal {
   /** Bucket START (epoch seconds) of the closed candle. */
   bucketSec: number;

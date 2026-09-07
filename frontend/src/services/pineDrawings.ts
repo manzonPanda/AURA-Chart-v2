@@ -1,15 +1,15 @@
 /**
- * Pine drawing-object adapter — the reusable bridge between PineTS's internal
+ * Pine drawing-object adapter — the reusable bridge between the engine's internal
  * drawing collectors and AURA's chart renderer.
  *
  * ═══════════════════════════════════════════════════════════════════════════
  * Why this module exists
  *
- * PineTS 0.9.33 implements Pine drawings as a FIRST-CLASS object registry:
+ * The engine implements Pine drawings as a FIRST-CLASS object registry:
  * every `label.new()` creates a stable `LabelObject` (`id`, x, y, text, xloc,
  * yloc, color, style, textcolor, size, textalign, …) and the whole lifecycle —
  * `label.set_text/set_color/set_xy/set_x/set_y/set_style/set_size/delete/copy`
- * — mutates that object in place. Deleted objects are filtered by PineTS and
+ * — mutates that object in place. Deleted objects are filtered by the engine and
  * the LIVE state is synced into internal `ctx.plots` collectors:
  *
  *   `__labels__`          → one row `{time, value: LabelSnapshot[]}` holding
@@ -19,7 +19,7 @@
  *
  * This module is the adapter half of the pipeline:
  *
- *   Pine execution → PineTS drawing registry (collectors)
+ *   Pine execution → engine drawing registry (collectors)
  *                  → pineDrawings.ts (THIS — normalize into semantic anchors)
  *                  → PineVisual ("labels")
  *                  → pineLabelPrimitive.ts (LWC v5 canvas renderer)
@@ -42,7 +42,7 @@
 
 // ── Normalized label model ───────────────────────────────────────────────────
 
-/** Normalized Pine label style (PineTS `style_*` constants minus the prefix). */
+/** Normalized Pine label style (engine `style_*` constants minus the prefix). */
 export type PineLabelStyleName =
   | "label_up"
   | "label_down"
@@ -65,13 +65,13 @@ export type PineLabelXloc = "bar_index" | "bar_time";
 export type PineLabelYloc = "price" | "abovebar" | "belowbar";
 
 /**
- * One semantic label drawing. Produced once per PineTS run from the
+ * One semantic label drawing. Produced once per engine run from the
  * `__labels__` collector; the renderer positions it per frame from the
- * chart-space anchors. `id` is PineTS's stable per-object id, so repeated
+ * chart-space anchors. `id` is the engine's stable per-object id, so repeated
  * runs of the same script over unchanged data produce identical objects.
  */
 export interface PineLabelDrawing {
-  /** Stable PineTS object id — one `label.new()` = one id. */
+  /** Stable engine object id — one `label.new()` = one id. */
   id: number;
   /** X anchor in epoch ms (bar_index → candle openTime; future index → extrapolated; bar_time → raw ms). */
   timeMs: number;
@@ -87,9 +87,9 @@ export interface PineLabelDrawing {
   text: string;
   xloc: PineLabelXloc;
   yloc: PineLabelYloc;
-  /** Balloon fill — PineTS hex (`#RRGGBB` / `#RRGGBBAA`); `""` → renderer default. */
+  /** Balloon fill — Pine hex (`#RRGGBB` / `#RRGGBBAA`); `""` → renderer default. */
   color: string;
-  /** Text fill — PineTS hex; `""` → renderer default. */
+  /** Text fill — Pine hex; `""` → renderer default. */
   textcolor: string;
   style: PineLabelStyleName;
   size: PineLabelSizeName;
@@ -98,7 +98,7 @@ export interface PineLabelDrawing {
   forceOverlay: boolean;
 }
 
-/** Bar slice the adapter needs to resolve anchors (subset of the PineTS klines). */
+/** Bar slice the adapter needs to resolve anchors (subset of the engine klines). */
 export interface PineLabelBar {
   openTime: number;
   high: number;
@@ -121,7 +121,7 @@ export interface LabelExtractResult {
 
 // ── Normalization tables & renderer-facing constants ────────────────────────
 
-/** PineTS abbreviations for the Pine positioning enums (verified 0.9.33). */
+/** Engine abbreviations for the Pine positioning enums (verified 0.9.33). */
 const XLOC_ALIASES: Record<string, PineLabelXloc> = {
   bi: "bar_index",
   bar_index: "bar_index",
@@ -258,7 +258,7 @@ export function resolveLabelPrice(
 }
 
 // ── Shared marker mapping (plotshape/plotchar → LWC markers) ────────────────
-// Both engines (PineTS + Piner) funnel markers through these pure tables so
+// The engine funnels markers through these pure tables so
 // the mapping is single-sourced and worker-safe (no engine imports here).
 
 /** LWC-marker domain for Pine shapes/chars. */
@@ -326,7 +326,7 @@ function bumpUnsupported(unsupported: PineDrawingUnsupported[], kind: string): v
 }
 
 /**
- * Normalize one PineTS label snapshot. Returns `null` (after recording the
+ * Normalize one engine label snapshot. Returns `null` (after recording the
  * reason) when the label cannot be positioned faithfully — unknown xloc/yloc
  * would place the drawing at a WRONG location, and AURA never renders a
  * drawing at a location that changes its meaning.
@@ -387,7 +387,7 @@ function normalizeLabel(
   return {
     id: typeof raw.id === "number" && Number.isFinite(raw.id) ? raw.id : -1,
     // xloc.bar_time x is the Pine v6 `time` builtin — epoch MILLISECONDS in
-    // PineTS 0.9.33 (verified by probe: equals the candle openTime in ms).
+    // Verified: equals the candle openTime in ms.
     timeMs: xloc === "bar_index" ? barIndexToTimeMs(Math.trunc(x), klines) : x,
     logical,
     price: resolveLabelPrice(yloc, y, anchorIndex, klines),
@@ -404,10 +404,10 @@ function normalizeLabel(
 }
 
 /**
- * Extract the label drawings from one PineTS run.
+ * Extract the label drawings from one engine run.
  *
  * @param rows the `data` array of `__labels__` / `__labels_overlay__` — one
- *        or more rows whose `value` is the live label snapshot array (PineTS
+ *        or more rows whose `value` is the live label snapshot array (the engine
  *        currently syncs a single row carrying ALL live labels; per-bar rows
  *        are handled defensively).
  * @param klines the authoritative candle series of the SAME run (bar_index ↔
@@ -435,7 +435,7 @@ export function extractLabelDrawings(rows: unknown, klines: readonly PineLabelBa
 
 // ── Normalized line / box models ─────────────────────────────────────────────
 //
-// Same registry-driven model as labels: PineTS keeps every `line.new()` /
+// Same registry-driven model as labels: the engine keeps every `line.new()` /
 // `box.new()` as a stable object whose full lifecycle (`set_xy`-family,
 // `set_color`, `set_extend`, `delete`, `copy`) mutates it in place, filters
 // `_deleted` objects on sync, and exposes the LIVE snapshots through the
@@ -446,7 +446,7 @@ export function extractLabelDrawings(rows: unknown, klines: readonly PineLabelBa
 export type PineLineXloc = "bar_index" | "bar_time";
 /** Pine `extend.*` — how the drawing extends beyond its anchors. */
 export type PineLineExtend = "none" | "left" | "right" | "both";
-/** Normalized line/border style (PineTS `style_*` line constants). */
+/** Normalized line/border style (engine `style_*` line constants). */
 export type PineLineStyleName =
   | "solid"
   | "dotted"
@@ -456,7 +456,7 @@ export type PineLineStyleName =
   | "arrow_both";
 
 export interface PineLineDrawing {
-  /** Stable PineTS object id — one `line.new()` = one id. */
+  /** Stable engine object id — one `line.new()` = one id. */
   id: number;
   /** First endpoint, epoch ms (`bar_index` → openTime; future → extrapolated; `bar_time` → raw ms). */
   time1Ms: number;
@@ -469,7 +469,7 @@ export interface PineLineDrawing {
   logical2: number | null;
   xloc: PineLineXloc;
   extend: PineLineExtend;
-  /** PineTS hex (`""` → renderer default). */
+  /** Pine hex (`""` → renderer default). */
   color: string;
   style: PineLineStyleName;
   /** 1–5 (Pine's linewidth domain, clamped). */
@@ -478,7 +478,7 @@ export interface PineLineDrawing {
 }
 
 export interface PineBoxDrawing {
-  /** Stable PineTS object id — one `box.new()` = one id. */
+  /** Stable engine object id — one `box.new()` = one id. */
   id: number;
   leftMs: number;
   rightMs: number;
@@ -492,7 +492,7 @@ export interface PineBoxDrawing {
   borderColor: string;
   borderStyle: PineLineStyleName;
   borderWidth: number;
-  /** Box fill — PineTS hex (`""` → renderer default translucent fill). */
+  /** Box fill — Pine hex (`""` → renderer default translucent fill). */
   bgcolor: string;
   /** Optional centered box label (Pine v5+ `text=`). */
   text: string;
@@ -503,7 +503,7 @@ export interface PineBoxDrawing {
   forceOverlay: boolean;
 }
 
-/** PineTS abbreviations for the shared positioning enums (verified 0.9.33). */
+/** Engine abbreviations for the shared positioning enums (verified 0.9.33). */
 const LINE_XLOC_ALIASES: Record<string, PineLineXloc> = {
   bi: "bar_index",
   bar_index: "bar_index",
@@ -522,7 +522,7 @@ const EXTEND_ALIASES: Record<string, PineLineExtend> = {
   b: "both",
 };
 
-/** PineTS line styles + accepted aliases (`linestyle_*` is the plot-namespace twin). */
+/** Pine line styles + accepted aliases (`linestyle_*` is the plot-namespace twin). */
 const LINE_STYLE_ALIASES: Record<string, PineLineStyleName> = {
   style_solid: "solid",
   linestyle_solid: "solid",
@@ -583,7 +583,7 @@ interface LineSnapshotLike {
 }
 
 /**
- * Normalize one PineTS line snapshot. Returns `null` (after recording the
+ * Normalize one engine line snapshot. Returns `null` (after recording the
  * reason) when the line cannot be positioned faithfully — unknown xloc would
  * place the drawing at a WRONG location.
  */
@@ -636,7 +636,7 @@ function normalizeLine(
   };
 }
 
-/** Extract the line drawings from one PineTS run (`__lines__` collector rows). */
+/** Extract the line drawings from one engine run (`__lines__` collector rows). */
 export function extractLineDrawings(
   rows: unknown,
   klines: readonly PineLabelBar[],
@@ -683,7 +683,7 @@ interface BoxSnapshotLike {
 /** Map a Pine box `text_size` (size constant or point size) to the AURA scale. */
 function normalizeBoxTextSize(raw: unknown, unsupported: PineDrawingUnsupported[]): PineLabelSizeName {
   if (typeof raw === "string" && SIZE_NAMES.has(raw)) return raw as PineLabelSizeName;
-  // Pine's `text_size_auto` default — PineTS normalizes it to "auto". It means
+  // Pine's `text_size_auto` default — the engine normalizes it to "auto". It means
   // "fit automatically" → the closest AURA behavior is the default scale.
   if (typeof raw === "string" && (raw === "auto" || raw === "size_auto")) return PINE_DEFAULT_LABEL_SIZE;
   if (typeof raw === "number" && Number.isFinite(raw)) {
@@ -701,7 +701,7 @@ function normalizeBoxTextSize(raw: unknown, unsupported: PineDrawingUnsupported[
 }
 
 /**
- * Normalize one PineTS box snapshot. Returns `null` (after recording the
+ * Normalize one engine box snapshot. Returns `null` (after recording the
  * reason) when the box cannot be positioned faithfully.
  */
 function normalizeBox(
@@ -761,7 +761,7 @@ function normalizeBox(
   };
 }
 
-/** Extract the box drawings from one PineTS run (`__boxes__` collector rows). */
+/** Extract the box drawings from one engine run (`__boxes__` collector rows). */
 export function extractBoxDrawings(
   rows: unknown,
   klines: readonly PineLabelBar[],
@@ -942,10 +942,10 @@ export function labelLayout(
     hasPointer,
   };
 }
-// ── Color conversion (PineTS hex → canvas-compatible) ───────────────────────
+// ── Color conversion (Pine hex → canvas-compatible) ───────────────────────
 
 /**
- * Convert a PineTS hex color (`#RGB`, `#RRGGBB`, `#RRGGBBAA`) to a canvas
+ * Convert a Pine hex color (`#RGB`, `#RRGGBB`, `#RRGGBBAA`) to a canvas
  * `fillStyle` string. The 8-digit form (transparency) is expanded to
  * `rgba(...)` — the DOM canvas API does not accept `#RRGGBBAA`. Returns
  * `fallback` for empty/invalid input.

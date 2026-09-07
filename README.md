@@ -45,8 +45,8 @@ IG Markets REST API
     window (CandleKit's built-in ResizeObserver handling).
   - Timeframe selector: **1m · 3m** — 1m is IG's native minute resolution; 3m is
     aggregated server-side from 1-minute candles (epoch bucket floor(t/180)*180).
-  - **EMA 9 / EMA 20 overlays computed by the PineTS engine** (Pine Script
-    `ta.ema()`) — see "PineTS indicator engine" below. Overlay styling
+  - **EMA 9 / EMA 20 overlays computed by the Piner engine** (Pine Script
+    `ta.ema()`) — see "Pine engine" below. Overlay styling
     (period/color/width/enabled) is frontend-only and persisted in
     `localStorage` under `aura.ema.settings`; nothing indicator-related is
     written to the database.
@@ -276,7 +276,7 @@ Env knobs: `IG_STREAM_CHECK_TICKS` (default 20), `IG_STREAM_CHECK_WAIT_MS` (defa
 Not implemented yet, as requested:
 
 - **Further indicators** (SMA/RSI/MACD/ATR, crossovers, plotshapes) — the
-  PineTS engine is in place for them, but only the EMA use case is wired in
+  Piner engine is in place for them, but only the EMA use case is wired in
   this phase. The user-facing Pine Script editor / paste-an-indicator flow is
   a later phase too.
 - **Supabase/PostgreSQL historical storage**, backtesting, trading signals, multiple
@@ -284,10 +284,11 @@ Not implemented yet, as requested:
 - No Docker, TimescaleDB, Redis, Kafka, auth system, or extra state management — kept small
   and easy to read on purpose.
 
-## PineTS indicator engine
+## Pine engine (Piner)
 
-EMA 9/20 are computed by **PineTS** (`pinets`), LuxAlgo's Pine Script® v6
-runtime, through a thin generic adapter:
+EMA 9/20 are computed by **Piner** (`@heyphat/piner`) — AURA's sole Pine
+Script® v6 engine, clean-room and browser-first, running in a Web Worker
+through a thin generic adapter:
 
 ```
 IG Lightstreamer
@@ -298,9 +299,9 @@ Supabase
       ↓
 AURA selected timeframe       (1m native / 3m aggregation — unchanged rules)
       ↓
-PineIndicatorEngine           frontend/src/services/pineEngine.ts
+PinerWorkerEngine             frontend/src/services/pineWorkerClient.ts
       ↓
-PineTS                        npm pinets — Pine Script ta.ema()
+Web Worker → Piner core       compile() + Engine().run() — off the main thread
       ↓
 EmaBridge                     frontend/src/components/TradingChart/EmaBridge.tsx
       ↓
@@ -313,10 +314,11 @@ Key properties:
   `effectiveCloseSeries(...)` reconciliation the chart already uses — the WS
   server-truth candle REPLACES the forming bucket's close. The cosmetic
   rAF/glide price is never an input. On bucket rollover the closed candle
-  lands in the series, PineTS recomputes the whole history, and the new forming
-  candle continues from there. Background tabs stay safe: a stale snapshot is
-  re-anchored by the next full server snapshot, and an unchanged authoritative
-  close stream short-circuits (data-signature guard) instead of recomputing.
+  lands in the series, the engine recomputes the whole history, and the new
+  forming candle continues from there. Background tabs stay safe: a stale
+  snapshot is re-anchored by the next full server snapshot, and an unchanged
+  authoritative close stream short-circuits (data-signature guard) instead of
+  recomputing.
 - **3m is calculated from 3m candles.** The engine receives the SELECTED
   timeframe's bars — never the 1m EMA.
 - **Generic, not EMA-specific.** Indicators are registry entries in
@@ -325,19 +327,16 @@ Key properties:
   `plotshape`, `hline` support is a registry change, not an engine change.
   Only `ta.ema()` is wired in this phase.
 - **Equivalence oracle.** `services/ema.ts` is kept as the permanent
-  reference/fallback implementation. `frontend/tests/pineEquivalence.test.mjs`
-  proves PineTS `ta.ema()` == `ema.ts` for EMA 9/20, 1m/3m, insufficient
-  history, forming candle, rollover, timeframe switching, period switching and
-  background-tab reconciliation (max Δ ≈ 5e-11, tolerance 5e-9 — PineTS rounds
-  to 10 decimals internally).
-- **Performance.** Each distinct parameter set compiles exactly once (PineTS
-  bakes `input.*` at transpile time); runs reuse the compiled artifact and a
-  memoized result keyed by (indicator, params, data-signature); the PineTS
-  runtime is rebuilt only when the authoritative candle series actually
-  changes; nothing runs from rAF. Measured ≈ 10–12 ms per full recompute at
-  500 bars per EMA.
-- **No server/DB footprint.** No EMA columns, no EMA tables, no backend
-  changes; settings stay in `localStorage` (`aura.ema.settings`).
+  reference/fallback implementation. `frontend/tests/pinePiner.test.mjs`
+  proves the engine's `ta.ema()` == `ema.ts` behavior for EMA 9/20, 1m/3m,
+  insufficient history, forming candle, rollover, timeframe switching, period
+  switching and background-tab reconciliation (tolerance 5e-9).
+- **Performance.** The script compiles once per engine life; runs reuse the
+  compiled artifact and a memoized result keyed by (indicator, params,
+  data-signature); nothing runs from rAF. Compilation + execution happen in a
+  Web Worker, so even large scripts never block the UI thread.
+- **No server/DB footprint.** No EMA columns, no EMA tables; chart-side
+  settings stay in `localStorage` (`aura.ema.settings`).
 
 ## EMA Reversal Alerts (server-side)
 
@@ -352,7 +351,7 @@ Existing server-side candle aggregation
       ↓
 Closed 1-minute candle            (the forming candle NEVER reaches the detector)
       ↓
-Existing PineTS EMA 9/20          backend/src/emaAlert/pineEma.ts (same Pine script)
+Existing Piner EMA 9/20          backend/src/emaAlert/pineEma.ts (same Pine script)
       ↓
 EMA Reversal Detector             backend/src/emaAlert/reversalDetector.ts
       ↓
@@ -401,7 +400,7 @@ Rules:
 ## Import Pine Script (indicators)
 
 AURA can import **Pine Script v5/v6 chart indicators** and run them through the
-same PineTS engine that powers EMA 9/20. Indicators → **+ Import Pine Script**
+same Piner engine that powers EMA 9/20. Indicators → **+ Import Pine Script**
 past a script, AURA compiles it against the currently selected timeframe's
 candles, extracts its `plot()` series and renders them on the chart.
 
@@ -411,56 +410,53 @@ Indicators
   └── Imported        user Pine scripts (localStorage: aura.pine.indicators)
 ```
 
-- **One engine, two entry points.** `PineIndicatorEngine` (`services/pineEngine.ts`)
-  gains a second, fully generic `computeScript()` path: it compiles any
-  indicator `source`, extracts **all** plain `plot()` lines from a single
-  PineTS run, preserves per-bar dynamic colors (Pine exposes the color per
-  point as `options.color`) and script-declared `linewidth`/color. The built-in
-  EMA registry path is unchanged and still uses the same engine.
+- **One engine, two entry points.** `PinerWorkerEngine`
+  (`services/pineWorkerClient.ts`) exposes a fully generic
+  `computeScriptVisuals()` path beside the built-in EMA `compute()` shim: it
+  compiles any indicator `source` in the worker, extracts all renderable
+  outputs (plot lines, histograms, areas, hlines, plotshape/plotchar markers,
+  label/line/box drawings) from a single run, preserves per-bar dynamic colors
+  and script-declared `linewidth`/color. The built-in EMA registry path uses
+  the same engine.
 - **Authoritative data only.** Imported indicators run through the identical
   `effectiveCloseSeries()` truth pipeline as the EMAs — WS server-truth candle
   replaces the forming bucket, the rAF/glide price is never an input, and
   background-tab behavior is identical. Shares the engine's memoization: an
-  unchanged close stream never re-runs PineTS.
+  unchanged close stream never re-runs the script.
 - **Timeframes.** The engine always receives the SELECTED timeframe's candles
   (1m native / 3m aggregated), so a 3m indicator is recomputed from 3m candles
   — never resampled from a 1m indicator.
 - **Inputs.** `input.int/float/bool/string/color` are exposed as editable
-  settings (metadata from PineTS `getInputsMeta()`); `input.source` and other
+  settings (metadata from the Piner compile schema); `input.source` and other
   exotic types are shown read-only. Editing an input re-runs the script.
 - **Inputs are persisted, values are not.** Script source + input config live
   in a versioned localStorage envelope (`aura.pine.indicators`, schema version
   1); indicator VALUES are always recomputed client-side and never stored.
 - **Runtime safety.** User scripts are untrusted. AURA never `eval()`s them —
-  PineTS is the sandboxed transpile/runtime boundary. Static pre-checks reject
+  the Piner engine (in a Web Worker) is the sandboxed compile/runtime boundary.
+  Static pre-checks reject
   oversized scripts (>100k chars — real-world LuxAlgo-class scripts reach
   ~85k), non-indicator declarations, `strategy()*`,
   `request.*` and Pine v<5; failures surface as human-readable messages (raw
   stacks go to the console only). One bad indicator can never break the chart.
-- **Performance** (500 × 1m bars, this machine):
-
-  | Imported indicators | Warm recompute (close unchanged) | Fresh runtime (new candles) |
-  | --- | --- | --- |
-  | 1 | 0 ms (memoized) | ≈ 9 ms |
-  | 5 | 0 ms (memoized) | ≈ 29 ms |
-  | 10 | 0 ms (memoized) | ≈ 50 ms |
-
-  `tests/pinePerf.mjs` reproduces these numbers.
+- **Performance.** Compilation + execution run in a Web Worker (off the main
+  thread), so even LuxAlgo-class scripts never block the UI. The real ~83k
+  script is exercised by the `tests/pinePiner.test.mjs` migration gate.
 
 ### AURA Pine Script Support
 
-> **"Pine Script powered by PineTS, with AURA-supported features."**
+> **"Pine Script powered by Piner, with AURA-supported features."**
 
-AURA is **not** a TradingView/Pine Script clone. Compatibility with pinets 0.9.33
-(verified by probing the installed runtime):
+AURA is **not** a TradingView/Pine Script clone. Compatibility with Piner 0.13
+(verified by probing the installed engine):
 
 **Supported**
 - `indicator(title, overlay=true|false)` — v5/v6. `overlay=false` renders in a
   native Lightweight Charts pane (`addSeries(…, paneIndex)`).
 - `plot(value, title, color=…, linewidth=…)` — line plots; `color` hex and
   `linewidth` map to the LWC series. Dynamically computed per-bar colors are
-  rendered per point (PineTS also stores the last-evaluated ternary color on
-  the plot level — AURA ignores it when rows vary, so dynamic colors are exact).
+  rendered per point (AURA ignores the plot-level color when rows vary, so
+  dynamic colors are exact).
 - `plot(…, style=plot.style_line)` — explicit plain-line style (an early
   filter incorrectly dropped it; regression-tested).
 - `plot(…, style=plot.style_stepline)` — rendered with LWC `LineType.WithSteps`.
@@ -478,32 +474,28 @@ AURA is **not** a TradingView/Pine Script clone. Compatibility with pinets 0.9.3
   line).
 - `display=display.none` — hidden plots are skipped and counted in the
   diagnostics (the author's choice, not an incompatibility).
-- `ta.*` built-ins implemented by PineTS (ema, sma, rsi, macd, atr, crossover,
+- `ta.*` built-ins implemented by the engine (ema, sma, rsi, macd, atr, crossover,
   crossunder, …), core math/array/map, conditionals, functions, `var`/`let`.
 - `input.int/float/bool/string/color` (editable), `input.source` (read-only
-  display in v1), plus full `getInputsMeta` kind detection.
+  display in v1), plus full input-kind detection from the compile schema.
 - Import diagnostics: a static source scan (Detected) + a runtime report of
   what was rendered vs unsupported, shown in the import dialog and the
   indicator menu. A valid script that compiles always imports — even when
   nothing is renderable, the UI explains exactly why.
 
 **Partial / unsupported** (detected and reported — never faked)
-- `study()` (Pine v4) — PineTS only supports v5+, so v4 scripts are rejected
+- `study()` (Pine v4) — the engine only supports v5+, so v4 scripts are rejected
   with "Unsupported Pine Script version 4".
 - `plot(…, style=plot.style_circles | plot.style_cross)` — no faithful LWC
   representation; reported as unsupported in the diagnostics.
-- `fill()` — PineTS emits it as a `style:"fill"` plot; reported unsupported.
-- `bgcolor()` — not exposed by PineTS as a plot; only visible in the static
+- `fill()` — emitted as a `style:"fill"` plot; reported unsupported.
+- `bgcolor()` — not exposed as a plot; only visible in the static
   source scan.
-- Drawings (`line.new`, `label.new`, `box.new`, `polyline`, `table.new`) —
-  reported unsupported when used (PineTS collects them in `__`-prefixed
-  internal plots, which AURA inspects but never fakes).
-- plotshape/plotchar **dynamic per-bar colors**: PineTS only exposes the
-  plot-level color (the last-evaluated ternary result) for shapes/chars, so a
-  uniform color is used — lines/histograms/areas get exact per-bar colors.
-- Scripts without a `//@version` comment — PineTS silently drops their
-  `indicator()` args (overlay defaults to a separate pane); AURA warns on
-  import and falls back to a static `overlay=true` hint.
+- `polyline` / `table.new` drawings — reported unsupported when used
+  (collected in `__`-prefixed internal outputs, which AURA inspects but never
+  fakes).
+- Scripts without a `//@version` comment — AURA warns on import and falls
+  back to a static `overlay=true` hint when the engine cannot report the flag.
 
 **Rejected**
 - `strategy(...)` and `strategy.*` — order/position execution is a future phase.
@@ -513,11 +505,10 @@ AURA is **not** a TradingView/Pine Script clone. Compatibility with pinets 0.9.3
 
 ### License
 
-PineTS is dual-licensed: **AGPL-3.0-only** or a paid LuxAlgo commercial
-license. AURA uses it under AGPL-3.0 within its current personal/internal
-usage scope — see `THIRD-PARTY-NOTICES.md` for the exact obligations and when
-a commercial license (or AGPL source release) would become mandatory. Nothing
-in this integration modifies or works around PineTS or its licensing.
+Piner (`@heyphat/piner`) is licensed **AGPL-3.0-only** — see
+`THIRD-PARTY-NOTICES.md` for the exact obligations and when an AGPL source
+release would become mandatory. Nothing in this integration modifies or works
+around the engine or its licensing.
 
 ## Historical prices & IG pagination facts (verified 2026-08)
 

@@ -1,5 +1,5 @@
 /**
- * Piner engine migration tests — the staged PineTS → Piner gate
+ * Piner engine tests — Piner is the sole Pine engine (worker-hosted).
  * (docs/pine-migration.md §Testing requirements).
  *
  * The suite exercises the AURA-owned engine boundary, NOT @heyphat/piner

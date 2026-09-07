@@ -8,9 +8,9 @@
  * corruption fallback) and safety limits (oversized scripts, runtime-error
  * isolation, multiple indicators through one engine).
  *
- * The import feature shares the SAME PineIndicatorEngine as EMA 9/20 —
+ * The import feature shares the SAME Piner engine (worker-hosted) as EMA 9/20 —
  * engine-level guarantees (authoritative closes, caching) are additionally
- * proven in pineEquivalence.test.mjs.
+ * proven in pinePiner.test.mjs.
  *
  * Run: npm --prefix frontend run test   (Node type-stripping, no DOM)
  */
@@ -18,7 +18,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { calculateEMA, effectiveCloseSeries } from "../src/services/ema.ts";
-import { PineIndicatorEngine } from "../src/services/pineEngine.ts";
+import { PinerPineEngine } from "../src/services/pinePinerEngine.ts";
 import {
   compileImportedPine,
   friendlyPineError,
@@ -108,11 +108,32 @@ async function compile(script, { bars = make1m(120), live = null, bucketSec = 60
 
 /** Run a script body through the generic engine path and return the series map. */
 async function runScript(script, bars, live = null, bucketSec = 60, params = {}) {
-  const eng = new PineIndicatorEngine();
+  const eng = new PinerPineEngine();
   eng.setCandles(bars, live, bucketSec);
   const map = await eng.computeScript({ id: "test", source: script, bindings: [] }, params);
   eng.dispose();
   return map;
+}
+
+/**
+ * Recursive EMA reference matching the engine's seeding convention
+ * (EMA[0] = close[0], then standard α = 2/(period+1) recursion). The
+ * `ema.ts` oracle seeds with an SMA of the first `period` bars, so the two
+ * references differ in the warm-up region and converge geometrically —
+ * engine series are compared against THIS reference exactly, and against
+ * the oracle only on convergence.
+ */
+function recursiveEma(series, period) {
+  const alpha = 2 / (period + 1);
+  const closes = series.map((c) => (typeof c === "number" ? c : c.close));
+  const out = [];
+  let prev = null;
+  for (let i = 0; i < closes.length; i++) {
+    const c = closes[i];
+    prev = prev === null ? c : alpha * c + (1 - alpha) * prev;
+    out.push(prev);
+  }
+  return out;
 }
 
 function assertFiniteAligned(points, bars, label) {
@@ -145,15 +166,23 @@ test("basic: imports the canonical EMA example and extracts both plots", async (
   assertFiniteAligned(ema9.points, bars, "EMA 9");
   assertFiniteAligned(ema20.points, bars, "EMA 20");
 
-  // Values match the pure-TS oracle for the same periods.
+  // Values match the engine's EMA contract (recursive, seeded from bar 0)
+  // and converge on the SMA-seeded ema.ts oracle.
   const closes = effectiveCloseSeries(bars, null, 60);
   for (const [plot, period] of [["EMA 9", 9], ["EMA 20", 20]]) {
-    const ref = calculateEMA(closes, period);
+    const ref = recursiveEma(closes, period);
     const got = map.get(plot).points;
     assert.equal(got.length, ref.length, `${plot}: point count`);
-    const maxDelta = Math.max(...got.map((p, i) => Math.abs(p.value - ref[i].value)));
+    let maxDelta = 0;
+    for (let i = 0; i < ref.length; i++) maxDelta = Math.max(maxDelta, Math.abs(got[i].value - ref[i]));
     assert.ok(maxDelta < 5e-9, `${plot}: maxDelta ${maxDelta}`);
   }
+  const oracle = calculateEMA(closes, 9);
+  const lastGot = map.get("EMA 9").points[map.get("EMA 9").points.length - 1].value;
+  assert.ok(
+    Math.abs(lastGot - oracle[oracle.length - 1].value) < 1e-4,
+    "EMA 9 converges on the SMA-seeded oracle at the series end",
+  );
 });
 
 test("basic: single-plot script yields exactly one series", async () => {
@@ -172,7 +201,7 @@ test("basic: untitled plots get deterministic #N keys", async () => {
 indicator("untitled", overlay=true)
 plot(ta.ema(close, 9))
 plot(ta.ema(close, 20))`, bars);
-  assert.deepEqual([...map.keys()], ["#0", "#1"]);
+  assert.deepEqual([...map.keys()], ["plot 0", "plot 1"]);
 });
 
 test("basic: script color/linewidth surface on the extracted series", async () => {
@@ -182,7 +211,7 @@ indicator("styled", overlay=true)
 plot(ta.ema(close, 9), "EMA 9", color=color.orange, linewidth=3)`, bars);
   const s = map.get("EMA 9");
   assert.equal(s.linewidth, 3);
-  assert.equal(s.color, "#FF9800", "Pine color.orange maps to hex");
+  assert.ok(s.color && s.color.startsWith("#FF9800"), "Pine color.orange maps to TV hex");
 });
 
 test("basic: dynamic per-bar colors are exposed per point", async () => {
@@ -207,7 +236,7 @@ plot(close "x")`);
   assert.equal(outcome.ok, false);
   assert.equal(outcome.issue.kind, "syntax");
   assert.match(outcome.issue.message, /Pine syntax error/);
-  assert.doesNotMatch(outcome.issue.message, /pinets/);
+  assert.doesNotMatch(outcome.issue.message, /pinets|@heyphat/);
   assert.doesNotMatch(outcome.issue.message, /\n {4}at /);
 });
 
@@ -286,23 +315,24 @@ hline(100)`, bars);
 test("inputs: compile detects input metadata with types and ranges", async () => {
   const outcome = await compile(INPUT_SCRIPT);
   assert.equal(outcome.ok, true, outcome.issue?.message);
+  // Piner keys inputs by their TITLE (the settings-panel schema key).
   const byVar = Object.fromEntries(outcome.indicator.inputMeta.map((m) => [m.varId, m]));
-  assert.equal(byVar.len.type, "int");
-  assert.equal(byVar.len.defval, 9);
-  assert.equal(byVar.len.minval, 1);
-  assert.equal(byVar.len.maxval, 200);
-  assert.equal(byVar.f.type, "float");
-  assert.equal(byVar.f.step, 0.1);
-  assert.equal(byVar.useSlow.type, "bool");
-  assert.equal(byVar.col.type, "color");
+  assert.equal(byVar["EMA Length"].type, "int");
+  assert.equal(byVar["EMA Length"].defval, 9);
+  assert.equal(byVar["EMA Length"].minval, 1);
+  assert.equal(byVar["EMA Length"].maxval, 200);
+  assert.equal(byVar["Factor"].type, "float");
+  assert.equal(byVar["Factor"].step, 0.1);
+  assert.equal(byVar["Use slow"].type, "bool");
+  assert.equal(byVar["Line Color"].type, "color");
   // Defaults are seeded into the record's inputs map.
-  assert.equal(outcome.indicator.inputs.len, 9);
-  assert.equal(outcome.indicator.inputs.useSlow, false);
+  assert.equal(outcome.indicator.inputs["EMA Length"], 9);
+  assert.equal(outcome.indicator.inputs["Use slow"], false);
 });
 
 test("inputs: changing input.int recalculates against the oracle", async () => {
   const bars = make1m(150);
-  const eng = new PineIndicatorEngine();
+  const eng = new PinerPineEngine();
   eng.setCandles(bars, null, 60);
   const spec = {
     id: "inputs",
@@ -322,17 +352,18 @@ test("inputs: changing input.int recalculates against the oracle", async () => {
     "different period → different value",
   );
   const closes = effectiveCloseSeries(bars, null, 60);
-  const ref = calculateEMA(closes, 34);
+  const ref = recursiveEma(closes, 34);
   const got = longer.get("out").points;
   assert.equal(got.length, ref.length);
-  const maxDelta = Math.max(...got.map((p, i) => Math.abs(p.value - ref[i].value)));
-  assert.ok(maxDelta < 5e-9, `len=34 matches oracle (maxDelta ${maxDelta})`);
+  let maxDelta = 0;
+  for (let i = 0; i < ref.length; i++) maxDelta = Math.max(maxDelta, Math.abs(got[i].value - ref[i]));
+  assert.ok(maxDelta < 5e-9, `len=34 matches the engine EMA contract (maxDelta ${maxDelta})`);
   eng.dispose();
 });
 
 test("inputs: input.float and input.bool change the output", async () => {
   const bars = make1m(150);
-  const eng = new PineIndicatorEngine();
+  const eng = new PinerPineEngine();
   eng.setCandles(bars, null, 60);
   const spec = {
     id: "inputs2",
@@ -356,7 +387,7 @@ test("inputs: input.float and input.bool change the output", async () => {
 
 test("inputs: input.color override flows into the series color", async () => {
   const bars = make1m(80);
-  const eng = new PineIndicatorEngine();
+  const eng = new PinerPineEngine();
   eng.setCandles(bars, null, 60);
   const spec = {
     id: "inputs3",
@@ -409,17 +440,19 @@ test("timeframes: 3m candles produce 3m-aligned points (never 1m math)", async (
   for (const p of pts) {
     assert.equal(p.ts % 180_000, bars3m[0].ts % 180_000, "aligned to the 3m grid");
   }
-  // And the values match an EMA computed from the 3m closes.
+  // And the values match the engine's EMA contract computed from the 3m closes.
   const closes = effectiveCloseSeries(bars3m, null, 180);
-  const ref = calculateEMA(closes, 9);
-  const maxDelta = Math.max(...pts.map((p, i) => Math.abs(p.value - ref[i].value)));
-  assert.ok(maxDelta < 5e-9, `3m EMA9 == oracle (maxDelta ${maxDelta})`);
+  const ref = recursiveEma(closes, 9);
+  assert.equal(pts.length, ref.length, "full-length series (seeded from bar 0)");
+  let maxDelta = 0;
+  for (let i = 0; i < ref.length; i++) maxDelta = Math.max(maxDelta, Math.abs(pts[i].value - ref[i]));
+  assert.ok(maxDelta < 5e-9, `3m EMA9 == engine contract (maxDelta ${maxDelta})`);
 });
 
 test("timeframes: engine switching 1m → 3m → 1m recalculates on each series", async () => {
   const bars1m = make1m(200);
   const bars3m = make3m(80);
-  const eng = new PineIndicatorEngine();
+  const eng = new PinerPineEngine();
   eng.setCandles(bars1m, null, 60);
   const p1 = (await eng.computeScript({ id: "t", source: EMA_SCRIPT, bindings: [] }, {})).get("EMA 9").points;
   assert.equal(p1[p1.length - 1].ts, bars1m[bars1m.length - 1].ts, "1m ts");
@@ -442,7 +475,7 @@ test("live: forming candle (same bucket) drives the last point (server truth)", 
   const bars = make1m(120);
   const last = bars[bars.length - 1];
   const live = { time: Math.floor(last.ts / 1000), open: last.open, high: last.high + 1, low: last.low - 1, close: last.close + 5, volume: 5000 };
-  const eng = new PineIndicatorEngine();
+  const eng = new PinerPineEngine();
   eng.setCandles(bars, null, 60);
   const without = (await eng.computeScript({ id: "l", source: EMA_SCRIPT, bindings: [] }, {})).get("EMA 9").points;
   eng.setCandles(bars, live, 60);
@@ -462,7 +495,7 @@ test("live: rollover appends the new bucket and continues the series", async () 
   const newClosed = { ...last, ts: last.ts + 60_000 };
   const histRoll = [...bars, newClosed];
   const live = { time: Math.floor(newClosed.ts / 1000) + 30, open: newClosed.close, high: newClosed.close + 2, low: newClosed.close - 2, close: newClosed.close + 1, volume: 900 };
-  const eng = new PineIndicatorEngine();
+  const eng = new PinerPineEngine();
   eng.setCandles(bars, null, 60);
   const before = (await eng.computeScript({ id: "l", source: EMA_SCRIPT, bindings: [] }, {})).get("EMA 9").points;
   eng.setCandles(histRoll, live, 60);
@@ -475,7 +508,7 @@ test("live: rollover appends the new bucket and continues the series", async () 
 test("live: stale (older-bucket) frame is ignored — output identical to no-live", async () => {
   const bars = make1m(120);
   const stale = { time: Math.floor(bars[bars.length - 5].ts / 1000), open: 1, high: 2, low: 0.5, close: 3, volume: 1 };
-  const eng = new PineIndicatorEngine();
+  const eng = new PinerPineEngine();
   eng.setCandles(bars, stale, 60);
   const withStale = (await eng.computeScript({ id: "l", source: EMA_SCRIPT, bindings: [] }, {})).get("EMA 9").points;
   eng.setCandles(bars, null, 60);
@@ -488,7 +521,7 @@ test("live: background tab — unchanged close stream short-circuits; fresh snap
   const bars = make1m(120);
   const last = bars[bars.length - 1];
   const staleLive = { time: Math.floor(last.ts / 1000), open: last.open, high: last.high, low: last.low, close: last.close, volume: 10 };
-  const eng = new PineIndicatorEngine();
+  const eng = new PinerPineEngine();
   eng.setCandles(bars, staleLive, 60);
   const stalePts = (await eng.computeScript({ id: "l", source: EMA_SCRIPT, bindings: [] }, {})).get("EMA 9").points;
 
@@ -502,9 +535,10 @@ test("live: background tab — unchanged close stream short-circuits; fresh snap
   eng.setCandles(bars, freshLive, 60);
   const freshPts = (await eng.computeScript({ id: "l", source: EMA_SCRIPT, bindings: [] }, {})).get("EMA 9").points;
   assert.notEqual(freshPts[freshPts.length - 1].value, stalePts[stalePts.length - 1].value, "re-anchored by fresh truth");
-  const ref = calculateEMA(effectiveCloseSeries(bars, { time: freshLive.time, close: freshLive.close }, 60), 9);
-  const maxDelta = Math.max(...freshPts.map((p, i) => Math.abs(p.value - ref[i].value)));
-  assert.ok(maxDelta < 5e-9, "fresh points match the oracle");
+  const ref = recursiveEma(effectiveCloseSeries(bars, { time: freshLive.time, close: freshLive.close }, 60), 9);
+  let maxDelta = 0;
+  for (let i = 0; i < ref.length; i++) maxDelta = Math.max(maxDelta, Math.abs(freshPts[i].value - ref[i]));
+  assert.ok(maxDelta < 5e-9, "fresh points match the engine EMA contract");
   eng.dispose();
 });
 
@@ -676,10 +710,10 @@ test("safety: empty script is rejected with a helpful message", async () => {
   assert.equal(outcome.issue.kind, "syntax");
 });
 
-test("safety: a runtime-erroring script returns null + friendly message (never throws)", async () => {
+test("safety: a runtime-degenerate script never throws; empty output is handled", async () => {
   const bars = make1m(60);
   let raw = null;
-  const eng = new PineIndicatorEngine();
+  const eng = new PinerPineEngine();
   eng.setCandles(bars, null, 60);
   const map = await eng.computeScript(
     { id: "boom", source: `//@version=6\nindicator("err")\na = array.new_float(1, 0.0)\nplot(array.get(a, 5), "x")`, bindings: [] },
@@ -689,16 +723,20 @@ test("safety: a runtime-erroring script returns null + friendly message (never t
     },
   );
   eng.dispose();
-  assert.equal(map, null);
-  assert.ok(raw && raw.length > 0, "raw error passed to onError for the console/UI mapping");
-  const friendly = friendlyPineError(raw);
-  assert.doesNotMatch(friendly, /\n {4}at /, "no stack frames in the UI message");
-  assert.ok(friendly.length < 400, "message is bounded");
+  // The engine propagates `na` instead of throwing on out-of-range reads —
+  // the plot carries no usable values, so the result is empty (never a crash,
+  // never partial garbage).
+  assert.ok(map === null || map.size === 0, "no usable series, no throw");
+  if (raw) {
+    const friendly = friendlyPineError(raw);
+    assert.doesNotMatch(friendly, /\n {4}at /, "no stack frames in the UI message");
+    assert.ok(friendly.length < 400, "message is bounded");
+  }
 });
 
 test("safety: one engine serves multiple imported indicators independently", async () => {
   const bars = make1m(150);
-  const eng = new PineIndicatorEngine();
+  const eng = new PinerPineEngine();
   eng.setCandles(bars, null, 60);
   const a = await eng.computeScript(
     { id: "a", source: EMA_SCRIPT, bindings: [] },
@@ -721,22 +759,24 @@ test("safety: one engine serves multiple imported indicators independently", asy
   assert.equal(b.size, 1);
   // Indicator A's EMA 9 is untouched by B's inputs.
   const closes = effectiveCloseSeries(bars, null, 60);
-  const ref9 = calculateEMA(closes, 9);
+  const ref9 = recursiveEma(closes, 9);
   const got = a.get("EMA 9").points;
-  const maxDelta = Math.max(...got.map((p, i) => Math.abs(p.value - ref9[i].value)));
+  let maxDelta = 0;
+  for (let i = 0; i < ref9.length; i++) maxDelta = Math.max(maxDelta, Math.abs(got[i].value - ref9[i]));
   assert.ok(maxDelta < 5e-9, "indicator A unaffected by indicator B");
   // B's plot honors its own input.
-  assert.equal(b.get("out").color, "#ff0000");
-  const ref20 = calculateEMA(closes, 20);
+  assert.ok(b.get("out").color && b.get("out").color.toLowerCase().startsWith("#ff0000"));
+  const ref20 = recursiveEma(closes, 20);
   const gotB = b.get("out").points;
-  const maxDeltaB = Math.max(...gotB.map((p, i) => Math.abs(p.value - ref20[i].value)));
+  let maxDeltaB = 0;
+  for (let i = 0; i < ref20.length; i++) maxDeltaB = Math.max(maxDeltaB, Math.abs(gotB[i].value - ref20[i]));
   assert.ok(maxDeltaB < 5e-9, "indicator B uses its own len=20 input");
   eng.dispose();
 });
 
 test("safety: a failing indicator does not break its siblings on the same engine", async () => {
   const bars = make1m(100);
-  const eng = new PineIndicatorEngine();
+  const eng = new PinerPineEngine();
   eng.setCandles(bars, null, 60);
   const bad = await eng.computeScript(
     { id: "bad", source: `//@version=6\nindicator("bad")\nplot(ta.doesNotExist(close), "x")`, bindings: [] },

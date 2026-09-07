@@ -2,7 +2,7 @@
  * EMA 9/20 reversal state machine — unit tests (Node test runner via tsx).
  *   npm --prefix backend run test
  *
- * The pipeline is fed SYNTHETIC EMA pairs (the PineTS adapter is exercised
+ * The pipeline is fed SYNTHETIC EMA pairs (the Piner adapter is exercised
  * separately by the engine wiring + the existing pineEquivalence tests), so
  * these tests are fully deterministic and I/O-free.
  *

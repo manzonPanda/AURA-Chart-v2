@@ -17,7 +17,7 @@
  * Style support:
  *   line: solid / dotted / dashed / arrow_left / arrow_right / arrow_both,
  *         width 1–5, extend none/left/right/both (extend clips to the viewport
- *         width), PineTS hex color with alpha.
+ *         width), Pine hex color with alpha.
  *   box:  bgcolor fill (translucent default), border stroke with
  *         border_color/border_width/border_style, optional centered text with
  *         size/halign/valign/color.

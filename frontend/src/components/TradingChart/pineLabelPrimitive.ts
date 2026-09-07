@@ -20,7 +20,7 @@
  *   style_label_center / style_label_none → text (no balloon for `none`)
  *   style_label_{lower,upper}_{left,right} → diagonal corner balloons
  * Sizes map through the AURA dark-UI table (LABEL_SIZE_PX). Colors come from
- * PineTS hex (`#RRGGBB`/`#RRGGBBAA`), converted for the canvas on the fly.
+ * Pine hex (`#RRGGBB`/`#RRGGBBAA`), converted for the canvas on the fly.
  * ═══════════════════════════════════════════════════════════════════════════
  *
  * LWC coordinate notes: `logicalToCoordinate` / `timeToCoordinate` /

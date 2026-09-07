@@ -2,7 +2,7 @@
  * EMA Reversal Alert engine — server-side orchestrator, TIMEFRAME-AWARE.
  *
  *   ClosedCandle rollovers (MINUTE_1 AND MINUTE_3 — RealtimeService)
- *     → per-timeframe PineEmaSeries (PineTS ta.ema 9/20 on CLOSED candles)
+ *     → per-timeframe PineEmaSeries (Piner ta.ema 9/20 on CLOSED candles)
  *       → per-timeframe EmaAlertPipeline (NY session + confirmation + cooldown)
  *         → PushService (Web Push) + WS broadcast (UI state)
  *
@@ -11,7 +11,7 @@
  *     series, state machine, pending reversal, cooldown timestamps and last
  *     processed candle. A 1m signal can never interfere with 3m (and vice
  *     versa).
- *   - EMA math is PineTS only, ONE PineEmaSeries instance per timeframe.
+  *   - EMA math is Piner only, ONE PineEmaSeries instance per timeframe.
  *     3m EMA is computed from 3m CLOSED candles — never by transforming the
  *     1m EMA values. No second EMA implementation.
  *   - The forming/live candle NEVER reaches any detector (engine is fed
@@ -211,7 +211,7 @@ export class EmaAlertEngine {
     }
     // Drain anything that closed while warming up (deduped by bucket guard).
     // warmupDone stays FALSE during the drain so concurrent live frames keep
-    // queuing instead of racing the shared PineTS runtimes.
+    // queuing instead of racing the shared engine runtimes.
     const queued = this.queue.splice(0);
     for (const q of queued) await this.processClosedCandle(q.candle, q.timeframe);
     this.warmupDone = true;
@@ -247,7 +247,7 @@ export class EmaAlertEngine {
       return;
     }
     // Serialize processing across ALL units: one closed candle at a time,
-    // routed to its own series + pipeline (never concurrent on one PineTS runtime).
+    // routed to its own series + pipeline (never concurrent on one engine run).
     this.processing = this.processing
       .then(() => this.processClosedCandle(candle, timeframe))
       .catch(() => {

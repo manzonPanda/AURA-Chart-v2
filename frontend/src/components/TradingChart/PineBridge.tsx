@@ -28,11 +28,11 @@ import {
   type PineBar,
   type PineLiveCandle,
   type PineMarkerPoint,
+  type PineScriptEngine,
   type PineSymbolMeta,
   type PineVisual,
-} from "../../services/pineEngine";
+} from "../../services/pineEngineTypes";
 import { createPineEngine } from "../../services/pineEngineFactory";
-import type { PineScriptEngine } from "../../services/pineEngineTypes";
 import type { RealtimeCandleMsg } from "../../services/realtime";
 import { PineLabelPrimitive } from "./pineLabelPrimitive";
 import { PineLineBoxPrimitive } from "./pineLineBoxPrimitive";
@@ -46,7 +46,7 @@ interface Props {
   bucketSec: number;
   /** Imported Pine indicators (localStorage-persisted in App). */
   indicators: readonly ImportedPineIndicator[];
-  /** Active instrument metadata → PineTS `syminfo` (mintick etc.). */
+  /** Active instrument metadata → syminfo (mintick etc.). */
   symbol?: PineSymbolMeta | null;
   /** Runtime status reporter (status-change guarded; safe to call every frame). */
   onStatus?: (id: string, status: PineRunStatus) => void;
@@ -93,9 +93,9 @@ type IndicatorChartState = {
  * EmaBridge (authoritative `effectiveCloseSeries` input, memoized runs, no
  * re-transpile per frame). ONE engine instance serves all imported
  * indicators; each `computeScriptVisuals` call compiles once and extracts ALL
- * of the script's renderable outputs from a single PineTS run.
+ * of the script's renderable outputs from a single engine run.
  *
- * Visual coverage (PineTS 0.9.33 — verified at runtime):
+ * Visual coverage (engine-verified at runtime):
  *   plot() line/stepline  → LineSeries (LineType.WithSteps for steplines)
  *   plot(style_histogram|columns) → HistogramSeries (base 0, per-bar colors)
  *   plot(style_area)      → AreaSeries

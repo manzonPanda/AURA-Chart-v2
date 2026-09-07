@@ -1,5 +1,5 @@
 /**
- * EMA Reversal Alert engine integration test — the REAL PineTS adapter wired
+ * EMA Reversal Alert engine integration test — the REAL Piner adapter wired
  * through the pipeline (unlike the synthetic-pair state-machine tests).
  *
  * Flow under test:
@@ -85,7 +85,7 @@ function makeEngine(): {
   return { engine, pushes, saved };
 }
 
-test("engine: real PineTS EMA adapter confirms a bullish reversal and pushes once", async () => {
+test("engine: real Piner EMA adapter confirms a bullish reversal and pushes once", async () => {
   const { engine, pushes, saved } = makeEngine();
   await engine.start();
 

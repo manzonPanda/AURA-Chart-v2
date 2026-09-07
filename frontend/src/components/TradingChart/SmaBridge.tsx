@@ -33,7 +33,7 @@ const toLineData = (p: SmaPoint) => ({ time: (p.ts / 1000) as UTCTimestamp, valu
  * Renders the SMA overlay as a NORMAL Lightweight Charts line series on the
  * main price pane (priceScaleId "right" → same scale as the candles). No custom
  * rendering primitives, no CandleKit indicator registry — just LWC, exactly like
- * EmaBridge but computed purely (no PineTS).
+ * EmaBridge but computed purely (no Pine engine).
  *
  * Data flow (authoritative-truth only):
  *   candles → effectiveCloseSeries() (WS truth REPLACES the forming bucket's

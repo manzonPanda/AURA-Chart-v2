@@ -7,9 +7,9 @@
  *
  *   compiled cache → Engine(new ArrayFeed(bars)).run(opts)
  *                  → outputs (plots / markers / hlines) + drawings
- *                  → THIS module maps them into the SAME PineVisual[] the
- *                    PineTS path produces — so PineBridge's LWC renderer,
- *                    primitives and replay/history behavior are unchanged.
+ *                  → THIS module maps them into AURA's `PineVisual[]` — so
+ *                    PineBridge's LWC renderer, primitives and replay/history
+ *                    behavior are unchanged.
  *
  * Everything here is pure data-in/data-out (no DOM, no React) so it runs
  * identically in a Web Worker, in Node tests, and in the in-thread fallback.
@@ -49,14 +49,15 @@ import {
   type PineLineDrawing,
 } from "./pineDrawings.ts";
 import type { PineCandle } from "./pineSeries.ts";
-// TYPE-ONLY imports from the PineTS host module — erased at build time, so the
-// worker bundle never pulls PineTS in. Runtime imports above are pure modules.
+// TYPE-ONLY imports from the engine types module — these are engine-neutral
+// contracts shared with the engine boundary module (pineEngineTypes.ts) —
+// type-only, erased at build time, so the worker bundle stays engine-only.
 import type {
   PineMarkerPoint,
   PineRuntimeDiagnostics,
   PineSymbolMeta,
   PineVisual,
-} from "./pineEngine.ts";
+} from "./pineEngineTypes.ts";
 
 /** Extraction cap for the imported-script path (mirrors MAX_SCRIPT_SERIES). */
 export const PINER_MAX_VISUALS = 8;
@@ -91,8 +92,8 @@ export function pinerInputTitles(compiled: PinerCompiled): string[] {
 
 /**
  * Run one compiled script over the authoritative candle slice and map the
- * results into AURA's `PineVisual[]` + diagnostics — the same shapes the
- * PineTS `extractVisuals` produces.
+ * results into AURA's `PineVisual[]` + diagnostics — the visual contract
+ * PineBridge renders.
  *
  * `onStage` reports the REAL boundaries around the run/extract split. No
  * timers, no fake percentages.
@@ -187,7 +188,7 @@ export async function pinerRunVisuals(args: {
         : undefined;
     const color = dynamic ? undefined : uniform;
     const style = typeof opts.style === "string" ? opts.style : "line";
-    // Keys follow the PineTS title-keyed contract (key = plot title, so
+    // Keys follow the title-keyed contract (key = plot title, so
     // persisted plotMeta reconciles across runs); untitled → stable plot:N.
     const plotTitle = typeof p.title === "string" && p.title.length > 0 ? p.title : `plot:${p.id}`;
     const key = plotTitle;
@@ -246,7 +247,7 @@ export async function pinerRunVisuals(args: {
   }
 
   // ── drawings → the shared pineDrawings normalizers ─────────────────────────
-  // Piner props use the SAME field names as the PineTS snapshots the
+  // Piner props use the SAME field names as the drawing snapshots the
   // normalizers already parse; the only delta is the unprefixed style enum
   // ("label_down" vs "style_label_down"), remapped below.
   const kbars: PineLabelBar[] = klines.map((k) => ({ openTime: k.openTime, high: k.high, low: k.low }));

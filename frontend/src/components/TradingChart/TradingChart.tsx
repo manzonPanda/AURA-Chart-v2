@@ -40,7 +40,7 @@ import { planLiveUpdate, type LiveBar } from "../../services/liveCandle";
 import { defaultEmaSettings, type EmaSettings } from "../../config/emaSettings";
 import type { SmaSettings } from "../../config/smaSettings";
 import type { ImportedPineIndicator, PineRunStatus } from "../../services/pineImport";
-import type { PineSymbolMeta } from "../../services/pineEngine";
+import type { PineSymbolMeta } from "../../services/pineEngineTypes";
 import { CandleCountdown } from "./CandleCountdown";
 import { EmaBridge } from "./EmaBridge";
 import { InvertScaleBridge } from "./InvertScaleBridge";
@@ -77,7 +77,7 @@ interface Props {
   smaSettings?: SmaSettings;
   /** Imported Pine indicators (localStorage-persisted in App). */
   pineIndicators?: ImportedPineIndicator[];
-  /** Active instrument metadata → PineTS `syminfo` (mintick etc.) for scripts. */
+  /** Active instrument metadata → syminfo (mintick etc.) for scripts. */
   pineSymbol?: PineSymbolMeta | null;
   /** Runtime status reporter for imported Pine indicators. */
   onPineStatus?: (id: string, status: PineRunStatus) => void;
@@ -1058,7 +1058,7 @@ export function TradingChart({
               settings={smaSettings}
             />
           )}
-          {/* Imported Pine indicators — same generic PineTS engine path as the
+          {/* Imported Pine indicators — same generic Piner engine path as the
               EMAs, rendered via native LWC panes when overlay=false. */}
           <PineBridge
             bars={visibleBars}

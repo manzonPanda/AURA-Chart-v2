@@ -1,7 +1,7 @@
 /**
  * Authoritative Pine candle series — the SINGLE conversion of AURA's chart truth
- * (closed bars + forming WS candle) into the full-OHLCV series both Pine engines
- * consume. Pure + framework-free (worker-safe, Node-testable; no PineTS / Piner /
+ * (closed bars + forming WS candle) into the full-OHLCV series the Pine engine
+ * consumes. Pure + framework-free (worker-safe, Node-testable; no engine /
  * DOM imports).
  *
  * The close stream reuses `effectiveCloseSeries` so any indicator fed to Pine
@@ -44,7 +44,7 @@ export interface PineSeriesLiveCandle {
 }
 
 /**
- * Build the authoritative, full-OHLCV candle series for PineTS/Piner from the
+ * Build the authoritative, full-OHLCV candle series for the Pine engine from the
  * chart's closed bars + the forming WS candle, REUSING `effectiveCloseSeries`
  * so the close stream feeding indicators is identical to ema.ts.
  */

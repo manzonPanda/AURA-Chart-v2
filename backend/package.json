@@ -34,7 +34,7 @@
     "hono": "^4.6.14",
     "lightstreamer-client": "^7.3.2",
     "pg": "^8.13.0",
-    "pinets": "^0.9.33",
+    "@heyphat/piner": "^0.13.0",
     "web-push": "^3.6.7",
     "ws": "^8.21.3"
   },
