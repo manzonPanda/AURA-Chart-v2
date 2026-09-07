@@ -555,17 +555,59 @@ function clampDrawWidth(w: unknown, fallback: number): number {
 
 /**
  * Map one raw Pine x anchor to chart space. `bar_index` keeps the raw index
- * (logical) for exact bar-slot pinning AND its openTime (portable truth);
- * `bar_time` x is a Pine epoch-SECOND timestamp → ms.
+ * (logical) for exact bar-slot pinning AND its openTime (portable truth).
+ *
+ * `bar_time` x is the Pine `time`/`timestamp()` value — epoch MILLISECONDS
+ * (Piner delivers it verbatim; same contract the label path uses). The anchor
+ * ALSO resolves to a fractional logical index so the renderer can place
+ * anchors OUTSIDE the loaded data range (a session box whose right edge is a
+ * future close, or a start before the first loaded bar): LWC's
+ * `timeToCoordinate` returns null there, while `logicalToCoordinate`
+ * extrapolates linearly — TradingView-like placement.
  */
 function anchorFor(
   rawX: number,
   xloc: PineLineXloc,
   klines: readonly PineLabelBar[],
 ): { timeMs: number; logical: number | null } {
-  if (xloc === "bar_time") return { timeMs: rawX * 1000, logical: null };
+  if (xloc === "bar_time") {
+    // Pine `time`/`timestamp()` is epoch MILLISECONDS (Piner delivers verbatim;
+    // same contract as the label path). Keep the true ms AND derive a fractional
+    // logical index so the renderer can place anchors outside the loaded range
+    // (future session close / pre-first-bar start) via logicalToCoordinate's
+    // linear extrapolation — timeToCoordinate returns null there.
+    return { timeMs: rawX, logical: barIndexForTimeFractional(rawX, klines) };
+  }
   const index = Math.trunc(rawX);
   return { timeMs: barIndexToTimeMs(index, klines), logical: index };
+}
+
+/**
+ * Fractional logical index of a timestamp against the candle grid — the
+ * position LWC's logicalToCoordinate extrapolates linearly. Inside the series
+ * it's `barIndexForTime` + the sub-bar fraction; before the first bar it's
+ * negative (extrapolated by the series bucket); after the last bar it extends
+ * with the same bucket spacing (future slots, like barIndexToTimeMs).
+ */
+function barIndexForTimeFractional(timeMs: number, klines: readonly PineLabelBar[]): number | null {
+  const n = klines.length;
+  if (n === 0) return null;
+  const first = klines[0]!.openTime;
+  const last = klines[n - 1]!.openTime;
+  const bucketMs = n >= 2 ? Math.max(0, last - klines[n - 2]!.openTime) : 60_000;
+  if (bucketMs <= 0) return null;
+  const base = barIndexForTime(timeMs, klines);
+  if (base >= 0 && base < n) {
+    const barStart = klines[base]!.openTime;
+    const frac = bucketMs > 0 ? (timeMs - barStart) / bucketMs : 0;
+    return base + Math.max(0, Math.min(0.999999, frac));
+  }
+  if (timeMs < first) {
+    // Before the first bar — negative fractional index extrapolated by bucket.
+    return (timeMs - first) / bucketMs;
+  }
+  // After the last bar — continue from the last bar's index.
+  return (n - 1) + (timeMs - last) / bucketMs;
 }
 
 interface LineSnapshotLike {

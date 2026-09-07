@@ -224,6 +224,100 @@ if barstate.islast
   eng.dispose();
 });
 
+// ── killzone/session box rendering (regression: bar_time anchors) ───────────
+
+test("killzone: xloc.bar_time box anchors keep Pine MILLISECONDS (not seconds) and resolve a logical index", async () => {
+  const bars = makeBars(300);
+  const eng = engineOver(bars);
+  const src = `//@version=6
+indicator("kz-time", overlay=true)
+top = ta.highest(high, 200)
+bottom = ta.lowest(low, 200)
+if barstate.islast
+    box.new(time - 180000, top, time, bottom, xloc=xloc.bar_time, border_color=color.orange, bgcolor=color.new(color.orange, 85))
+plot(ta.ema(close, 9), "ema9")`;
+  const run = await eng.computeScriptVisuals(SPEC(src));
+  assert.ok(run, "script must run");
+  const boxV = run.visuals.find((v) => v.type === "boxes");
+  assert.ok(boxV && boxV.boxes.length > 0, "killzone time box survives extraction");
+  const bx = boxV.boxes[0];
+  // Pine `time` is ms; the normalizer must NOT multiply by 1000.
+  const lastBar = bars[bars.length - 1];
+  assert.ok(
+    bx.rightMs >= lastBar.ts - 60_000 && bx.rightMs <= lastBar.ts,
+    `rightMs ${bx.rightMs} stays in the candle ms epoch (last bar ${lastBar.ts}) — no 1000x inflation`,
+  );
+  const expectedLeft = lastBar.ts - 180_000;
+  assert.ok(
+    Math.abs(bx.leftMs - expectedLeft) <= 60_000,
+    `leftMs ${bx.leftMs} ≈ expected ${expectedLeft} in ms`,
+  );
+  // A logical anchor must be present so the renderer can place the box through
+  // logicalToCoordinate (timeToCoordinate alone returns null outside the data).
+  assert.equal(bx.xloc, "bar_time");
+  assert.ok(typeof bx.leftLogical === "number" && Number.isFinite(bx.leftLogical), "left logical resolves");
+  assert.ok(typeof bx.rightLogical === "number" && Number.isFinite(bx.rightLogical), "right logical resolves");
+  eng.dispose();
+});
+
+test("killzone: var box + box.set_right growth across a session (time anchors) stays visible", async () => {
+  // 120 × 1m bars starting 08:30 UTC — the session window (9–10h) is covered,
+  // so a session box is created and grown via box.set_*.
+  const bars = makeBars(120, 0.01, 1_704_097_200_000);
+  const eng = engineOver(bars);
+  const src = `//@version=6
+indicator("kz-grow", overlay=true)
+var box kz = na
+inSess = hour(time) >= 9 and hour(time) < 10
+if inSess and not inSess[1]
+    kz := box.new(time, ta.highest(high, 10), time, ta.lowest(low, 10), xloc=xloc.bar_time, border_color=color.blue, bgcolor=color.new(color.blue, 80))
+if inSess and not na(kz)
+    box.set_right(kz, time)
+    box.set_top(kz, ta.highest(high, 10))
+    box.set_bottom(kz, ta.lowest(low, 10))
+plot(ta.ema(close, 9), "ema9")`;
+  const run = await eng.computeScriptVisuals(SPEC(src));
+  assert.ok(run, "script must run");
+  const boxV = run.visuals.find((v) => v.type === "boxes");
+  assert.ok(boxV && boxV.boxes.length > 0, "growing session box survives");
+  for (const bx of boxV.boxes) {
+    assert.ok(
+      Math.abs(bx.leftMs - bx.rightMs) < 3_600_000,
+      "session span stays within the session window (ms, not seconds-inflated)",
+    );
+    assert.equal(bx.xloc, "bar_time");
+    assert.ok(bx.leftLogical !== null && bx.rightLogical !== null, "both edges placeable via logical index");
+  }
+  eng.dispose();
+});
+
+test("killzone: box with bar_time anchor extending BEFORE the first loaded bar resolves a negative logical index", async () => {
+  // 120 × 1m bars; left edge set 3h before the last bar's `time` → before the
+  // first bar (the series spans 2h), so the left logical must extrapolate < 0.
+  const bars = makeBars(120);
+  const eng = engineOver(bars);
+  const src = `//@version=6
+indicator("kz-prefirst", overlay=true)
+top = high * 1.001
+bottom = low * 0.999
+if barstate.islast
+    box.new(time - 10800000, top, time, bottom, xloc=xloc.bar_time, border_color=color.green, bgcolor=color.new(color.green, 75))
+plot(close)`;
+  const run = await eng.computeScriptVisuals(SPEC(src));
+  assert.ok(run, "script must run");
+  const boxV = run.visuals.find((v) => v.type === "boxes");
+  assert.ok(boxV && boxV.boxes.length > 0, "pre-first-bar box survives");
+  const bx = boxV.boxes[0];
+  // The box's LEFT edge is extrapolated BEFORE the first bar → negative logical.
+  assert.equal(bx.xloc, "bar_time");
+  assert.ok(
+    typeof bx.leftLogical === "number" && bx.leftLogical < 0,
+    `left edge resolves to a negative (extrapolated) logical ${bx.leftLogical}`,
+  );
+  assert.ok(bx.rightLogical !== null && bx.rightLogical >= 0, "right edge inside the series");
+  eng.dispose();
+});
+
 test("drawing lifecycle: set_text/set_color mutate in place and delete removes the object", async () => {
   const bars = makeBars(20);
   const eng = engineOver(bars);
