@@ -22,6 +22,13 @@ import {
 import { PineImportModal } from "./PineImportModal";
 
 interface Props {
+  /** Controlled popover open state — owned by App so the chart's
+   *  ActiveIndicatorsOverlay can open the menu (e.g. gear → settings). */
+  open: boolean;
+  onOpenChange: (next: boolean) => void;
+  /** Which indicator's config is expanded (canonical id: ema9/ema20/sma/Pine id). */
+  expandedId: EmaSlotId | string | null;
+  onExpandedChange: (id: EmaSlotId | string | null) => void;
   settings: EmaSettings;
   onChange: (next: EmaSettings) => void;
   /** SMA overlay configuration (localStorage-persisted in App). */
@@ -214,9 +221,21 @@ function PineInputField({
  * Configuration state lives in App (localStorage-persisted via emaSettings.ts
  * and services/pineImport.ts).
  */
-export function IndicatorsMenu({ settings, onChange, smaSettings, onSmaChange, imported, pineStatuses, onImportedChange, onCompile, onImportConfirm }: Props) {
-  const [open, setOpen] = useState(false);
-  const [expanded, setExpanded] = useState<EmaSlotId | string | null>(null);
+export function IndicatorsMenu({
+  open,
+  onOpenChange,
+  expandedId,
+  onExpandedChange,
+  settings,
+  onChange,
+  smaSettings,
+  onSmaChange,
+  imported,
+  pineStatuses,
+  onImportedChange,
+  onCompile,
+  onImportConfirm,
+}: Props) {
   const [importOpen, setImportOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
@@ -224,10 +243,10 @@ export function IndicatorsMenu({ settings, onChange, smaSettings, onSmaChange, i
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent): void => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) onOpenChange(false);
     };
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") onOpenChange(false);
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
@@ -248,7 +267,7 @@ export function IndicatorsMenu({ settings, onChange, smaSettings, onSmaChange, i
         aria-expanded={open}
         aria-haspopup="true"
         title="Indicator overlays (EMA / SMA)"
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => onOpenChange(!open)}
       >
         <span className="indicators-glyph" aria-hidden="true">ƒx</span>
         Indicators
@@ -257,7 +276,7 @@ export function IndicatorsMenu({ settings, onChange, smaSettings, onSmaChange, i
         <div className="indicators-pop" aria-label="Indicator settings">
           {EMA_SLOTS.map((slot) => {
             const cfg = settings[slot.id];
-            const isExpanded = expanded === slot.id;
+            const isExpanded = expandedId === slot.id;
             return (
               <div className={`ind-slot${isExpanded ? " expanded" : ""}`} key={slot.id}>
                 <div className="ind-row">
@@ -276,7 +295,7 @@ export function IndicatorsMenu({ settings, onChange, smaSettings, onSmaChange, i
                     className="ind-gear"
                     aria-label={`Configure ${slot.label}`}
                     aria-expanded={isExpanded}
-                    onClick={() => setExpanded(isExpanded ? null : slot.id)}
+                    onClick={() => onExpandedChange(isExpanded ? null : slot.id)}
                   >
                     {isExpanded ? "▾" : "▸"}
                   </button>
@@ -410,7 +429,7 @@ export function IndicatorsMenu({ settings, onChange, smaSettings, onSmaChange, i
               <div className="ind-divider" role="separator" />
               <div className="ind-section">Imported</div>
               {imported.map((ind) => {
-                const isExpanded = expanded === ind.id;
+                const isExpanded = expandedId === ind.id;
                 const status = pineStatuses[ind.id];
                 const swatch = ind.plotMeta.find((p) => p.color)?.color ?? "var(--accent)";
                 return (
@@ -459,7 +478,7 @@ export function IndicatorsMenu({ settings, onChange, smaSettings, onSmaChange, i
                         className="ind-gear"
                         aria-label={`Configure ${ind.name}`}
                         aria-expanded={isExpanded}
-                        onClick={() => setExpanded(isExpanded ? null : ind.id)}
+                        onClick={() => onExpandedChange(isExpanded ? null : ind.id)}
                       >
                         {isExpanded ? "▾" : "▸"}
                       </button>
@@ -497,7 +516,7 @@ export function IndicatorsMenu({ settings, onChange, smaSettings, onSmaChange, i
                           className="ind-remove"
                           onClick={() => {
                             onImportedChange(imported.filter((x) => x.id !== ind.id));
-                            if (expanded === ind.id) setExpanded(null);
+                            if (expandedId === ind.id) onExpandedChange(null);
                           }}
                         >
                           Remove indicator

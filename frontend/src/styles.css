@@ -723,3 +723,115 @@ button:focus-visible, select:focus-visible, input:focus-visible {
     padding: 0 9px;
   }
 }
+
+/* Upper-left indicator legend — compact TradingView-style overlay inside the
+   chart plot area (.chart-canvas-wrap is the positioning context). Anchored
+   to the top-left with a small margin so it never overlaps the price scale
+   or header. Pointer events are stopped on the overlay so it never interferes
+   with chart pan/drag/crosshair. */
+.active-indicators {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: calc(100% - 16px);
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.active-indicators-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, rgba(17, 28, 40, 0.75), rgba(13, 20, 29, 0.7));
+  border: 1px solid transparent;
+  font-size: 0.68rem;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  transition: border-color 0.15s ease, background 0.15s ease;
+  pointer-events: auto;
+}
+.active-indicators-row:hover {
+  border-color: var(--accent);
+  background: linear-gradient(90deg, rgba(19, 34, 54, 0.85), rgba(16, 26, 42, 0.8));
+}
+.active-indicators-row.is-hidden .active-indicators-name {
+  opacity: 0.45;
+  text-decoration: line-through;
+  text-decoration-color: var(--accent);
+}
+.active-indicators-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.3);
+  flex: none;
+}
+.active-indicators-name {
+  font-weight: 500;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.active-indicators-ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.active-indicators-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  flex: none;
+}
+.active-indicators-btn:hover,
+.active-indicators-btn:focus-visible {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: rgba(255, 255, 255, 0.05);
+  outline: none;
+}
+.active-indicators-btn:active {
+  background: rgba(255, 255, 255, 0.1);
+}
+.active-indicators-btn--rm:hover,
+.active-indicators-btn--rm:focus-visible {
+  color: var(--down);
+  border-color: var(--down);
+  background: rgba(255, 107, 114, 0.1);
+}
+.active-indicators-btn svg {
+  display: block;
+}
+
+@media (max-width: 860px) {
+  .active-indicators {
+    top: 6px;
+    left: 6px;
+    gap: 1px;
+  }
+  .active-indicators-row {
+    font-size: 0.62rem;
+    padding: 1px 4px;
+    gap: 2px;
+  }
+  .active-indicators-btn {
+    width: 16px;
+    height: 16px;
+  }
+}

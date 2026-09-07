@@ -41,6 +41,7 @@ import { defaultEmaSettings, type EmaSettings } from "../../config/emaSettings";
 import type { SmaSettings } from "../../config/smaSettings";
 import type { ImportedPineIndicator, PineRunStatus } from "../../services/pineImport";
 import type { PineSymbolMeta } from "../../services/pineEngineTypes";
+import { ActiveIndicatorsOverlay } from "./ActiveIndicatorsOverlay";
 import { CandleCountdown } from "./CandleCountdown";
 import { EmaBridge } from "./EmaBridge";
 import { InvertScaleBridge } from "./InvertScaleBridge";
@@ -113,6 +114,11 @@ interface Props {
    *  `active` = a session is running (the in-plot dock owns the controls),
    *  `canEnter` = there is data to replay. */
   onReplayStateChange?: (state: { active: boolean; canEnter: boolean }) => void;
+  /** Indicator setters forwarded to the upper-left ActiveIndicatorsOverlay. */
+  onEmaChange?: (next: EmaSettings) => void;
+  onSmaChange?: (next: SmaSettings) => void;
+  onPineChange?: (next: ImportedPineIndicator[]) => void;
+  onOpenIndicatorSettings?: (id: string) => void;
 }
 
 function asBar(c: { ts: number; open: number; high: number; low: number; close: number; volume?: number }): Bar {
@@ -629,6 +635,10 @@ export function TradingChart({
   replayPicking = false,
   onReplayPickingChange,
   onReplayStateChange,
+  onEmaChange,
+  onSmaChange,
+  onPineChange,
+  onOpenIndicatorSettings,
 }: Props) {
   const [crosshairCandle, setCrosshairCandle] = useState<Candle | null>(null);
   // When history is empty (e.g. IG allowance exhausted), ChartView still needs
@@ -1069,6 +1079,27 @@ export function TradingChart({
             onStatus={onPineStatus}
           />
         </ChartView>
+        {/* Upper-left indicator legend — compact TradingView-style control
+            overlay for currently-active indicators. Lives inside the chart
+            plot area so it moves with the chart, never the page. Rendered
+            only when App supplies the shared-state handlers AND some
+            indicator state exists (the legend is pure state reflection). */}
+        {onEmaChange &&
+          onSmaChange &&
+          onPineChange &&
+          onOpenIndicatorSettings &&
+          (emaSettings || smaSettings || (pineIndicators?.length ?? 0) > 0) && (
+            <ActiveIndicatorsOverlay
+              emaSettings={emaSettings ?? defaultEmaSettings}
+              smaSettings={smaSettings}
+              imported={pineIndicators ?? []}
+              onEmaChange={onEmaChange}
+              onSmaChange={onSmaChange}
+              onPineChange={onPineChange}
+              onOpenSettings={onOpenIndicatorSettings}
+            />
+          )}
+
         {/* Historical-edge control — subtle pill, top-left, revealed only when
             the user pans near the oldest loaded candle. Hidden during Replay
             (a replaying chart is a frozen dataset, never paginated). */}

@@ -207,6 +207,12 @@ export default function App() {
     [],
   );
 
+  // Indicators menu + active-indicators overlay share state. The overlay
+  // (upper-left chart) opens the menu (gear) and toggles visibility/removes;
+  // the header Indicators button opens the menu for ADDING.
+  const [indicatorsOpen, setIndicatorsOpen] = useState(false);
+  const [expandedIndicatorId, setExpandedIndicatorId] = useState<string | null>(null);
+
   // Realtime stream for the SELECTED timeframe (backend /ws relay). Switching
   // the selector drops the socket and re-subscribes with the new `res=` — the
   // backend re-seeds the forming candle for that timeframe automatically.
@@ -414,6 +420,12 @@ export default function App() {
       }
       return out;
     });
+  }, []);
+
+  /** Open the Indicators menu + expand a specific indicator's settings. */
+  const handleOpenIndicatorSettings = useCallback((id: string) => {
+    setExpandedIndicatorId(id);
+    setIndicatorsOpen(true);
   }, []);
 
   // Optional, non-blocking history load from OUR Supabase persistence
@@ -664,6 +676,10 @@ export default function App() {
             {/* EMA/SMA indicator slots + Imported Pine Script section —
                 localStorage-persisted config */}
             <IndicatorsMenu
+              open={indicatorsOpen}
+              onOpenChange={setIndicatorsOpen}
+              expandedId={expandedIndicatorId}
+              onExpandedChange={setExpandedIndicatorId}
               settings={emaSettings}
               onChange={setEmaSettings}
               smaSettings={smaSettings}
@@ -767,6 +783,10 @@ export default function App() {
           replayPicking={replayPicking}
           onReplayPickingChange={handleReplayPickingChange}
           onReplayStateChange={handleReplayStateChange}
+          onEmaChange={setEmaSettings}
+          onSmaChange={setSmaSettings}
+          onPineChange={handlePineChange}
+          onOpenIndicatorSettings={handleOpenIndicatorSettings}
         />
       </main>
     </div>
