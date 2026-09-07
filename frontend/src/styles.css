@@ -744,10 +744,10 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .active-indicators-row {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   padding: 2px 6px;
   border-radius: 4px;
-  background: linear-gradient(90deg, rgba(17, 28, 40, 0.75), rgba(13, 20, 29, 0.7));
+  background: transparent;
   border: 1px solid transparent;
   font-size: 0.68rem;
   line-height: 1.3;
@@ -755,9 +755,11 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   transition: border-color 0.15s ease, background 0.15s ease;
   pointer-events: auto;
 }
-.active-indicators-row:hover {
-  border-color: var(--accent);
-  background: linear-gradient(90deg, rgba(19, 34, 54, 0.85), rgba(16, 26, 42, 0.8));
+/* Hover: quiet highlight only — the legend never reads as a settings card. */
+.active-indicators-row:hover,
+.active-indicators-row:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
 }
 .active-indicators-row.is-hidden .active-indicators-name {
   opacity: 0.45;
@@ -778,11 +780,45 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 200px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
 }
+/* Controls: the control area is ALWAYS reserved at a fixed width so the
+   indicator name never shifts when the icons appear. Icons fade/slide in
+   only while the row is hovered (or keyboard-focused). While hidden they
+   are click-through (pointer-events: none) so no invisible button can
+   swallow a chart click. */
 .active-indicators-ctl {
   display: inline-flex;
   align-items: center;
   gap: 2px;
+  flex: none;
+  width: 58px; /* 3 × 18px buttons + 2 × 2px gaps */
+  opacity: 0;
+  transform: translateX(-3px);
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.active-indicators-row:hover .active-indicators-ctl,
+.active-indicators-row:focus-within .active-indicators-ctl {
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
+}
+/* Touch devices have no hover — keep the controls visible (muted styling
+   already keeps them secondary). */
+@media (hover: none) {
+  .active-indicators-ctl {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .active-indicators-ctl {
+    transition: none;
+    transform: none;
+  }
 }
 .active-indicators-btn {
   display: inline-flex;
@@ -833,5 +869,9 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   .active-indicators-btn {
     width: 16px;
     height: 16px;
+  }
+  /* Smaller buttons → recompute the reserved control width (3 × 16px + 2 × 2px). */
+  .active-indicators-ctl {
+    width: 52px;
   }
 }

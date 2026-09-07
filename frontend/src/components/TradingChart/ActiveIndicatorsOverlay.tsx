@@ -9,6 +9,10 @@
  * indicator) and delete. No duplicate state is created — actions translate
  * straight into the same emaSettings / smaSettings / importedPine slices the
  * Indicators menu edits, so the menu and the legend can never disagree.
+ *
+ * UX: the normal state shows ONLY the names (lightweight chart legend).
+ * Hovering a row reveals that row's eye/gear/trash controls in place —
+ * the control area is width-reserved in CSS so the name never shifts.
  */
 import { useMemo } from "react";
 
