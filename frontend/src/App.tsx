@@ -636,7 +636,6 @@ export default function App() {
               The dot alone reads as "feed alive" (full label lives in title). */}
           <div className="market-stats" aria-label="Market feed status">
             <span className="market-stats-dot" title="Market feed" />
-            <span className="status-metric"><span className="status-label">ENV</span><strong>{health?.environment ?? "…"}</strong></span>
             <span className="status-metric status-metric--bars"><span className="status-label">BARS</span><strong>{barsCount}</strong></span>
             <span className="status-metric status-metric--ticks"><span className="status-label">TICKS</span><strong>{realtime.ticks}</strong></span>
             {lastTickAge !== null && (
