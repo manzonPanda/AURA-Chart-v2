@@ -15,6 +15,7 @@ import {
   effectiveCloseSeries,
   type EmaPoint,
 } from "../../services/ema";
+import { effectiveSourceSeries } from "../../services/priceSource";
 import { PinerWorkerEngine } from "../../services/pineWorkerClient";
 import type { PineBar, PineLiveCandle, PinePoint, PineScriptEngine } from "../../services/pineEngineTypes";
 import { EMA_SLOTS, type EmaSettings } from "../../config/emaSettings";
@@ -163,15 +164,22 @@ export function EmaBridge({ bars, liveCandle, bucketSec, settings }: Props) {
           return;
         }
 
-                // Primary path: Piner ta.ema(). Fallback oracle: ema.ts — used only
-        // when Piner has insufficient history (returns null) or fails.
+                // Source routing: "close" keeps the Piner (Pine `ta.ema`) primary path
+        // with the ema.ts oracle fallback. Any other price source computes
+        // through the pure oracle directly — the built-in Pine source is
+        // close-based, and ema.ts is the proven ta.ema equivalent, so the
+        // engine stays untouched for source selection.
         let points: EmaPoint[] = [];
-        const pinePoints: PinePoint[] | null = await engineRef.current.compute("ema", { period: cfg.period });
-        if (pinePoints && pinePoints.length > 0) {
-          points = pinePoints;
+        if ((cfg.source ?? "close") === "close") {
+          const pinePoints: PinePoint[] | null = await engineRef.current.compute("ema", { period: cfg.period });
+          if (pinePoints && pinePoints.length > 0) {
+            points = pinePoints;
+          } else {
+            points = calculateEMA(effectiveCloseSeries(bars, liveCandle, bucketSec), cfg.period);
+          }
         } else {
-          const closes = effectiveCloseSeries(bars, liveCandle, bucketSec);
-          points = calculateEMA(closes, cfg.period);
+          const seriesIn = effectiveSourceSeries(bars, liveCandle, bucketSec, cfg.source);
+          points = calculateEMA(seriesIn, cfg.period);
         }
 
         if (points.length === 0) {

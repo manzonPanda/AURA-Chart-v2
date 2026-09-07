@@ -5,10 +5,10 @@
  * chart, never with the page).
  *
  * Every row mirrors the EXISTING indicator state: name, visibility
- * (eye), settings (gear → the existing Indicators menu, expanded at that
- * indicator) and delete. No duplicate state is created — actions translate
- * straight into the same emaSettings / smaSettings / importedPine slices the
- * Indicators menu edits, so the menu and the legend can never disagree.
+ * (eye), settings (gear → the Indicator Settings modal: Inputs/Style) and
+ * delete. No duplicate state is created — actions translate straight into the
+ * same emaSettings / smaSettings / importedPine slices the rest of the UI
+ * edits, so the legend can never disagree with the chart.
  *
  * UX: the normal state shows ONLY the names (lightweight chart legend).
  * Hovering a row reveals that row's eye/gear/trash controls in place —
@@ -36,8 +36,8 @@ interface Props {
   onSmaChange: (next: SmaSettings) => void;
   /** Imported Pine indicator list setter. */
   onPineChange: (next: ImportedPineIndicator[]) => void;
-  /** Opens the existing Indicators settings UI at a specific indicator
-   *  (canonical id from the legend row: ema9 / ema20 / sma / Pine id). */
+  /** Opens the Indicator Settings modal (Inputs/Style) for a specific
+   *  indicator (canonical id from the legend row: ema9 / ema20 / sma / Pine id). */
   onOpenSettings: (id: string) => void;
 }
 

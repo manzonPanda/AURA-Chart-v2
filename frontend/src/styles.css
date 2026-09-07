@@ -222,6 +222,45 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .pine-modal-head { display: flex; flex-direction: column; gap: 2px; }
 .pine-modal-head h3 { margin: 0; font-size: 1rem; }
 .pine-modal-sub { font-size: 0.68rem; color: var(--muted); }
+
+/* ── Indicator Settings modal (⚙ from the chart legend) ────── */
+.iset-modal {
+  width: min(420px, 94vw); max-height: 86vh; overflow: auto;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6); padding: 14px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.iset-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.iset-head h3 { margin: 0; font-size: 0.95rem; }
+.iset-close {
+  background: none; border: 1px solid transparent; color: var(--muted);
+  font-size: 1rem; line-height: 1; width: 24px; height: 24px; border-radius: 6px; cursor: pointer;
+}
+.iset-close:hover { color: var(--text); border-color: var(--border); }
+.iset-name { font-size: 0.78rem; font-weight: 700; color: var(--accent); letter-spacing: 0.04em; }
+.iset-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); }
+.iset-tab {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--muted); font-size: 0.7rem; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; padding: 6px 10px; cursor: pointer;
+}
+.iset-tab:hover { color: var(--text); }
+.iset-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.iset-body { display: flex; flex-direction: column; gap: 10px; padding: 2px 0 4px; }
+.iset-note { font-size: 0.72rem; color: var(--muted); line-height: 1.5; }
+.iset-note.warn { color: #ffd54f; }
+.iset-swatches { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; }
+.iset-swatch { display: inline-flex; align-items: center; gap: 5px; font-size: 0.68rem; color: var(--text); }
+.iset-swatch-dot { width: 10px; height: 10px; border-radius: 2px; border: 1px solid rgba(255, 255, 255, 0.25); }
+.iset-foot { display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--border); padding-top: 10px; }
+.iset-btn {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 14px; font-size: 0.72rem; font-weight: 700;
+  letter-spacing: 0.05em; text-transform: uppercase; cursor: pointer;
+}
+.iset-btn:hover { border-color: rgba(56, 189, 248, 0.5); color: var(--accent); }
+.iset-btn.primary { background: rgba(56, 189, 248, 0.14); border-color: rgba(56, 189, 248, 0.45); color: var(--accent); }
+.iset-btn.primary:hover { background: rgba(56, 189, 248, 0.22); }
 .pine-name { display: flex; flex-direction: column; gap: 4px; font-size: 0.66rem; color: var(--muted); font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
 .pine-name input {
   background: var(--bg); color: var(--text); border: 1px solid var(--border);

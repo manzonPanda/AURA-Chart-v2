@@ -7,6 +7,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TradingChart } from "./components/TradingChart/TradingChart";
 import { IndicatorsMenu } from "./components/Indicators/IndicatorsMenu";
 import {
+  IndicatorSettingsModal,
+  type SettingsApply,
+  type SettingsTarget,
+} from "./components/Indicators/IndicatorSettingsModal";
+import {
   DEFAULT_TIME_FRAME,
   HISTORY_LIMIT,
   INSTRUMENT_LABEL,
@@ -207,11 +212,10 @@ export default function App() {
     [],
   );
 
-  // Indicators menu + active-indicators overlay share state. The overlay
-  // (upper-left chart) opens the menu (gear) and toggles visibility/removes;
-  // the header Indicators button opens the menu for ADDING.
-  const [indicatorsOpen, setIndicatorsOpen] = useState(false);
-  const [expandedIndicatorId, setExpandedIndicatorId] = useState<string | null>(null);
+  // Indicator Settings modal target — built on demand from the EXISTING
+  // indicator state (no duplicate state). The chart legend's ⚙ opens it; the
+  // modal edits a draft and commits via handleSettingsApply (Cancel discards).
+  const [settingsTarget, setSettingsTarget] = useState<SettingsTarget | null>(null);
 
   // Realtime stream for the SELECTED timeframe (backend /ws relay). Switching
   // the selector drops the socket and re-subscribes with the new `res=` — the
@@ -422,10 +426,38 @@ export default function App() {
     });
   }, []);
 
-  /** Open the Indicators menu + expand a specific indicator's settings. */
-  const handleOpenIndicatorSettings = useCallback((id: string) => {
-    setExpandedIndicatorId(id);
-    setIndicatorsOpen(true);
+  /** Open the Indicator Settings modal for one legend id (ema9/ema20/sma/Pine id). */
+  const handleOpenIndicatorSettings = useCallback(
+    (id: string) => {
+      if (id === "ema9" || id === "ema20") {
+        const cfg = emaSettings[id];
+        setSettingsTarget({ kind: "ema", slotId: id, label: `EMA ${cfg.period}`, config: { ...cfg } });
+        return;
+      }
+      if (id === "sma") {
+        setSettingsTarget({ kind: "sma", label: `SMA ${smaSettings.period}`, config: { ...smaSettings } });
+        return;
+      }
+      const ind = importedPine.find((x) => x.id === id);
+      if (ind) {
+        setSettingsTarget({ kind: "pine", id: ind.id, indicator: ind, status: pineStatuses[ind.id] ?? null });
+      }
+    },
+    [emaSettings, smaSettings, importedPine, pineStatuses],
+  );
+
+  /** Commit the settings modal's draft into the existing state slices. */
+  const handleSettingsApply = useCallback((next: SettingsApply) => {
+    if (next.kind === "ema") {
+      setEmaSettings((prev) => ({ ...prev, [next.slotId]: next.config }));
+    } else if (next.kind === "sma") {
+      setSmaSettings(next.config);
+    } else {
+      setImportedPine((prev) =>
+        prev.map((x) => (x.id === next.id ? { ...x, inputs: next.inputs } : x)),
+      );
+    }
+    setSettingsTarget(null);
   }, []);
 
   // Optional, non-blocking history load from OUR Supabase persistence
@@ -673,20 +705,11 @@ export default function App() {
             </button>
           )}
           <div className="toolbar-group toolbar-group--analysis" aria-label="Chart analysis">
-            {/* EMA/SMA indicator slots + Imported Pine Script section —
-                localStorage-persisted config */}
+            {/* ƒx Indicators — ADD/IMPORT only (Pine Script import flow).
+                Management/configuration lives in the chart legend + the
+                Indicator Settings modal. */}
             <IndicatorsMenu
-              open={indicatorsOpen}
-              onOpenChange={setIndicatorsOpen}
-              expandedId={expandedIndicatorId}
-              onExpandedChange={setExpandedIndicatorId}
-              settings={emaSettings}
-              onChange={setEmaSettings}
-              smaSettings={smaSettings}
-              onSmaChange={setSmaSettings}
-              imported={importedPine}
-              pineStatuses={pineStatuses}
-              onImportedChange={handlePineChange}
+              importedCount={importedPine.length}
               onCompile={handlePineImport}
               onImportConfirm={handlePineImportConfirm}
             />
@@ -789,6 +812,23 @@ export default function App() {
           onOpenIndicatorSettings={handleOpenIndicatorSettings}
         />
       </main>
+
+      {/* Indicator Settings (⚙ from the chart legend) — keyed so switching
+          indicators remounts with a fresh draft of THAT indicator's config. */}
+      {settingsTarget && (
+        <IndicatorSettingsModal
+          key={
+            settingsTarget.kind === "ema"
+              ? `ema:${settingsTarget.slotId}`
+              : settingsTarget.kind === "sma"
+                ? "sma"
+                : `pine:${settingsTarget.id}`
+          }
+          target={settingsTarget}
+          onApply={handleSettingsApply}
+          onCancel={() => setSettingsTarget(null)}
+        />
+      )}
     </div>
   );
 }

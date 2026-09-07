@@ -10,7 +10,7 @@ import {
 import { useChartApi } from "@getcandlekit/charts/react";
 import type { Bar } from "@getcandlekit/charts/react";
 
-import { effectiveCloseSeries } from "../../services/ema";
+import { effectiveSourceSeries } from "../../services/priceSource";
 import { calculateSMA, type SmaPoint } from "../../services/sma";
 import type { SmaSettings } from "../../config/smaSettings";
 import type { RealtimeCandleMsg } from "../../services/realtime";
@@ -118,13 +118,18 @@ export function SmaBridge({ bars, liveCandle, bucketSec, settings }: Props) {
       return;
     }
 
-    // effectiveCloseSeries merges the forming candle's SERVER truth into the
-    // close stream (same bucket → replace; newer bucket → append; older →
-    // ignore). SMA is then computed over the SELECTED timeframe's bucket-
-    // aligned candles — always, regardless of whether they arrived from an
-    // initial load, Load More History prepend, or the live overlay.
-    const closes = effectiveCloseSeries(bars, liveCandle, bucketSec);
-    const points = calculateSMA(closes, settingsRef.current.period);
+    // effectiveSourceSeries merges the forming candle's SERVER truth into the
+    // selected price-source stream (same bucket → replace; newer → append;
+    // older → ignore). SMA is then computed over the SELECTED timeframe's
+    // bucket-aligned candles — always, regardless of whether they arrived from
+    // an initial load, Load More History prepend, or the live overlay.
+    const seriesIn = effectiveSourceSeries(
+      bars,
+      liveCandle,
+      bucketSec,
+      settingsRef.current.source ?? "close",
+    );
+    const points = calculateSMA(seriesIn, settingsRef.current.period);
 
     if (points.length === 0) {
       // Insufficient history for this period — show nothing (never a

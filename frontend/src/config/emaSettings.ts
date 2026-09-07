@@ -13,6 +13,7 @@
  */
 
 import { isValidEmaPeriod } from "../services/ema.ts";
+import { DEFAULT_PRICE_SOURCE, isPriceSource, type PriceSource } from "../services/priceSource.ts";
 
 export type EmaSlotId = "ema9" | "ema20";
 
@@ -21,6 +22,8 @@ export interface EmaConfig {
   enabled: boolean;
   /** Positive integer (1–500). */
   period: number;
+  /** Price series the EMA averages (Pine `input.source` analogue). */
+  source: PriceSource;
   /** Hex color (`#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`). */
   color: string;
   /** Lightweight Charts LineWidth domain (1–4). */
@@ -52,13 +55,13 @@ export const EMA_SLOTS: readonly EmaSlot[] = [
     id: "ema9",
     label: "EMA 9",
     // Warm amber — reads clearly against the teal/red candles and the sky accent.
-    defaults: { enabled: true, period: 9, color: "#fbbf24", width: 2 },
+    defaults: { enabled: true, period: 9, source: DEFAULT_PRICE_SOURCE, color: "#fbbf24", width: 2 },
   },
   {
     id: "ema20",
     label: "EMA 20",
     // The AURA accent blue (--accent) for the slower average.
-    defaults: { enabled: true, period: 20, color: "#38bdf8", width: 2 },
+    defaults: { enabled: true, period: 20, source: DEFAULT_PRICE_SOURCE, color: "#38bdf8", width: 2 },
   },
 ];
 
@@ -76,6 +79,7 @@ function sanitizeConfig(raw: unknown, fallback: EmaConfig): EmaConfig {
   const r = raw as Record<string, unknown>;
   if (typeof r.enabled === "boolean") out.enabled = r.enabled;
   if (isValidEmaPeriod(r.period)) out.period = r.period;
+  if (isPriceSource(r.source)) out.source = r.source;
   if (typeof r.color === "string") {
     const c = r.color.trim();
     if (HEX_COLOR_RE.test(c)) out.color = c.toLowerCase();

@@ -210,8 +210,14 @@ test("valid fields are kept; invalid ones fall back individually", () => {
     ema9: { enabled: false, period: 12, color: "#FF8800", width: 3 },
     ema20: { enabled: true, period: 20.5, color: "#38bdf8aa", width: 2 },
   });
-  assert.deepEqual(out.ema9, { enabled: false, period: 12, color: "#ff8800", width: 3 });
-  assert.deepEqual(out.ema20, { enabled: true, period: 20, color: "#38bdf8aa", width: 2 });
+  assert.deepEqual(out.ema9, {
+    enabled: false,
+    period: 12,
+    source: "close", // absent → default source (Pine input.source analogue)
+    color: "#ff8800",
+    width: 3,
+  });
+  assert.deepEqual(out.ema20, { enabled: true, period: 20, source: "close", color: "#38bdf8aa", width: 2 });
 });
 
 test("out-of-range values are rejected: period bounds, width bounds", () => {

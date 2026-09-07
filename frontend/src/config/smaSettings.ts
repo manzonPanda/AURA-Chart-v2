@@ -14,11 +14,14 @@
  */
 
 import { isValidSmaPeriod } from "../services/sma.ts";
+import { DEFAULT_PRICE_SOURCE, isPriceSource, type PriceSource } from "../services/priceSource.ts";
 
 export interface SmaConfig {
   enabled: boolean;
   /** Positive integer — constrained to the SMA_PERIODS menu. */
   period: number;
+  /** Price series the SMA averages (Pine `input.source` analogue). */
+  source: PriceSource;
   /** Hex color (`#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`). */
   color: string;
   /** Lightweight Charts LineWidth domain (1–4). */
@@ -50,6 +53,7 @@ const HEX_COLOR_RE = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
 export const DEFAULT_SMA_SETTINGS: SmaSettings = {
   enabled: true,
   period: 20,
+  source: DEFAULT_PRICE_SOURCE,
   color: "#a78bfa",
   width: 2,
 };
@@ -65,6 +69,7 @@ function sanitizeSmaConfig(raw: unknown, fallback: SmaConfig): SmaConfig {
   const r = raw as Record<string, unknown>;
   if (typeof r.enabled === "boolean") out.enabled = r.enabled;
   if (isValidSmaPeriod(r.period)) out.period = r.period;
+  if (isPriceSource(r.source)) out.source = r.source;
   if (typeof r.color === "string") {
     const c = r.color.trim();
     if (HEX_COLOR_RE.test(c)) out.color = c.toLowerCase();
