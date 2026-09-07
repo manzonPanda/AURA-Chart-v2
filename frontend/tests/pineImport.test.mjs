@@ -819,6 +819,28 @@ test("compile progress: onStage fires the real pipeline stages in order", async 
   }
 });
 
+test("compile: input.source inputs are NOT persisted as null overrides (three-0.00-lines bug)", async () => {
+  const src = `//@version=6
+indicator("src import", overlay=true)
+srcIn = input.source(close, "Src")
+len = input.int(9, "Len", minval=1)
+plot(ta.ema(srcIn, len), "emaSrc")`;
+  const outcome = await compileImportedPine({
+    name: "src",
+    source: src,
+    bars: make1m(80),
+    liveCandle: null,
+    bucketSec: 60,
+  });
+  assert.ok(outcome.ok, "compile succeeds");
+  const ind = outcome.indicator;
+  assert.ok(ind, "indicator produced");
+  assert.ok(!("Src" in ind.inputs), "input.source must not persist a null override (Piner applies null as 0)");
+  assert.equal(ind.inputs["Len"], 9, "scalar input default still persisted");
+  const meta = ind.inputMeta.find((m) => m.title === "Src");
+  assert.ok(meta, "source input metadata still captured for the settings UI");
+});
+
 test("compile progress: a syntax failure reports early stages, never late ones", async () => {
   const stages = [];
   const outcome = await compileImportedPine({

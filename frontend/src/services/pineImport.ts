@@ -757,7 +757,15 @@ export async function compileImportedPine(args: CompileImportedPineArgs): Promis
   onStage?.("rendering");
 
   const inputs0: Record<string, unknown> = {};
-  for (const m of inputs) inputs0[m.varId] = sanitizeInputValue(m, undefined);
+  for (const m of inputs) {
+    const v = sanitizeInputValue(m, undefined);
+    // `input.source` (and any null defval) carries no storable value — persisting
+    // null made later chart runs override it as numeric 0 (Piner applies null as
+    // 0), turning source-fed MAs into flat 0.00 lines. Omit the key so the
+    // script's declared default applies; the engine boundary additionally drops
+    // any null arriving from older persisted records.
+    if (v !== null && v !== undefined) inputs0[m.varId] = v;
+  }
 
   return {
     ok: true,

@@ -487,3 +487,40 @@ plotshape(ta.crossover(close, ta.ema(close, 9)), style = shape.triangleup, locat
   );
   eng.dispose();
 });
+
+test("autoscale: null source-input override falls back to the script default; plot(na) → no points; plot(0) → stays 0", async () => {
+  const bars = makeBars(60, 0.01);
+  const src = `//@version=6
+indicator("source probe", overlay = true)
+srcIn = input.source(close, "Src")
+plot(ta.ema(srcIn, 9), "emaSrc")
+plot(na, "naPlot")
+plot(0, "zeroPlot")`;
+  const eng = engineOver(bars, { tickerid: "CS.D.DAXCFD.TODAY.IP", decimals: 1 });
+  // Persisted import records carry `null` for `input.source` defvals — historically
+  // this reached Piner's Engine as a numeric-0 override and produced three flat
+  // 0.00 lines (EMA / EMA 2 / SMA) that dragged auto-fit down to zero.
+  const run = await eng.computeScriptVisuals(
+    { id: "src-probe", source: src, bindings: [{ title: "Src", paramKey: "Src" }] },
+    { Src: null },
+  );
+  assert.ok(run, "script must run");
+  const lo = Math.min(...bars.map((b) => b.low));
+  const ema = run.visuals.find((v) => v.type === "line" && v.key === "emaSrc");
+  assert.ok(ema && ema.data.length > 0, "source-fed EMA renders");
+  assert.ok(
+    ema.data.every((p) => p.value > lo * 0.5),
+    `EMA must follow price (min ${Math.min(...ema.data.map((p) => p.value))}) — the null override must NOT become 0`,
+  );
+  assert.equal(
+    run.visuals.some((v) => v.type === "line" && v.key === "naPlot"),
+    false,
+    "Pine `na` must stay absent from the LWC series (no 0.00 point, no autoscale input)",
+  );
+  const zero = run.visuals.find((v) => v.type === "line" && v.key === "zeroPlot");
+  assert.ok(
+    zero && zero.data.length > 0 && zero.data.every((p) => p.value === 0),
+    "an explicitly intended plot(0) remains a legitimate zero-valued series",
+  );
+  eng.dispose();
+});

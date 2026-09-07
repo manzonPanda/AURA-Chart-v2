@@ -110,7 +110,13 @@ export class PinerPineEngine implements PineScriptEngine {
     const inputs: Record<string, unknown> = {};
     for (const b of spec.bindings ?? []) {
       const v = params[b.paramKey];
-      if (v !== undefined) inputs[b.title] = v;
+      // `undefined` (unset) AND `null` both mean "no override". A null that reaches
+      // Piner's Engine is applied as numeric 0 — which turned `input.source`-fed
+      // MAs into flat 0.00 lines dragging auto-fit to zero (the three-zero-lines
+      // bug; persisted import records carry `null` for `input.source` defvals).
+      // Omitting the key lets the script's declared default (e.g. `close`) apply,
+      // while legitimate overrides (0, false, "") still pass through.
+      if (v !== undefined && v !== null) inputs[b.title] = v;
     }
     return inputs;
   }
