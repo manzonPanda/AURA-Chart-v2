@@ -132,17 +132,10 @@ export function PineImportModal({ onCompile, onImportConfirm, onClose }: Props) 
       const outcome = await onCompile(name, source, setCompileStage);
       if (outcome.ok && outcome.indicator) {
         if (outcome.warning) setWarning(outcome.warning);
-        const d = outcome.indicator.diagnostics;
-        // Fast path: everything the script uses is renderable → import at
-        // once. Otherwise show the review panel (Detected/Rendered/Not
-        // rendered) and let the user decide.
-        const needsReview = d !== undefined && (d.unsupported.length > 0 || d.hidden > 0 || d.rendered.length === 0);
-        if (needsReview) {
-          setReview(outcome.indicator);
-        } else {
-          onImportConfirm(outcome.indicator);
-          onClose();
-        }
+        // Always show the review panel (Detected/Rendered/Not rendered) and
+        // let the user confirm explicitly — the modal never auto-imports or
+        // auto-closes after a successful compile.
+        setReview(outcome.indicator);
         return;
       }
       setIssue(outcome.issue ?? { kind: "run", message: "Compilation failed for an unknown reason." });
