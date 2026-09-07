@@ -20,3 +20,19 @@ export interface CandlesResponse {
   count: number;
   candles: Candle[];
 }
+
+/**
+ * A detected market-data gap — an expected market bucket where no candle
+ * exists. These are NOT synthetic candles; they are derived intervals that
+ * the chart renders as a shaded "DATA GAP" region.
+ *
+ * `startTime` / `endTime` are epoch-MILLISECONDS (bucket-start UTC), matching
+ * `Candle.ts`. `reason` is informational for future expansion.
+ */
+export interface CandleGap {
+  instrument: string;
+  timeframe: string;
+  startTime: number;
+  endTime: number;
+  reason?: "broker_gap" | "missing_data";
+}

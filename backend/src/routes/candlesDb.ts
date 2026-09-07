@@ -1,7 +1,8 @@
 import { Hono, type Context } from "hono";
 import type { CandleStore, PersistedCandle } from "../db/candleStore.js";
 import { instrumentMetaFor, type InstrumentMeta } from "../market/instruments.js";
-import { detectGaps } from "../market/gapDetector.js";
+import { detectGaps, deriveGapIntervals } from "../market/gapDetector.js";
+import { calendarForInstrument } from "../market/instruments.js";
 import type { CandleStatus } from "../streaming/types.js";
 import {
   CANONICAL_TIMEFRAME,
@@ -31,26 +32,45 @@ import type { Candle } from "../types/candle.js";
  * hands off seamlessly to the live `series.update()` stream.
  */
 
+/** Calendar-aware gap intervals over the loaded candle window (epoch-ms).
+ *  Wire shape `{ start, end }` (epoch-MILLISECONDS) — what the frontend's
+ *  `fetchCandlesDb()` maps into `CandleGap` records. [] when the instrument
+ *  has no registered calendar (never guessed). */
+function gapsForEpic(epic: string, timesSec: readonly number[], bucketSec: number): { start: number; end: number }[] {
+  const calendar = calendarForInstrument(epic);
+  if (!calendar) return [];
+  return deriveGapIntervals(timesSec, calendar, bucketSec).map((g) => ({ start: g.startMs, end: g.endMs }));
+}
+
 /** Load chart-history candles for a timeframe WITHOUT touching IG historical
  *  REST (see the header above). Never reads a stored 3m series.
  *
  *  `beforeSec` (optional) is the history-pagination cursor: only rows strictly
  *  older than it are considered. `hasMore` reports whether the RAW database
  *  page came back full — a full page means older rows may still exist (the
- *  frontend's "Load More History" keeps going while hasMore is true). */
+ *  frontend's "Load More History" keeps going while hasMore is true).
+ *
+ *  Also returns derived gaps — market-data intervals that should have had
+ *  candles but don't (broker outages), excluding market closures per calendar. */
 async function loadTimeframeCandles(
   store: CandleStore,
   epic: string,
   timeframe: string,
   limit: number,
   beforeSec?: number,
-): Promise<{ candles: PersistedCandle[]; hasMore: boolean }> {
+): Promise<{ candles: PersistedCandle[]; hasMore: boolean; gaps: { start: number; end: number }[] }> {
   const minutes = minutesFor(timeframe);
 
   // Not a whole-minute frame (or 1m itself) → the stored rows are the result.
   if (typeof minutes !== "number" || minutes <= 1) {
-    const raw = await store.loadCandles(epic, timeframe, limit, beforeSec);
-    return { candles: raw, hasMore: raw.length >= limit };
+        const raw = await store.loadCandles(epic, timeframe, limit, beforeSec);
+    const bucketSec = TIMEFRAME_BUCKET_SEC[timeframe] ?? 60;
+    const gaps = gapsForEpic(
+      epic,
+      raw.map((r) => r.time),
+      bucketSec,
+    );
+    return { candles: raw, hasMore: raw.length >= limit, gaps };
   }
 
   // N complete macro candles require N*minutes closed 1m rows; fetch a little
@@ -92,7 +112,13 @@ async function loadTimeframeCandles(
   }));
   // Full 1m page ⇒ the table still has older rows (the derived macro count can
   // legitimately be < limit — the last macro bucket may be incomplete).
-  return { candles, hasMore: raw.length >= requested1m };
+    const bucketSec = minutes * 60;
+  const gaps = gapsForEpic(
+    epic,
+    candles.map((c) => c.time),
+    bucketSec,
+  );
+  return { candles, hasMore: raw.length >= requested1m, gaps };
 }
 
 /** Squash groups of stored 1m GapRows into one effective row per macro bucket:
@@ -186,8 +212,8 @@ export function createCandlesDbRouter(
       Number.isFinite(parsedBefore) && parsedBefore > 0 ? Math.floor(parsedBefore) : undefined;
 
     try {
-      const { candles, hasMore } = await loadTimeframeCandles(store, epic, timeframe, limit, beforeSec);
-      return c.json({ epic, timeframe, count: candles.length, hasMore, candles });
+            const { candles, hasMore, gaps } = await loadTimeframeCandles(store, epic, timeframe, limit, beforeSec);
+      return c.json({ epic, timeframe, count: candles.length, hasMore, candles, gaps });
     } catch (err) {
       return c.json(
         {

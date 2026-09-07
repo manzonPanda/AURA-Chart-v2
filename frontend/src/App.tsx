@@ -48,7 +48,8 @@ import {
 } from "./services/pineImport";
 import { useRealtimeStream, resolutionToBucketSec } from "./services/realtime";
 import { iso } from "./services/diagnostics";
-import type { Candle } from "./types/candle";
+import { mergeGapLists } from "./services/gapRegions";
+import type { Candle, CandleGap } from "./types/candle";
 import { EmaAlertControl } from "./components/EmaAlert/EmaAlertControl";
 import { OHLCReadout } from "./components/TradingChart/OHLCReadout";
 import {
@@ -92,7 +93,8 @@ function streamLabel(status: string, lastTickAt: number, now: number): {
 }
 
 export default function App() {
-  const [candles, setCandles] = useState<Candle[]>([]);
+    const [candles, setCandles] = useState<Candle[]>([]);
+  const [gaps, setGaps] = useState<CandleGap[]>([]);
   // Instrument selection (Phase 3) — the BACKEND REGISTRY (GET /api/instruments)
   // is the source of truth; localStorage only persists WHICH entry is active.
   // selectedEpic is "" until the catalog resolves → WS/history then run WITHOUT
@@ -484,14 +486,16 @@ export default function App() {
       // merge onto the STALE (pre-scope-change) closure and could overwrite
       // this freshly-loaded dataset.
       moreHistorySeq.current++;
-      setHistoryEpic(data.epic);
+            setHistoryEpic(data.epic);
       setCandles(data.candles);
+      setGaps(data.gaps);
       setHistoryMissing(false);
     } catch (err) {
       if (seq !== requestSeq.current) return;
       const msg = err instanceof ApiError ? `${err.code}: ${err.message}` : (err as Error).message;
       // HISTORY is optional — keep realtime streaming.
       setHistoryMissing(true);
+      setGaps([]); // stale shading would outlive its dataset
       console.info(`[HISTORY] unavailable (realtime continues): ${msg}`);
     } finally {
       if (seq === requestSeq.current) setLoading(false);
@@ -533,6 +537,9 @@ export default function App() {
       });
       if (added > 0) {
         setCandles(merged);
+        // Older pages carry their own derived gaps — merge (dedupe by exact
+        // interval) so shading accumulates across the whole loaded window.
+        setGaps((prev) => mergeGapLists(prev, data.gaps));
         console.info(`[HISTORY] +${added} older candles (oldest now ${iso(merged[0].ts)})`);
       }
     } catch (err) {
@@ -786,8 +793,9 @@ export default function App() {
       )}
 
       <main className="chart-area">
-        <TradingChart
+                <TradingChart
           candles={candles}
+          gaps={gaps}
           resolution={timeframe}
           liveCandle={realtime.candle}
           streamStatus={realtime.status}

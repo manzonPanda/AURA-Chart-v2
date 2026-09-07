@@ -1,4 +1,4 @@
-import type { Candle, CandlesResponse } from "../types/candle";
+import type { Candle, CandlesResponse, CandleGap } from "../types/candle";
 import { HISTORY_LIMIT } from "../config/chart.ts";
 
 /**
@@ -65,6 +65,8 @@ interface DbCandlesResponse {
   /** True when the raw DB page came back full → older rows may still exist. */
   hasMore?: boolean;
   candles: DbCandleDto[];
+  /** Detected market-data gaps (epoch-ms) — derived from the calendar + loaded candles. */
+  gaps?: { start: number; end: number }[];
 }
 
 /**
@@ -91,7 +93,7 @@ export async function fetchCandlesDb(
   limit = HISTORY_LIMIT,
   epic?: string,
   beforeSec?: number,
-): Promise<{ epic: string; candles: Candle[]; hasMore: boolean }> {
+): Promise<{ epic: string; candles: Candle[]; hasMore: boolean; gaps: CandleGap[] }> {
   const qs = new URLSearchParams({ timeframe, limit: String(limit) });
   if (epic) qs.set("epic", epic);
   if (beforeSec !== undefined) qs.set("before", String(Math.floor(beforeSec)));
@@ -102,7 +104,7 @@ export async function fetchCandlesDb(
   }
 
   const body = (await res.json()) as DbCandlesResponse;
-  return {
+    return {
     epic: body.epic,
     // Older backend builds don't send hasMore — approximate with page-fullness.
     hasMore: body.hasMore ?? body.candles.length >= limit,
@@ -113,7 +115,52 @@ export async function fetchCandlesDb(
       low: c.low,
       close: c.close,
     })),
+    gaps: (body.gaps ?? []).map((g) => ({
+      instrument: body.epic,
+      timeframe: body.timeframe,
+      startTime: g.start,
+      endTime: g.end,
+      reason: "broker_gap" as const,
+    })),
   };
+}
+
+/**
+ * Fetches detected market-data gaps for the given instrument/timeframe.
+ * Calls the backend's `/api/candles/db/gaps` endpoint which uses the existing
+ * `detectGaps` logic + market calendar to classify expected buckets as missing.
+ *
+ * Returns gaps only for periods that should have had candles (i.e. market was
+ * open). Weekend/closed-session gaps are excluded by the calendar.
+ */
+export async function fetchGaps(
+  timeframe: string,
+  epic?: string,
+  hours?: number,
+): Promise<CandleGap[]> {
+  const qs = new URLSearchParams({ timeframe });
+  if (epic) qs.set("epic", epic);
+  if (hours) qs.set("hours", String(hours));
+  const res = await fetch(`${API_BASE}/candles/db/gaps?${qs.toString()}`);
+  if (!res.ok) {
+    // Gaps are best-effort — if the endpoint fails, return empty (no crash).
+    return [];
+  }
+  const body = (await res.json()) as {
+    epic: string;
+    timeframe: string;
+    bucketSec: number;
+    missing?: string[]; // ISO timestamps of missing bucket starts
+    partial?: string[];
+  };
+  const bucketSec = body.bucketSec ?? 60;
+  return (body.missing ?? []).map((iso) => ({
+    instrument: body.epic,
+    timeframe: body.timeframe,
+    startTime: Date.parse(iso) /* epoch-ms */,
+    endTime: Date.parse(iso) + bucketSec * 1000,
+    reason: "broker_gap",
+  }));
 }
 
 export async function fetchHealth(): Promise<{ ok: boolean; configured: boolean; environment: string }> {

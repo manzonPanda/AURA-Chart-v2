@@ -22,7 +22,6 @@ import {
   type TickMarkFormatter,
   type TimeFormatterFn,
 } from "lightweight-charts";
-import type { Candle } from "../../types/candle";
 import {
   formatManilaDayHHMM,
   formatManilaDateTimeFull,
@@ -41,6 +40,7 @@ import { defaultEmaSettings, type EmaSettings } from "../../config/emaSettings";
 import type { SmaSettings } from "../../config/smaSettings";
 import type { ImportedPineIndicator, PineRunStatus } from "../../services/pineImport";
 import type { PineSymbolMeta } from "../../services/pineEngineTypes";
+import type { Candle, CandleGap } from "../../types/candle";
 import { ActiveIndicatorsOverlay } from "./ActiveIndicatorsOverlay";
 import { CandleCountdown } from "./CandleCountdown";
 import { EmaBridge } from "./EmaBridge";
@@ -61,9 +61,64 @@ import {
   shouldShowLoadMore,
   type HistoryStatus,
 } from "../../services/historyPagination";
+import { resolveGapBands } from "../../services/gapRegions";
+import { GapRegionsPrimitive } from "./GapRegionsPrimitive";
+
+/**
+ * DATA GAP shading — attaches the gap primitive to the chart's main series
+ * and repaints it whenever the loaded candles or the derived gaps change.
+ * Presentation-only: gaps never enter the candle arrays (Pine, the Trading
+ * Behavior Engine and persistence are untouched). Suppressed during replay —
+ * the chart then shows simulated bars and live-outage bands would mislead.
+ */
+function GapShading({
+  candles,
+  gaps,
+  bucketSec,
+  enabled,
+}: {
+  candles: readonly Candle[];
+  gaps: readonly CandleGap[] | undefined;
+  bucketSec: number;
+  enabled: boolean;
+}): null {
+  const api = useChartApi();
+  const primRef = useRef<GapRegionsPrimitive | null>(null);
+  const bands = useMemo(
+    () => (enabled ? resolveGapBands(candles, gaps ?? [], bucketSec) : []),
+    [candles, gaps, bucketSec, enabled],
+  );
+
+  // Attach once per chart controller (re-attaches after chart recreation).
+  useEffect(() => {
+    const controller = api.controller;
+    if (!controller) return;
+    const host = (controller as unknown as { getSeries?: () => unknown }).getSeries?.() as
+      | { attachPrimitive?: (p: unknown) => void }
+      | undefined
+      | null;
+    if (!host) return;
+    if (!primRef.current) primRef.current = new GapRegionsPrimitive();
+    try {
+      host.attachPrimitive?.(primRef.current);
+    } catch {
+      /* older LWC without primitive support — gap shading degrades silently */
+    }
+  }, [api]);
+
+  // Repaint in place when the geometry changes (attachPrimitive → requestUpdate).
+  useEffect(() => {
+    primRef.current?.setBands(bands);
+  }, [bands]);
+
+  return null;
+}
+
 
 interface Props {
   candles: readonly Candle[];
+  /** Detected market-data gaps (broker outages) — rendered as shaded regions. */
+  gaps?: CandleGap[];
   /** Timeframe id (MINUTE_1 | MINUTE_3) — used for stream bucket alignment. */
   resolution?: string;
   /** Latest forming candle pushed by the backend (time = bucket start, epoch s). */
@@ -617,6 +672,7 @@ function ViewportBridge({
  */
 export function TradingChart({
   candles,
+  gaps,
   resolution = "",
   liveCandle = null,
   streamStatus = "DISCONNECTED",
@@ -1078,6 +1134,9 @@ export function TradingChart({
             symbol={pineSymbol}
             onStatus={onPineStatus}
           />
+          {/* DATA GAP shading — presentation-only band primitive attached to the
+              main series; hidden while a replay session owns the chart. */}
+          <GapShading candles={candles} gaps={gaps} bucketSec={bucketSec} enabled={!session} />
         </ChartView>
         {/* Upper-left indicator legend — compact TradingView-style control
             overlay for currently-active indicators. Lives inside the chart
