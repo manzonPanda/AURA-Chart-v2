@@ -43,11 +43,11 @@ type DrawCanvasTarget = {
 };
 
 /** Subtle slate shading — reads as "absent", never as a real price level. */
-const GAP_FILL = "rgba(148, 163, 184, 0.10)";
-const GAP_EDGE = "rgba(148, 163, 184, 0.28)";
-const GAP_TEXT = "rgba(203, 213, 225, 0.55)";
+const GAP_FILL = "rgba(148, 163, 184, 0.22)";
+const GAP_EDGE = "rgba(148, 163, 184, 0.55)";
+const GAP_TEXT = "rgba(203, 213, 225, 0.85)";
 /** Caption is drawn only when the band is at least this wide (px). */
-const MIN_LABEL_PX = 56;
+const MIN_LABEL_PX = 40;
 /** Chart font stack matching the AURA dark trading UI. */
 const FONT_STACK = '-apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
 
