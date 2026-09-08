@@ -37,6 +37,9 @@ import type { RealtimeCandleMsg } from "../../services/realtime";
 import { PineLabelPrimitive } from "./pineLabelPrimitive";
 import { PineLineBoxPrimitive } from "./pineLineBoxPrimitive";
 
+/** Stable empty identity — optional-prop absence never changes effect deps. */
+const EMPTY_SLOTS: readonly number[] = [];
+
 interface Props {
   /** The chart's bucket-aligned candles (history or live-only accumulation). */
   bars: readonly Bar[];
@@ -50,6 +53,13 @@ interface Props {
   symbol?: PineSymbolMeta | null;
   /** Runtime status reporter (status-change guarded; safe to call every frame). */
   onStatus?: (id: string, status: PineRunStatus) => void;
+  /**
+   * Whitespace slot timestamps (epoch ms) the chart's time scale carries for
+   * detected data gaps (WhitespaceBridge) — presentation-only metadata used to
+   * remap drawing anchors onto the shifted logical grid. NEVER candle data:
+   * the engine and all indicators keep running on real OHLC only.
+   */
+  whitespaceSlots?: readonly number[];
 }
 
 // ── chart-state types ────────────────────────────────────────────────────────
@@ -117,7 +127,17 @@ type IndicatorChartState = {
  * "right", markers/price lines anchor to the candle series); overlay=false
  * scripts each get their own native LWC pane (addSeries(…, paneIndex)).
  */
-export function PineBridge({ bars, liveCandle, bucketSec, indicators, symbol, onStatus }: Props) {
+export function PineBridge({
+  bars,
+  liveCandle,
+  bucketSec,
+  indicators,
+  symbol,
+  onStatus,
+  whitespaceSlots,
+}: Props) {
+  // Whitespace slot timestamps for drawing-anchor remapping (see Props).
+  const wsSlots = whitespaceSlots ?? EMPTY_SLOTS;
   const api = useChartApi();
   const engineRef = useRef<PineScriptEngine>(createPineEngine());
   /** Per-indicator chart state (series, markers, price lines). */
@@ -310,6 +330,12 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
     const paneBoxes: BoxesVisual["boxes"] = [];
     const overlayBoxes: BoxesVisual["boxes"] = [];
 
+    // Anchor context for the drawing primitives: real-candle times (engine
+    // space) + the chart's whitespace slots (chart space). Primitives resolve
+    // time anchors exactly on registered slots and remap bar_index anchors
+    // across the inserted slots (services/pineDrawings `resolveAnchorX`).
+    const anchorKlines = barsNow.map((b) => ({ openTime: b.ts, high: b.high, low: b.low }));
+
     for (const v of visuals) {
       if (v.type === "line" || v.type === "histogram" || v.type === "area") {
         const ident = v.key;
@@ -419,6 +445,7 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
           const host = labelHostFor(chart, st, candleSeries, barsNow);
           if (host) {
             const prim = ensureLabelPrimitive(host, st, st.paneIndex);
+            prim.setAnchorContext(anchorKlines, wsSlots);
             prim.setLabels(v.labels);
             paintedAny = true;
           }
@@ -427,6 +454,7 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
           const overlayHost = candleSeries ?? ensureCarrier(chart, st, barsNow);
           if (overlayHost) {
             const prim = ensureOverlayLabelPrimitive(overlayHost, st);
+            prim.setAnchorContext(anchorKlines, wsSlots);
             prim.setLabels(v.overlayLabels);
             paintedAny = true;
           }
@@ -451,6 +479,7 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
       const host = labelHostFor(chart, st, candleSeries, barsNow);
       if (host) {
         const prim = ensureDrawingPrimitive(host, st, st.paneIndex);
+        prim.setAnchorContext(anchorKlines, wsSlots);
         prim.setDrawings(paneLines, paneBoxes);
         paintedAny = true;
       }
@@ -677,7 +706,7 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
       /* one bad indicator must not break the others */
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, bars, liveCandle, bucketSec, indicators, symbol]);
+  }, [api, bars, liveCandle, bucketSec, indicators, symbol, whitespaceSlots]);
 
   // Pure chart-side bridge: nothing rendered into the DOM.
   return null;

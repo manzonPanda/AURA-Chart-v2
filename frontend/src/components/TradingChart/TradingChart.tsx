@@ -63,6 +63,8 @@ import {
 } from "../../services/historyPagination";
 import { resolveGapBands } from "../../services/gapRegions";
 import { GapRegionsPrimitive } from "./GapRegionsPrimitive";
+import { WhitespaceBridge } from "./WhitespaceBridge";
+import { buildWhitespacePlan } from "../../services/whitespaceRows";
 
 /**
  * DATA GAP shading — attaches the gap primitive to the chart's main series
@@ -783,6 +785,11 @@ export function TradingChart({
       timeScale: {
         barSpacing: 9,
         rightOffset: 8,
+        // Missing-gap whitespace slots PARTICIPATE in grid lines, tick marks
+        // and crosshair snapping — the IG-like empty-time behavior. This is
+        // already the LWC default for standard charts; set explicitly to
+        // document the contract the whitespace feature relies on.
+        ignoreWhitespaceIndices: false,
         tickMarkFormatter: ((time: unknown, tickMarkType: TickMarkType) => {
           const tsMs = Number(time) * 1000;
           switch (tickMarkType) {
@@ -837,6 +844,16 @@ export function TradingChart({
   // The bump (not the value) is what matters: it re-renders the ref-reads
   // (visibleBars / replayCursorCandle) after every engine state change.
   const [, bumpVisible] = useReducer((n: number) => n + 1, 0);
+
+  // TIME-SCALE WHITESPACE slots (epoch ms) — the timestamps WhitespaceBridge
+  // registers for detected data gaps. Presentation-only: the Pine engine and
+  // every indicator keep running on REAL candles; these slots exist solely so
+  // drawing anchors can be remapped onto the shifted logical grid. Empty
+  // during replay — the replay timeline is compacted (no whitespace).
+  const whitespaceSlots = useMemo(
+    () => (session ? [] : buildWhitespacePlan(candles, gaps ?? [], bucketSec).slots),
+    [session, candles, gaps, bucketSec],
+  );
 
   // Measure the right price scale's ACTUAL rendered width once the chart is
   // ready, and keep it current as the chart resizes (browser width, chart
@@ -1133,10 +1150,20 @@ export function TradingChart({
             indicators={pineIndicators}
             symbol={pineSymbol}
             onStatus={onPineStatus}
+            whitespaceSlots={whitespaceSlots}
           />
           {/* DATA GAP shading — presentation-only band primitive attached to the
               main series; hidden while a replay session owns the chart. */}
           <GapShading candles={candles} gaps={gaps} bucketSec={bucketSec} enabled={!session} />
+          {/* TIME-SCALE WHITESPACE — invisible LWC series registering the
+              missing-gap timestamps as real empty time slots (IG-style).
+              Cleared during a replay session, restored on exit. */}
+          <WhitespaceBridge
+            candles={candles}
+            gaps={gaps}
+            bucketSec={bucketSec}
+            replayActive={session !== null}
+          />
         </ChartView>
         {/* Upper-left indicator legend — compact TradingView-style control
             overlay for currently-active indicators. Lives inside the chart

@@ -37,7 +37,8 @@
 
 import type { SeriesAttachedParameter, Time } from "lightweight-charts";
 
-import type { PineLabelDrawing } from "../../services/pineDrawings";
+import { resolveAnchorX } from "../../services/pineDrawings";
+import type { PineLabelBar, PineLabelDrawing } from "../../services/pineDrawings";
 import {
   LABEL_SIZE_PX,
   PINE_DEFAULT_LABEL_COLOR,
@@ -119,6 +120,9 @@ export class PineLabelPrimitive {
   private labels: PineLabelDrawing[] = [];
   private view: LabelPaneView | null = null;
   private needsRedraw = true;
+  /** Anchor-remap context: the engine candle series + whitespace slots. */
+  private anchorKlines: readonly PineLabelBar[] = [];
+  private anchorSlots: readonly number[] = [];
 
   /** LWC calls this once when the primitive is attached to a series. */
   attached(param: SeriesAttachedParameter<Time>): void {
@@ -140,6 +144,18 @@ export class PineLabelPrimitive {
   /** Update the drawings to paint; schedules an LWC repaint. */
   setLabels(labels: readonly PineLabelDrawing[]): void {
     this.labels = [...labels];
+    if (this.requestUpdate) this.requestUpdate();
+    else this.needsRedraw = true;
+  }
+
+  /**
+   * Anchor-remap context for the WHITESPACE time scale: the candle series the
+   * engine ran on (engine logical → chart logical) and the whitespace slots
+   * registered by WhitespaceBridge. Presentation-only — never affects data.
+   */
+  setAnchorContext(klines: readonly PineLabelBar[], slots: readonly number[]): void {
+    this.anchorKlines = klines;
+    this.anchorSlots = slots;
     if (this.requestUpdate) this.requestUpdate();
     else this.needsRedraw = true;
   }
@@ -171,12 +187,18 @@ export class PineLabelPrimitive {
           // Anchor X: bar-index labels use the LOGICAL coordinate (keeps future
           // slots and zoom/scroll exact); bar_time labels use the timestamp
           // scale (LWC Time is an epoch-SECOND number).
-          const xCoord =
-            label.logical !== null
-              ? safeCoord(timeScale.logicalToCoordinate(label.logical))
-              : safeCoord(
-                  timeScale.timeToCoordinate ? timeScale.timeToCoordinate(label.timeMs / 1000) : null,
-                );
+          // WHITESPACE-AWARE anchor X (services/pineDrawings resolveAnchorX):
+          // exact time slot first (registered candles + gap slots), then the
+          // whitespace-remapped logical; engine-logical passthrough when no
+          // whitespace exists (replay / disabled). Bar_index anchors stay on
+          // their own candles after whitespace shifts the chart logicals.
+          const xCoord = resolveAnchorX(
+            label.logical,
+            label.timeMs,
+            this.anchorKlines,
+            this.anchorSlots,
+            timeScale,
+          );
           if (xCoord === null) continue;
           const yCoord = series.priceToCoordinate(label.price);
           if (yCoord === null) continue;
@@ -272,11 +294,6 @@ function safeMeasure(ctx: CanvasRenderingContext2D, text: string): number {
   } catch {
     return Math.max(10, text.length * 7);
   }
-}
-
-/** Null-safe guard for a plain LWC coordinate (CSS pixels; a bare number at runtime). */
-function safeCoord(coord: number | null | undefined): number | null {
-  return typeof coord === "number" && Number.isFinite(coord) ? coord : null;
 }
 
 /** Approximate a 4px rounded rect with a single path (chamfered corners). */

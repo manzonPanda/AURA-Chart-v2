@@ -40,6 +40,8 @@
  * no lightweight-charts import).
  */
 
+import { remapLogicalToChart } from "./whitespaceRows.ts";
+
 // ── Normalized label model ───────────────────────────────────────────────────
 
 /** Normalized Pine label style (engine `style_*` constants minus the prefix). */
@@ -232,6 +234,53 @@ export function barIndexForTime(timeMs: number, klines: readonly PineLabelBar[])
   }
   return found;
 }
+
+/**
+ * Resolve one drawing anchor's screen X across the WHITESPACE time scale.
+ *
+ * Priority order (whitespace architecture — see services/whitespaceRows.ts):
+ *   1. `timeToCoordinate(timeMs)` — EXACT for any timestamp registered on the
+ *      scale (every real candle and every whitespace slot). This is what makes
+ *      a NY-killzone `bar_time` anchor at 21:30 PH land on the true 21:30
+ *      slot instead of snapping to a neighbor bar.
+ *   2. `logicalToCoordinate(chartLogical)` — the engine→chart REMAPPED logical
+ *      (whitespace slots inserted, `remapLogicalToChart`). Used when the
+ *      timestamp is NOT registered on the scale (session boxes extrapolated
+ *      beyond the loaded data), where LWC's linear bar-space extrapolation is
+ *      the TradingView-like placement.
+ *   3. Engine-logical passthrough when whitespace is absent (replay mode /
+ *      no gaps / whitespace disabled): with `slots = []` the remap is the
+ *      identity, so this is exactly the pre-whitespace behavior. The 14335fa
+ *      fractional interpolation stays authoritative for in-gap anchors on a
+ *      compacted scale and flows through this same logical path.
+ *
+ * `logical`/`timeMs` are null per the anchor's xloc mode (bar_index → logical,
+ * bar_time → timeMs). Pure aside from the passed scale — Node-testable.
+ */
+export function resolveAnchorX(
+  logical: number | null,
+  timeMs: number | null,
+  klines: readonly PineLabelBar[],
+  whitespaceSlots: readonly number[],
+  timeScale: {
+    timeToCoordinate?(time: number): number | null;
+    logicalToCoordinate(logical: number): number | null;
+  },
+): number | null {
+  if (timeMs !== null && timeMs !== undefined) {
+    const tx = timeScale.timeToCoordinate?.(timeMs / 1000);
+    if (typeof tx === "number" && Number.isFinite(tx)) return tx;
+  }
+  if (logical === null || logical === undefined) return null;
+  const chartLogical = remapLogicalToChart(
+    logical,
+    klines.map((k) => k.openTime),
+    whitespaceSlots,
+  );
+  const lx = timeScale.logicalToCoordinate(chartLogical);
+  return typeof lx === "number" && Number.isFinite(lx) ? lx : null;
+}
+
 
 /**
  * Resolve the label's yloc to a concrete anchor price.
@@ -588,27 +637,51 @@ function anchorFor(
  * it's `barIndexForTime` + the sub-bar fraction; before the first bar it's
  * negative (extrapolated by the series bucket); after the last bar it extends
  * with the same bucket spacing (future slots, like barIndexToTimeMs).
+ *
+ * Compaction-aware interpolation: the candle grid may have HOLES (missing
+ * minutes the broker never delivered). The at-or-before bar is then NOT one
+ * bucket behind the target timestamp, so a uniform-bucket fraction would be
+ * >= 1 and every in-hole anchor would snap onto the NEXT real bar (the hole's
+ * right edge). Instead the fraction is computed against the two REAL bounding
+ * candles — `(timeMs − t_left) / (t_right − t_left)` — matching the position
+ * LWC's timeToCoordinate produces for bar_time labels. Exact candle timestamps
+ * resolve to the exact slot (no bleed onto a neighbor).
  */
 function barIndexForTimeFractional(timeMs: number, klines: readonly PineLabelBar[]): number | null {
   const n = klines.length;
   if (n === 0) return null;
   const first = klines[0]!.openTime;
   const last = klines[n - 1]!.openTime;
+  // Nominal bucket — also the extrapolation step beyond the series edges.
   const bucketMs = n >= 2 ? Math.max(0, last - klines[n - 2]!.openTime) : 60_000;
   if (bucketMs <= 0) return null;
+
+  // Beyond the series edges → linear extrapolation with the nominal bucket
+  // (future session closes / pre-first-bar session starts).
+  if (timeMs < first) return (timeMs - first) / bucketMs;
+  if (timeMs > last) return (n - 1) + (timeMs - last) / bucketMs;
+
+  // Inside the series: exact slots first, then interpolate between the two
+  // REAL bounding candles so in-hole anchors stay at their true time
+  // position instead of collapsing onto the hole's right-edge bar.
   const base = barIndexForTime(timeMs, klines);
-  if (base >= 0 && base < n) {
-    const barStart = klines[base]!.openTime;
-    const frac = bucketMs > 0 ? (timeMs - barStart) / bucketMs : 0;
-    return base + Math.max(0, Math.min(0.999999, frac));
+  if (base < 0) return (timeMs - first) / bucketMs; // defensive (handled above)
+  if (base >= n - 1) {
+    // At the last bar exactly (timeMs <= last) → the base slot.
+    return klines[base]!.openTime === timeMs ? base : n - 1 + (timeMs - last) / bucketMs;
   }
-  if (timeMs < first) {
-    // Before the first bar — negative fractional index extrapolated by bucket.
-    return (timeMs - first) / bucketMs;
-  }
-  // After the last bar — continue from the last bar's index.
-  return (n - 1) + (timeMs - last) / bucketMs;
+  const left = klines[base]!.openTime;
+  if (left === timeMs) return base; // exact candle slot
+  const right = klines[base + 1]!.openTime;
+  if (!Number.isFinite(right) || right <= left) return base;
+  const frac = (timeMs - left) / (right - left);
+  // timeMs < right guarantees frac < 1; clamp only against NaN/epsilon drift.
+  if (!Number.isFinite(frac)) return base;
+  return base + Math.max(0, Math.min(0.999999999, frac));
 }
+
+
+
 
 interface LineSnapshotLike {
   id?: unknown;

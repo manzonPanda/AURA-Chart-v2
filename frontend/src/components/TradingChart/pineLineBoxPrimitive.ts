@@ -25,12 +25,13 @@
  */
 import type { SeriesAttachedParameter, Time } from "lightweight-charts";
 
-import type { PineBoxDrawing, PineLineDrawing } from "../../services/pineDrawings";
+import type { PineBoxDrawing, PineLabelBar, PineLineDrawing } from "../../services/pineDrawings";
 import {
   LABEL_SIZE_PX,
   PINE_DEFAULT_BOX_BORDER_COLOR,
   PINE_DEFAULT_LINE_COLOR,
   pineHexToRgba,
+  resolveAnchorX,
 } from "../../services/pineDrawings";
 
 /** Same structural canvas-target alias as the label primitive. */
@@ -99,6 +100,9 @@ export class PineLineBoxPrimitive {
   private boxes: PineBoxDrawing[] = [];
   private view: LineBoxPaneView | null = null;
   private needsRedraw = true;
+  /** Anchor-remap context: the engine candle series + whitespace slots. */
+  private anchorKlines: readonly PineLabelBar[] = [];
+  private anchorSlots: readonly number[] = [];
 
   attached(param: SeriesAttachedParameter<Time>): void {
     this.chart = param.chart as unknown as ChartLike;
@@ -120,6 +124,18 @@ export class PineLineBoxPrimitive {
   setDrawings(lines: readonly PineLineDrawing[], boxes: readonly PineBoxDrawing[]): void {
     this.lines = [...lines];
     this.boxes = [...boxes];
+    if (this.requestUpdate) this.requestUpdate();
+    else this.needsRedraw = true;
+  }
+
+  /**
+   * Anchor-remap context for the WHITESPACE time scale: the candle series the
+   * engine ran on (engine logical → chart logical) and the whitespace slots
+   * registered by WhitespaceBridge. Presentation-only — never affects data.
+   */
+  setAnchorContext(klines: readonly PineLabelBar[], slots: readonly number[]): void {
+    this.anchorKlines = klines;
+    this.anchorSlots = slots;
     if (this.requestUpdate) this.requestUpdate();
     else this.needsRedraw = true;
   }
@@ -147,8 +163,8 @@ export class PineLineBoxPrimitive {
 
         // ── boxes (fill first so lines paint on top) ───────────────────────
         for (const box of this.boxes) {
-          const left = xFor(box.leftLogical, box.leftMs, timeScale);
-          const right = xFor(box.rightLogical, box.rightMs, timeScale);
+          const left = xFor(box.leftLogical, box.leftMs, this.anchorKlines, this.anchorSlots, timeScale);
+          const right = xFor(box.rightLogical, box.rightMs, this.anchorKlines, this.anchorSlots, timeScale);
           if (left === null || right === null) continue;
           const top = series.priceToCoordinate(box.topPrice);
           const bottom = series.priceToCoordinate(box.bottomPrice);
@@ -204,8 +220,8 @@ export class PineLineBoxPrimitive {
 
         // ── lines ──────────────────────────────────────────────────────────
         for (const line of this.lines) {
-          let x1 = xFor(line.logical1, line.time1Ms, timeScale);
-          let x2 = xFor(line.logical2, line.time2Ms, timeScale);
+          let x1 = xFor(line.logical1, line.time1Ms, this.anchorKlines, this.anchorSlots, timeScale);
+          let x2 = xFor(line.logical2, line.time2Ms, this.anchorKlines, this.anchorSlots, timeScale);
           if (x1 === null || x2 === null) continue;
           const y1 = series.priceToCoordinate(line.price1);
           const y2 = series.priceToCoordinate(line.price2);
@@ -239,12 +255,18 @@ export class PineLineBoxPrimitive {
     },
   };
 }
-/** Resolve one anchor's x coordinate: logical (bar_index) or time (bar_time). */
-function xFor(logical: number | null, timeMs: number, timeScale: TimeScaleLike): number | null {
-  if (logical !== null) {
-    return safeCoord(timeScale.logicalToCoordinate(logical));
-  }
-  return timeScale.timeToCoordinate ? safeCoord(timeScale.timeToCoordinate(timeMs / 1000)) : null;
+/** Resolve one anchor's x coordinate across the WHITESPACE time scale —
+ *  exact time slot first, then the whitespace-remapped logical
+ *  (services/pineDrawings `resolveAnchorX`; engine-logical passthrough when
+ *  no whitespace is registered). */
+function xFor(
+  logical: number | null,
+  timeMs: number,
+  klines: readonly PineLabelBar[],
+  slots: readonly number[],
+  timeScale: TimeScaleLike,
+): number | null {
+  return resolveAnchorX(logical, timeMs, klines, slots, timeScale);
 }
 
 /** Draw a small arrowhead at (x1,y1) pointing AWAY from (x2,y2). */
@@ -295,9 +317,4 @@ function rgbaAtMost(color: string, fallback: string): string {
   if (!m) return fallback;
   const alpha = m[4] ? Math.min(0.16, Number(m[4])) : 0.1;
   return `rgba(${m[1]}, ${m[2]}, ${m[3]}, ${alpha})`;
-}
-
-/** Null-safe guard for a plain LWC coordinate (a bare number at runtime). */
-function safeCoord(coord: number | null | undefined): number | null {
-  return typeof coord === "number" && Number.isFinite(coord) ? coord : null;
 }

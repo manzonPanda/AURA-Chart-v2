@@ -6,12 +6,14 @@
  * Positioning contract (zoom / scroll / resize / history-safe):
  *
  * Like the Pine line/box primitive, this stores ONLY semantic chart-space
- * anchors from services/gapRegions.ts — a logical index the band is centered
- * on and its width in bar-units (the real missing duration). At every redraw
- * it converts those to screen coordinates through the LIVE time scale
- * (`logicalToCoordinate`, linear and valid for fractional logicals), so bands
- * follow their boundary candle no matter how the viewport changes. Full pane
- * height — a gap is a TIME region, not a price region.
+ * anchors from services/gapRegions.ts — the real missing interval
+ * (startMs/endMs) plus compaction-era logical fallbacks. With TIME-SCALE
+ * WHITESPACE registered (WhitespaceBridge), startMs (the first missing slot)
+ * and endMs (the first real candle after the outage) are both registered time
+ * points, so the band is placed by `timeToCoordinate` — spanning exactly the
+ * empty slots between the boundary candles. Without whitespace it falls back
+ * to the integer-logical geometry (LWC 5.2 returns 0 for fractional
+ * logicals). Full pane height — a gap is a TIME region, not a price region.
  *
  * Visual language: translucent slate fill + thin edges, zOrder "bottom" so
  * candles always paint on top; a subtle "DATA GAP" caption only when the band
@@ -25,6 +27,8 @@ import type { GapBand } from "../../services/gapRegions";
 type TimeScaleLike = {
   /** Linear logical→x conversion; null only while the time scale is empty. */
   logicalToCoordinate(logical: number): number | null;
+  /** Exact time→x conversion — non-null only for REGISTERED time points. */
+  timeToCoordinate?(time: number): number | null;
 };
 
 type ChartLike = {
@@ -129,15 +133,43 @@ export class GapRegionsPrimitive {
         const height = scope.mediaSize.height;
 
         for (const band of this.bands) {
-          const xc = timeScale.logicalToCoordinate(band.anchorIndex);
-          const xl = timeScale.logicalToCoordinate(band.anchorIndex - 0.5);
-          const xr = timeScale.logicalToCoordinate(band.anchorIndex + 0.5);
-          if (xc === null || xl === null || xr === null) continue;
-          const barW = Math.abs(xr - xl);
-          if (!Number.isFinite(barW) || barW <= 0) continue;
-          const w = Math.max(1, band.spanIndices * barW);
-          const ax = xc - w / 2;
-          const bx = xc + w / 2;
+          // TIMESTAMP-FIRST geometry: with whitespace registered, the first
+          // missing slot (startMs, e.g. 21:30) and the first real candle after
+          // the outage (endMs, e.g. 21:39) are BOTH registered time points, so
+          // timeToCoordinate resolves them exactly. Uniform bar spacing makes
+          // barW = (xe − xs) / spanIndices exact; the band spans the boundary
+          // between the 21:29|21:30 and 21:38|21:39 slots — both boundary
+          // candles stay OUTSIDE the band.
+          let ax: number | null = null;
+          let bx: number | null = null;
+          const xs = timeScale.timeToCoordinate?.(band.startMs / 1000) ?? null;
+          const xe = timeScale.timeToCoordinate?.(band.endMs / 1000) ?? null;
+          if (xs !== null && xe !== null && xe > xs && band.spanIndices > 0) {
+            const barW = (xe - xs) / band.spanIndices;
+            if (Number.isFinite(barW) && barW > 0) {
+              ax = xs - barW / 2;
+              bx = xe - barW / 2;
+            }
+          }
+          if (ax === null || bx === null || !Number.isFinite(ax) || !Number.isFinite(bx) || bx - ax < 1) {
+            // Fallback (whitespace not registered — e.g. replay cleared it):
+            // the compaction-era logical geometry. Center derived from the two
+            // INTEGER boundary logicals, never from a fractional
+            // `logicalToCoordinate(band.anchorIndex)`: LWC 5.2 returns 0 for
+            // every fractional logical (X.5 → 0) while integer logicals map
+            // correctly.
+            const xl = timeScale.logicalToCoordinate(band.anchorIndex - 0.5);
+            const xr = timeScale.logicalToCoordinate(band.anchorIndex + 0.5);
+            if (xl === null || xr === null) continue;
+            const xc0 = (xl + xr) / 2;
+            const barW = Math.abs(xr - xl);
+            if (!Number.isFinite(barW) || barW <= 0) continue;
+            const w0 = Math.max(1, band.spanIndices * barW);
+            ax = xc0 - w0 / 2;
+            bx = xc0 + w0 / 2;
+          }
+          const w = bx - ax;
+          const xc = (ax + bx) / 2;
           if (bx < -8 || ax > width + 8) continue; // fully off-viewport
 
           ctx.save();

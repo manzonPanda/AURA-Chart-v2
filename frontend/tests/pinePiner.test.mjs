@@ -318,6 +318,47 @@ plot(close)`;
   eng.dispose();
 });
 
+test("killzone: bar_time anchor inside a missing-candle gap resolves between the real bounding bars (never snaps to the next bar)", async () => {
+  // 120 × 1m bars with a 10-minute data hole: indexes 10..19 are removed, so
+  // the bar at index 10 becomes the 20-minute slot. A box anchored at the
+  // hole's middle (index 9 + 6 min) must interpolate against the REAL
+  // bounding candles (index 9 → index 10 spans 11 minutes), not the nominal
+  // 60s bucket — the bucket math would give >= 1 → clamp → snap to index 10.
+  const BASE = 1_704_097_200_000;
+  const anchorMs = BASE + 15 * 60_000; // middle of the removed window
+  const bars = makeBars(120, 0.01, BASE).filter(
+    (b) => b.ts < BASE + 10 * 60_000 || b.ts >= BASE + 20 * 60_000,
+  );
+  const offMs = bars[bars.length - 1].ts - anchorMs;
+  const eng = engineOver(bars);
+  const src = `//@version=6
+indicator("kz-hole", overlay=true)
+top = ta.highest(high, 10)
+bottom = ta.lowest(low, 10)
+if barstate.islast
+    box.new(time - ${offMs}, top, time, bottom, xloc=xloc.bar_time, border_color=color.orange, bgcolor=color.new(color.orange, 85))
+plot(close)`;
+  const run = await eng.computeScriptVisuals(SPEC(src));
+  assert.ok(run, "script must run");
+  const boxV = run.visuals.find((v) => v.type === "boxes");
+  assert.ok(boxV && boxV.boxes.length > 0, "in-hole box survives");
+  const bx = boxV.boxes[0];
+  assert.equal(bx.xloc, "bar_time");
+  assert.ok(
+    Math.abs(bx.leftMs - anchorMs) <= 60_000,
+    `leftMs ${bx.leftMs} ≈ hole anchor ${anchorMs} (real ms, no 1000× inflation)`,
+  );
+  // Expected: index 9 (the at-or-before bar) + 6/11 of the hole span → ≈ 9.54545.
+  // (real span from index 9 to the next bar is 11 minutes: 20 min slot − 9 min slot).
+  const expectedLogical = 9 + 6 / 11;
+  assert.ok(
+    typeof bx.leftLogical === "number" &&
+      Math.abs(bx.leftLogical - expectedLogical) < 1e-3,
+    `leftLogical ${bx.leftLogical} interpolates across the hole (expected ≈ ${expectedLogical}); it must NOT snap onto the next bar`,
+  );
+  eng.dispose();
+});
+
 test("drawing lifecycle: set_text/set_color mutate in place and delete removes the object", async () => {
   const bars = makeBars(20);
   const eng = engineOver(bars);
