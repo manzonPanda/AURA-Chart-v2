@@ -29,7 +29,13 @@ import type { CandleGap } from "../types/candle.ts";
 export interface GapBand {
   /** Real missing interval start (epoch ms) — kept for labels/debug. */
   startMs: number;
-  /** Real missing interval end, exclusive (epoch ms). */
+  /**
+   * The band's right AXIS ANCHOR (epoch ms): the first real candle at-or-after
+   * the missing interval — always a REGISTERED time point (a real candle),
+   * even when the outage abuts a calendar-closed stretch whose buckets are
+   * neither candles nor whitespace slots. Exclusive w.r.t. the band: the
+   * boundary candle stays outside the shaded region.
+   */
   endMs: number;
   /** Logical index the band is centered on (the 09:29|09:39 boundary). */
   anchorIndex: number;
@@ -67,6 +73,18 @@ export function mergeGapIntervals(
  * bands. A band needs real candles on BOTH sides to anchor between — gaps
  * touching the loaded window's edges predate collection (older pages) or
  * extend into the future, and are never shaded.
+ *
+ * The band's right edge is anchored on the FIRST REAL CANDLE at-or-after the
+ * outage — never on the raw interval end. When a gap abuts a calendar-closed
+ * stretch (e.g. the US gold daily break after 21:00 UTC), the interval end
+ * has neither a candle nor a whitespace slot — it is not registered on the
+ * chart's time scale and `timeToCoordinate` would return null for it,
+ * silently dropping the band into the compaction fallback (misaligned by
+ * half the outage on a whitespace axis). The axis step count from the first
+ * missing slot to that candle still equals `spanIndices` (the closed stretch
+ * compacts into exactly the one step the final missing bucket would have
+ * occupied), so the primitive's `barW = (xe − xs) / spanIndices` stays
+ * exactly one bar and both boundary candles stay OUTSIDE the band.
  *
  * @param candles   ascending candles (only `ts` is read — epoch ms).
  * @param gaps      derived gap intervals (epoch ms).
@@ -123,7 +141,12 @@ export function resolveGapBands(
     if (iL < 0 || iR < 0) continue;
     bands.push({
       startMs: g.startTime,
-      endMs: g.endTime,
+      // Right axis anchor = the FIRST REAL CANDLE at-or-after the outage (a
+      // time point always registered on the chart scale). `g.endTime` itself
+      // is unregistered when the gap abuts a calendar-closed stretch — see
+      // the doc block above. When a candle sits exactly at the gap end (the
+      // 9-minute case) this is byte-identical to the previous behavior.
+      endMs: candles[iR]!.ts,
       anchorIndex: iL + (iR - iL) / 2,
       spanIndices: (g.endTime - g.startTime) / bucketMs,
     });

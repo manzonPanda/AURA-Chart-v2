@@ -75,6 +75,29 @@ test("resolveGapBands: single missing minute anchors between its neighbors", () 
   assert.equal(bands[0].endMs, T0 + 39 * MIN);
 });
 
+test("resolveGapBands: a gap abutting a calendar-closed stretch anchors on the first real candle after the outage", () => {
+  // Real Sep-7 shape (Spot Gold): outage 02:30–05:00 PH, then the calendar's
+  // daily break (05:00–06:00 PH — never a candle, never a whitespace slot),
+  // first real candle 06:01 PH. The merged interval ends where the CLOSED
+  // stretch begins, so `endTime` itself is NOT registered on the chart's time
+  // scale — the band's right anchor must snap to the first real candle, or
+  // the primitive's timestamp-first geometry bails to the compaction fallback
+  // and the band lands half the outage LEFT of its true position.
+  const candles = [candleAt(T0 + 29 * MIN), candleAt(T0 + 61 * MIN)]; // 09:29, 10:01
+  // Merged outage [09:30, 10:00) — 30 expected-missing buckets; 10:00 starts
+  // the calendar-closed stretch (no gap interval, no candle, no slot).
+  const bands = resolveGapBands(candles, [gap(T0 + 30 * MIN, T0 + 60 * MIN)], 60);
+  assert.equal(bands.length, 1);
+  assert.equal(bands[0].startMs, T0 + 30 * MIN);
+  assert.equal(bands[0].endMs, T0 + 61 * MIN); // snapped to the 10:01 candle — registered
+  assert.equal(bands[0].anchorIndex, 0.5); // boundary between 09:29 (idx 0) and 10:01 (idx 1)
+  // Width keeps the missing-bucket count: on the whitespace axis the step
+  // count from the first slot (09:30) to the 10:01 candle is ALSO 30 (the
+  // closed stretch compacts into the one step 09:59|10:01), so the primitive
+  // derives barW = 1 bar exactly and both boundary candles stay outside.
+  assert.equal(bands[0].spanIndices, 30);
+});
+
 test("resolveGapBands: a multi-minute outage renders as ONE wide band", () => {
   const candles = [0, 29, 39, 40].map((i) => candleAt(T0 + i * MIN));
   const bands = resolveGapBands(
