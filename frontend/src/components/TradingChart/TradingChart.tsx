@@ -35,14 +35,14 @@ import {
   resolutionToBucketSec,
 } from "../../services/realtime";
 import { diag, iso, logUpdateBar, maybeLogChartBlock } from "../../services/diagnostics";
-import { planLiveUpdate, type LiveBar } from "../../services/liveCandle";
+import { candleCloseCountdown, planLiveUpdate, type LiveBar } from "../../services/liveCandle";
 import { defaultEmaSettings, type EmaSettings } from "../../config/emaSettings";
 import type { SmaSettings } from "../../config/smaSettings";
 import type { ImportedPineIndicator, PineRunStatus } from "../../services/pineImport";
 import type { PineSymbolMeta } from "../../services/pineEngineTypes";
 import type { Candle, CandleGap } from "../../types/candle";
 import { ActiveIndicatorsOverlay } from "./ActiveIndicatorsOverlay";
-import { CandleCountdown } from "./CandleCountdown";
+import { CandleCountdownPrimitive, type CountdownCandle } from "./CandleCountdownPrimitive";
 import { EmaBridge } from "./EmaBridge";
 import { InvertScaleBridge } from "./InvertScaleBridge";
 import { InvertDebugProbe } from "./invertDebug"; // ⚠ TEMP debug probe (?debugInvert)
@@ -112,6 +112,109 @@ function GapShading({
   useEffect(() => {
     primRef.current?.setBands(bands);
   }, [bands]);
+
+  return null;
+}
+
+/** Redraw cadence for the countdown pill. The VALUE is never taken from this
+ *  timer's ticks — every run recomputes `closesAt − Date.now()` from the
+ *  candle's ACTUAL bucket boundary (`candleCloseCountdown`), so a throttled
+ *  background tab can only delay a repaint, never skew the countdown. */
+const COUNTDOWN_REDRAW_MS = 250;
+
+/**
+ * CURRENT-CANDLE CLOSE-COUNTDOWN MARKER — a tiny "MM:SS" pill drawn
+ * immediately right of the forming candle, via a series primitive
+ * (CandleCountdownPrimitive). Presentation-only canvas text: nothing is
+ * rendered into the DOM, no candle data is created or modified.
+ *
+ * Candle authority (same as the OHLC strip): the LIVE forming candle from the
+ * WS stream (`liveCandle`) — never an invented bar. The countdown target is
+ * `time + bucketSec`: the REAL market bucket boundary reported by the backend
+ * stream, not a browser-accumulated duration. Every WS frame re-anchors it
+ * (1m → :00/:01/:02…, 3m → :00/:03/:06…) and every redraw re-derives
+ * `remaining = closesAt − now`. When the wall clock crosses the boundary
+ * before the next frame lands, the display HOLDS at 00:00.
+ *
+ * During a replay session the marker is HIDDEN: a countdown counts LIVE
+ * market time, which does not exist on a replaying (historical) chart (the
+ * same rule the old price-axis countdown followed). There is no "follow the
+ * replay candle" mode for a countdown — a historical candle's close is in the
+ * past, so "time remaining" would be meaningless.
+ */
+function CountdownMarker({
+  liveCandle,
+  bucketSec,
+  replayActive,
+}: {
+  liveCandle: RealtimeCandleMsg | null;
+  /** Selected timeframe bucket size in seconds (60 = 1m, 180 = 3m). */
+  bucketSec: number;
+  /** Replay owns the chart while a session is active — no countdown. */
+  replayActive: boolean;
+}): null {
+  const api = useChartApi();
+  const primRef = useRef<CandleCountdownPrimitive | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  // Attach once per chart controller (re-attaches after chart recreation).
+  useEffect(() => {
+    const controller = api.controller;
+    if (!controller) return;
+    const host = (controller as unknown as { getSeries?: () => unknown }).getSeries?.() as
+      | { attachPrimitive?: (p: unknown) => void }
+      | undefined
+      | null;
+    if (!host) return;
+    if (!primRef.current) primRef.current = new CandleCountdownPrimitive();
+    try {
+      host.attachPrimitive?.(primRef.current);
+    } catch {
+      /* older LWC without primitive support — marker degrades silently */
+    }
+  }, [api]);
+
+  // Live-only timer. The ticker just re-renders; the countdown itself is
+  // always re-derived from the candle's bucket boundary below.
+  useEffect(() => {
+    if (replayActive) return;
+    const id = window.setInterval(() => setNow(Date.now()), COUNTDOWN_REDRAW_MS);
+    const onVisibility = (): void => setNow(Date.now());
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [replayActive]);
+
+  // Build the pill ONLY from a forming live candle; its tsMs is the aligned
+  // bucket start so the anchor lands exactly on the candle's x slot.
+  const cd = liveCandle && Number.isFinite(liveCandle.time) && !replayActive
+    ? candleCloseCountdown(liveCandle, bucketSec, now)
+    : null;
+  const marker: CountdownCandle | null =
+    liveCandle && cd && Number.isFinite(liveCandle.close)
+      ? { tsMs: cd.bucketStartMs, close: liveCandle.close, label: cd.label }
+      : null;
+
+  // Feed the primitive ONLY when a displayed value actually changes — a new
+  // bucket (rollover), a fresh close (the pill's Y tracks the forming close),
+  // or the label rolling to the next second. Identity-only renders must not
+  // re-issue a repaint.
+  const feedRef = useRef<{ m: CountdownCandle } | null>(null);
+  useEffect(() => {
+    const prev = feedRef.current;
+    const same =
+      marker === null
+        ? prev === null
+        : prev !== null &&
+          marker.tsMs === prev.m.tsMs &&
+          marker.close === prev.m.close &&
+          marker.label === prev.m.label;
+    if (same) return;
+    feedRef.current = marker === null ? null : { m: marker };
+    primRef.current?.setMarker(marker);
+  }, [marker]);
 
   return null;
 }
@@ -1110,14 +1213,18 @@ export function TradingChart({
           <InvertScaleBridge invertScale={invertScale} />
           {/* ⚠ TEMP diagnostic probe — inert unless ?debugInvert / aura.debug.invert=1 */}
           <InvertDebugProbe invertScale={invertScale} />
-          {/* TradingView-style countdown ON the right price scale, pinned to
-              the forming candle's price level (native LWC price line; renders
-              no DOM). Stays attached to the live price on 1m and 3m.
-              Hidden while Replay is active: the countdown counts LIVE market
-              time, which does not exist on a replaying (historical) chart. */}
-          {!session && (
-            <CandleCountdown liveCandle={liveCandle} candles={candles} bucketSec={bucketSec} invertScale={invertScale} />
-          )}
+          {/* Compact MM:SS close-countdown pill beside the current/live candle
+              — a tiny time-remaining-to-close marker rendered by a series
+              primitive (no DOM, no fake candles). The countdown derives from
+              the candle's real bucket boundary (closesAt − now) and re-anchors
+              on every WS frame, so it rides rollovers automatically. Hidden
+              during Replay: a countdown counts LIVE market time, which does
+              not exist on a replaying (historical) chart. */}
+          <CountdownMarker
+            liveCandle={liveCandle}
+            bucketSec={bucketSec}
+            replayActive={session !== null}
+          />
           {/* EMA 9 / EMA 20 overlays — plain LWC line series on the price
               pane, recalculated from the SELECTED timeframe's candles with the
               forming candle's server truth (see services/ema.ts). While replay

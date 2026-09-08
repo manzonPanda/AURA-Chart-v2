@@ -141,9 +141,8 @@ test("InvertScaleBridge wiring: native priceScale option + series palette swap +
   assert.ok(!/createPriceLine/.test(code), "bridge must not create price lines");
 });
 
-test("direction UI routes through effectiveBullish (countdown pill, OHLC readout, probe)", () => {
+test("direction UI routes through effectiveBullish (OHLC readout, probe)", () => {
   for (const rel of [
-    "src/components/TradingChart/CandleCountdown.tsx",
     "src/components/TradingChart/OHLCReadout.tsx",
     "src/components/TradingChart/invertDebug.tsx",
   ]) {
@@ -153,6 +152,16 @@ test("direction UI routes through effectiveBullish (countdown pill, OHLC readout
       `${rel} must derive rendered direction via effectiveBullish`,
     );
   }
+});
+
+test("the close-time marker is deliberately NEUTRAL (native time pill, no direction color)", () => {
+  // The current-candle "MM:SS" countdown marker is a native chart time indicator
+  // — it must not pick a bullish/bearish color: no effectiveBullish, no theme
+  // up/down colors, no per-direction styling.
+  const code = stripComments(readSrc("src/components/TradingChart/CandleCountdownPrimitive.ts"));
+  assert.ok(!code.includes("effectiveBullish("), "time marker must not derive direction");
+  assert.ok(!/theme\.[a-z]+|effectiveCandleColors/.test(code), "time marker must not read theme colors");
+  assert.ok(!/upColor|downColor/.test(code), "time marker must not carry direction colors");
 });
 
 test("the App toggle flips only the boolean state — never the candle data", () => {
