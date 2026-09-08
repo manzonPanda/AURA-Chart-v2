@@ -49,6 +49,7 @@ import { InvertDebugProbe } from "./invertDebug"; // ⚠ TEMP debug probe (?debu
 import { MaStructurePanel } from "./MaStructurePanel";
 import { PineBridge } from "./PineBridge";
 import { SmaBridge } from "./SmaBridge";
+import { ScrollToLatestButton } from "./ScrollToLatestButton";
 import {
   REPLAY_SYMBOL,
   buildReplayManifest,
@@ -56,6 +57,7 @@ import {
   replayEngineOptions,
 } from "../../services/replay";
 import {
+  isAtLatestEdge,
   isNearHistoryEdge,
   resolveViewportAction,
   shouldShowLoadMore,
@@ -697,7 +699,7 @@ function ViewportBridge({
       try {
         range = ts.getVisibleRange();
         const lastSec = (latestCandle()?.ts ?? 0) / 1000;
-        followingRef.current = !range || !lastSec || range.to >= lastSec - bucketSec;
+        followingRef.current = isAtLatestEdge(range, lastSec, bucketSec);
       } catch {
         followingRef.current = true;
       }
@@ -926,6 +928,17 @@ export function TradingChart({
   // AURA adds only what the demo doesn't have: live-paint suppression,
   // cursor-scoped indicator inputs, candle-pick entry and a clean exit.
   const [chartApi, setChartApi] = useState<ChartViewApi | null>(null);
+
+  /** LWC chart handle (controller.getChart()), memoized for the ScrollToLatest button. */
+  const lwcChart = useMemo<ChartApi | null>(() => {
+    if (!chartApi?.controller) return null;
+    try {
+      return chartApi.controller.getChart() as unknown as ChartApi;
+    } catch {
+      return null;
+    }
+  }, [chartApi]);
+
   /**
    * Rendered width of the right price scale (px; 0 = not measurable yet). The
    * MA Structure overlay anchors LEFT of it so the panel never covers the price
@@ -1345,6 +1358,16 @@ export function TradingChart({
             </button>
           </div>
         )}
+        {/* Scroll-to-latest nav — TradingView-style arrow, bottom-right of the
+            plot. Hidden at the live edge and during Replay; clicking pans back
+            to the latest candle without reloading data (whitespace gaps intact). */}
+        <ScrollToLatestButton
+          chart={lwcChart}
+          latestTsSec={data.length > 0 ? data[data.length - 1].ts / 1000 : 0}
+          bucketSec={bucketSec}
+          replayActive={session !== null}
+          rightInset={priceScaleInset}
+        />
       </div>
     </div>
   );

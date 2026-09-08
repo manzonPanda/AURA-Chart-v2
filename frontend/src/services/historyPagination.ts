@@ -111,6 +111,40 @@ export function shouldShowLoadMore(opts: {
   return !opts.replayActive && opts.hasData && opts.nearEdge;
 }
 
+// ── Latest-edge detection ─────────────────────────────────────────────────────
+
+/**
+ * True when the visible time range is anchored AT the real-time edge (i.e. the
+ * user is looking at the most recent candle). `latestSec` MUST be the epoch
+ * second of the latest REAL candle (NOT a whitespace slot) so the result is
+ * invariant to data gaps/closures — the comparison is against the last candle's
+ * bucket start, not the rightmost pixel or a slot count.
+ *
+ * Mirrors the follow-edge check in TradingChart.tsx's ViewportBridge.onPan so
+ * the "Scroll to latest" button and the auto-follow behaviour can never disagree.
+ *
+ * `range.to` is LWC's visible-range right edge (epoch seconds). `bucketSec` is
+ * the active timeframe granularity. We tolerate being up to one bucket short
+ * of the latest candle (its own forming bucket hasn't fully closed yet).
+ */
+export function isAtLatestEdge(
+  range: { from: number; to: number } | null,
+  latestSec: number,
+  bucketSec: number,
+): boolean {
+  if (!range || !latestSec || !Number.isFinite(latestSec)) return true; // no range / no latest → treat as at edge
+  return range.to >= latestSec - bucketSec;
+}
+
+/** Control visibility for the "Scroll to latest" button. */
+export function shouldShowScrollToLatest(opts: {
+  atEdge: boolean;
+  replayActive: boolean;
+  hasCandles: boolean;
+}): boolean {
+  return !!opts.hasCandles && !opts.replayActive && !opts.atEdge;
+}
+
 // ── Viewport decision ────────────────────────────────────────────────────────
 
 export type ViewportAction = "restore" | "follow-latest" | "none";

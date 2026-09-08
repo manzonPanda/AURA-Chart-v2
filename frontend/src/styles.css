@@ -440,6 +440,20 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .history-more:disabled { cursor: default; opacity: 0.6; color: var(--accent); }
 .history-more--end { cursor: default; opacity: 0.55; color: var(--text); }
 
+/* Scroll-to-latest nav — TradingView-style arrow, bottom-right of the plot,
+   just above the time axis. Subtle: no text, icon-only, neutral slate. */
+.scroll-to-latest-btn {
+  position: absolute; right: 12px; bottom: 32px; z-index: 5;
+  width: 30px; height: 28px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--muted); background: rgba(11, 14, 20, 0.72);
+  border: 1px solid var(--border); border-radius: 8px;
+  cursor: pointer; opacity: 0.8; transition: opacity 0.15s ease, border-color 0.15s ease;
+}
+.scroll-to-latest-btn:hover { opacity: 1; border-color: var(--accent); color: var(--accent); }
+.scroll-to-latest-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+
 /* ── MA Structure panel (EMA9 • EMA20 • SMA20) ─────────────
    Compact trader-facing overlay, upper-right of the chart plot area. Anchored
    LEFT of the right price scale via a measured inset (see TradingChart's
