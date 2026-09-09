@@ -96,6 +96,29 @@ test("renderer: normalizeLine preserves Piner x1=10/x2=15 (no clamp to confirmat
   }
 });
 
+test("renderer: fractional logicals outside the loaded range resolve by the bar grid, never LWC's integer-guard 0", () => {
+  // Faithful LWC TimeScale: integer logicals → linear coord; FRACTIONAL
+  // logicals → 0 (Lightweight Charts' _internal_indexToCoordinate does
+  // `!isInteger(index) → return 0` — the far-LEFT/history edge). This is the
+  // exact condition that made an active killzone's START jump to the chart
+  // history when the session start fell before the loaded candles.
+  const cloud = { logicalToCoordinate: (logical) => (Number.isInteger(logical) ? 10 * (logical + 0.5) : 0) };
+  // Killzone start 4.5 candles before the first loaded bar (a common live
+  // state as the trailing window advances past the London open).
+  const leftLogical = -4.5;
+  const x = resolveAnchorX(leftLogical, null, CONTIG_KLINES, [], cloud);
+  // Correct extrapolation along the bar grid: coord(-5)→-45, coord(-4)→-35,
+  // so -4.5 → -40. It must NEVER be 0 (the history-edge degradation).
+  assert.ok(x !== null, "fractional out-of-range logical resolves (not skipped)");
+  assert.equal(x, -40, "left edge stays at its true time position (−40), NOT 0");
+  // In-range fractional (an in-gap interpolation) also resolves via the grid.
+  const x2 = resolveAnchorX(10.5, null, CONTIG_KLINES, [], cloud);
+  // coord(10.5) = 10*(10.5+0.5) = 110 — the exact bar-grid position.
+  assert.equal(x2, 110, "in-range fractional interpolates along the grid (10.5 → 110)");
+  // A null logical still yields null (shape preserved).
+  assert.equal(resolveAnchorX(null, null, CONTIG_KLINES, [], cloud), null);
+});
+
 test("renderer: line endpoints map to candle 10 → candle 15 across the time scale (incl. whitespace)", () => {
   // Contiguous: span is exactly 5 candles (no clamping).
   {

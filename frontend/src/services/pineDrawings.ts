@@ -277,8 +277,52 @@ export function resolveAnchorX(
     klines.map((k) => k.openTime),
     whitespaceSlots,
   );
-  const lx = timeScale.logicalToCoordinate(chartLogical);
-  return typeof lx === "number" && Number.isFinite(lx) ? lx : null;
+  if (Number.isInteger(chartLogical)) {
+    // Fast path: integer (bar-aligned) logicals go through LWC directly.
+    const lx = timeScale.logicalToCoordinate(chartLogical);
+    return typeof lx === "number" && Number.isFinite(lx) ? lx : null;
+  }
+  // LWC's _internal_indexToCoordinate uses `!isInteger(index) → return 0`,
+  // silently treating a fractional logical as the far-left edge of the chart.
+  // A fractional chartLogical means a time anchor that the time scale cannot
+  // resolve exactly (a killzone/session start before the first loaded bar, or
+  // an in-gap interpolation on a compacted scale): LWC would degrade it to
+  // coordinate 0 — the box's START would jump to the chart/history edge.
+  // Derive the coordinate with the SAME linear bar-spacing formula LWC uses
+  // for integer indexes (baseIndex + rightOffset − index), so fractionals
+  // extrapolate to their true time position instead of collapsing to 0.
+  return fractionalLogicalToCoordinate(chartLogical, timeScale);
+}
+
+/**
+ * Linear bar-slot → screen-x for a FRACTIONAL logical index, using the exact
+ * same formula Lightweight Charts' TimeScale applies to integer indexes:
+ *
+ *   x = width − (baseIndex + rightOffset − index + 0.5) · barSpacing − 1
+ *
+ * LWC itself refuses non-integer inputs (`!isInteger → return 0` — the chart's
+ * left edge), which would corrupt out-of-range time anchors (killzone starts
+ * before the loaded history) into coordinate 0. This clone keeps the position
+ * correct irrespective of the exact LWC version's integer guard.
+ */
+function fractionalLogicalToCoordinate(
+  chartLogical: number,
+  timeScale: {
+    logicalToCoordinate(logical: number): number | null;
+  },
+): number | null {
+  // Probe the slope via two INTEGER neighbors on the real scale, then extend
+  // the line to the fractional index. The neighbor coords come from LWC's own
+  // integer path (baseIndex + rightOffset − index), so the result matches the
+  // chart's bar grid exactly.
+  const lo = Math.floor(chartLogical);
+  const a = timeScale.logicalToCoordinate(lo);
+  const b = timeScale.logicalToCoordinate(lo + 1);
+  if (typeof a !== "number" || typeof b !== "number" || !Number.isFinite(a) || !Number.isFinite(b)) {
+    return null;
+  }
+  const frac = chartLogical - lo;
+  return a + (b - a) * frac;
 }
 
 
