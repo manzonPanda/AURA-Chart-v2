@@ -25,14 +25,14 @@
  */
 import type { SeriesAttachedParameter, Time } from "lightweight-charts";
 
-import type { PineBoxDrawing, PineLabelBar, PineLineDrawing } from "../../services/pineDrawings";
+import type { PineBoxDrawing, PineLabelBar, PineLineDrawing } from "../../services/pineDrawings.ts";
 import {
   LABEL_SIZE_PX,
   PINE_DEFAULT_BOX_BORDER_COLOR,
   PINE_DEFAULT_LINE_COLOR,
   pineHexToRgba,
   resolveAnchorX,
-} from "../../services/pineDrawings";
+} from "../../services/pineDrawings.ts";
 
 /** Same structural canvas-target alias as the label primitive. */
 type DrawCanvasTarget = {

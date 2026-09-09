@@ -536,6 +536,12 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
       const overlayHost = candleSeries ?? ensureCarrier(chart, st, barsNow);
       if (overlayHost) {
         const prim = ensureOverlayDrawingPrimitive(overlayHost, st);
+        // Anchor-remap context MUST be set on the overlay primitive too —
+        // otherwise its `anchorKlines`/`anchorSlots` stay empty and every
+        // whitespace-remapped logical anchor falls back to the RAW engine
+        // index (shifted left by the inserted slots). Same contract as the
+        // pane path above and both label primitives.
+        prim.setAnchorContext(anchorKlines, wsSlots);
         prim.setDrawings(overlayLines, overlayBoxes);
         paintedAny = true;
       }

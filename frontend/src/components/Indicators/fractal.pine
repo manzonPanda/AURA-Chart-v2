@@ -1,0 +1,178 @@
+//@version=6
+indicator("Williams Fractals", shorttitle="Fractals", format=format.price, precision=0, overlay=true, max_lines_count=500)
+// Define "n" as the number of periods and keep a minimum value of 2 for error handling.
+n = input.int(title="Periods", defval=2, minval=2)
+extension = input.int(title="Extension", defval=5, minval=1, maxval=5)
+
+
+// UpFractal
+bool upflagDownFrontier = true
+bool upflagUpFrontier0 = true
+bool upflagUpFrontier1 = true
+bool upflagUpFrontier2 = true
+bool upflagUpFrontier3 = true
+bool upflagUpFrontier4 = true
+
+for i = 1 to n
+    upflagDownFrontier := upflagDownFrontier and (high[n-i] < high[n])
+    upflagUpFrontier0 := upflagUpFrontier0 and (high[n+i] < high[n])
+    upflagUpFrontier1 := upflagUpFrontier1 and (high[n+1] <= high[n] and high[n+i + 1] < high[n])
+    upflagUpFrontier2 := upflagUpFrontier2 and (high[n+1] <= high[n] and high[n+2] <= high[n] and high[n+i + 2] < high[n])
+    upflagUpFrontier3 := upflagUpFrontier3 and (high[n+1] <= high[n] and high[n+2] <= high[n] and high[n+3] <= high[n] and high[n+i + 3] < high[n])
+    upflagUpFrontier4 := upflagUpFrontier4 and (high[n+1] <= high[n] and high[n+2] <= high[n] and high[n+3] <= high[n] and high[n+4] <= high[n] and high[n+i + 4] < high[n])
+flagUpFrontier = upflagUpFrontier0 or upflagUpFrontier1 or upflagUpFrontier2 or upflagUpFrontier3 or upflagUpFrontier4
+
+upFractal = (upflagDownFrontier and flagUpFrontier)
+
+
+// downFractal
+bool downflagDownFrontier = true
+bool downflagUpFrontier0 = true
+bool downflagUpFrontier1 = true
+bool downflagUpFrontier2 = true
+bool downflagUpFrontier3 = true
+bool downflagUpFrontier4 = true
+
+for i = 1 to n
+    downflagDownFrontier := downflagDownFrontier and (low[n-i] > low[n])
+    downflagUpFrontier0 := downflagUpFrontier0 and (low[n+i] > low[n])
+    downflagUpFrontier1 := downflagUpFrontier1 and (low[n+1] >= low[n] and low[n+i + 1] > low[n])
+    downflagUpFrontier2 := downflagUpFrontier2 and (low[n+1] >= low[n] and low[n+2] >= low[n] and low[n+i + 2] > low[n])
+    downflagUpFrontier3 := downflagUpFrontier3 and (low[n+1] >= low[n] and low[n+2] >= low[n] and low[n+3] >= low[n] and low[n+i + 3] > low[n])
+    downflagUpFrontier4 := downflagUpFrontier4 and (low[n+1] >= low[n] and low[n+2] >= low[n] and low[n+3] >= low[n] and low[n+4] >= low[n] and low[n+i + 4] > low[n])
+flagDownFrontier = downflagUpFrontier0 or downflagUpFrontier1 or downflagUpFrontier2 or downflagUpFrontier3 or downflagUpFrontier4
+
+downFractal = (downflagDownFrontier and flagDownFrontier)
+
+// ── Temporary swing levels: CLOSE breaks the level, else pivot + extension ──
+// An UP fractal draws resistance at high[n]; a DOWN fractal draws support at
+// low[n]. Each level lives from its PIVOT (bar_index - n — never the confirmation
+// bar) for at most `extension` bars. Endpoint = first qualifying CLOSE after the
+// pivot (up: close >= level, wick touches do NOT count; down: close <= level),
+// else pivot + extension. Every level owns its line object and lifetime, so
+// overlapping levels stay independent. Historical correctness is structural:
+// Pine runs bar-by-bar, so each past fractal grew/froze exactly like a live one —
+// endpoints are final coordinates, never drawn-then-hidden.
+UP_COLOR = #009688
+DN_COLOR = #F44336
+
+var array<line>  upLines = array.new<line>()
+var array<float> upLevel = array.new<float>()
+var array<int>   upX1    = array.new<int>()
+var array<line>  dnLines = array.new<line>()
+var array<float> dnLevel = array.new<float>()
+var array<int>   dnX1    = array.new<int>()
+// Finished (frozen) levels awaiting retirement. Live levels are NEVER stored
+// here — only lines whose x2 is final. A trim block at the end of the script
+// keeps this FIFO under MAX_DONE so the pool never hits max_lines_count.
+var array<line>  doneLines = array.new<line>()
+
+// ── 1. Maintain levels opened on earlier bars (BEFORE registering new ones,
+// so a fresh line is never judged on its own confirmation bar) ──
+if array.size(upLines) > 0
+    ai = array.size(upLines) - 1
+    while ai >= 0
+        ln = array.get(upLines, ai)
+        lv = array.get(upLevel, ai)
+        x1 = array.get(upX1, ai)
+        maxX = x1 + extension
+        if close >= lv
+            line.set_x2(ln, bar_index)
+            array.remove(upLines, ai)
+            array.remove(upLevel, ai)
+            array.remove(upX1, ai)
+            array.push(doneLines, ln)
+        else if bar_index >= maxX
+            line.set_x2(ln, maxX)
+            array.remove(upLines, ai)
+            array.remove(upLevel, ai)
+            array.remove(upX1, ai)
+            array.push(doneLines, ln)
+        else
+            line.set_x2(ln, bar_index)
+        ai -= 1
+
+if array.size(dnLines) > 0
+    aj = array.size(dnLines) - 1
+    while aj >= 0
+        dln = array.get(dnLines, aj)
+        dlv = array.get(dnLevel, aj)
+        dx1 = array.get(dnX1, aj)
+        dmaxX = dx1 + extension
+        if close <= dlv
+            line.set_x2(dln, bar_index)
+            array.remove(dnLines, aj)
+            array.remove(dnLevel, aj)
+            array.remove(dnX1, aj)
+            array.push(doneLines, dln)
+        else if bar_index >= dmaxX
+            line.set_x2(dln, dmaxX)
+            array.remove(dnLines, aj)
+            array.remove(dnLevel, aj)
+            array.remove(dnX1, aj)
+            array.push(doneLines, dln)
+        else
+            line.set_x2(dln, bar_index)
+        aj -= 1
+
+// ── 2. Register newly confirmed fractals ──
+// Offsets 1..math.min(extension, n) sit inside the confirmation window, so their
+// closes are already known: scan them for a break that predates confirmation.
+// (Unreachable under the strict newer-side frontier — those bars can never close
+// through the level — but explicit keeps the rule total, including n > extension
+// where the entire lifetime is already history when the fractal confirms.)
+if upFractal
+    pivX = bar_index - n
+    lvl = high[n]
+    known = math.min(extension, n)
+    hitX = int(na)
+    k = 1
+    while k <= known
+        // Offset k from the pivot = history index n - k (NOT k - 1: k=1 is the
+        // bar right after the pivot = close[n-1]; k=n is this bar = close[0]).
+        if close[n - k] >= lvl
+            hitX := pivX + k
+            break
+        k += 1
+    // x2=bar_index is never future (confirmation bar). Frozen cases rewind x2
+    // to cutoff (always <= bar_index here); live cases keep growing via §1.
+    nl = line.new(pivX, lvl, bar_index, lvl, xloc=xloc.bar_index, extend=extend.none, color=UP_COLOR, style=line.style_solid, width=2)
+    if na(hitX) and bar_index < pivX + extension
+        array.push(upLines, nl)
+        array.push(upLevel, lvl)
+        array.push(upX1, pivX)
+    else
+        line.set_x2(nl, na(hitX) ? pivX + extension : hitX)
+        array.push(doneLines, nl)
+
+if downFractal
+    pivXd = bar_index - n
+    lvld = low[n]
+    knownd = math.min(extension, n)
+    hitXd = int(na)
+    kd = 1
+    while kd <= knownd
+        // Offset kd from the pivot = history index n - kd (see up-scan note).
+        if close[n - kd] <= lvld
+            hitXd := pivXd + kd
+            break
+        kd += 1
+    nld = line.new(pivXd, lvld, bar_index, lvld, xloc=xloc.bar_index, extend=extend.none, color=DN_COLOR, style=line.style_solid, width=2)
+    if na(hitXd) and bar_index < pivXd + extension
+        array.push(dnLines, nld)
+        array.push(dnLevel, lvld)
+        array.push(dnX1, pivXd)
+    else
+        line.set_x2(nld, na(hitXd) ? pivXd + extension : hitXd)
+        array.push(doneLines, nld)
+
+// ── 3. Bounded retention: finished levels are temporary swing zones (lifetime
+// ≤ extension), but their line objects lived forever — every historical fractal
+// kept one, so real-length histories blew past max_lines_count=500 and the pool
+// silently evicted the OLDEST drawings (measured: 749 lines on 3000 dense bars,
+// only the newest 500 survived). Levels the user expected to see vanished —
+// presenting as "lines not extending". Retire the oldest FINISHED lines first
+// (FIFO via array.shift); live (still-growing) lines are never touched, and the
+// 400 cap leaves headroom under max_lines_count=500 so no live level is evicted.
+while array.size(doneLines) > 400
+    line.delete(array.shift(doneLines))
