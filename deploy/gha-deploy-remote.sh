@@ -17,7 +17,9 @@
 #      overwritten from GitHub (they are untracked/gitignored).
 #   4. delegate to the repo's own pipeline: deploy/redeploy.sh <mode> <old>
 #      <new> — diff-driven npm ci / builds / systemd restart / health gate.
-#      Idempotent: an up-to-date rerun in `auto` mode is a no-op + health gate.
+#      Rerun-safe: redeploy.sh's frontend freshness state (deploy/.last-
+#      frontend-sha) skips an already-built frontend; a no-op diff exits
+#      "nothing to deploy".
 #   5. final gate: service active, loopback /api/health returns ok:true, and
 #      HEAD == origin/main.
 # ═════════════════════════════════════════════════════════════════════════════
@@ -49,13 +51,15 @@ echo "── resetting to origin/main ($remote_head) ──"
 git reset --hard origin/main || fail "git reset --hard origin/main"
 [ "$(git rev-parse HEAD)" = "$remote_head" ] || fail "HEAD did not land on origin/main"
 
-# Up-to-date rerun in auto mode → no-op + health gate only. (--full always runs.)
-if [ "$MODE" != "--full" ] && [ -n "$NEW_SHA" ] && [ "$(git rev-parse HEAD)" = "$NEW_SHA" ]; then
-  echo "✅ already at origin/main — nothing to deploy (rerun-safe)"
-else
-  echo "── deploy pipeline (deploy/redeploy.sh $MODE) ──"
-  bash deploy/redeploy.sh "$MODE" "$OLD_SHA" "$NEW_SHA" || fail "deploy/redeploy.sh $MODE"
-fi
+# ALWAYS delegate — deploy/redeploy.sh is the single source of deployment
+# truth and is rerun-safe by construction: deploy/.last-frontend-sha skips an
+# already-built frontend, and a no-op diff exits "nothing to deploy". Do NOT
+# gate on HEAD == NEW_SHA here: after `git reset --hard origin/main` that
+# equality is true for EVERY push-triggered run (it proves source sync, NOT
+# deployment completion) — gating on it made CI report success while nothing
+# was built or restarted.
+echo "── deploy pipeline (deploy/redeploy.sh $MODE) ──"
+bash deploy/redeploy.sh "$MODE" "$OLD_SHA" "$NEW_SHA" || fail "deploy/redeploy.sh $MODE"
 
 # ── final deployment health gate ─────────────────────────────────────────────
 systemctl is-active --quiet "$SERVICE" || fail "$SERVICE is not active after deploy (journalctl -u $SERVICE -n 50)"
