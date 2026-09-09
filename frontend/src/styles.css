@@ -355,8 +355,6 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .toolbar-group { display: flex; align-items: center; gap: 4px; padding-left: 9px; border-left: 1px solid var(--border); }
 .toolbar-group--actions { gap: 4px; }
 .meta-chip { font-size: 0.72rem; color: var(--muted); background: var(--panel-2); border: 1px solid var(--border); padding: 4px 8px; border-radius: 6px; }
-.auto-toggle { display: flex; align-items: center; gap: 4px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 7px; background: rgba(4, 9, 15, 0.36); font-size: 0.68rem; color: var(--muted); cursor: pointer; white-space: nowrap; }
-.auto-toggle input { accent-color: var(--accent); margin: 0; }
 .refresh-btn {
   border: 1px solid rgba(71, 199, 255, 0.38); background: var(--accent-soft); color: var(--accent);
   border-radius: 7px; padding: 5px 10px; cursor: pointer; font-weight: 700; font-size: 0.68rem;
@@ -364,21 +362,6 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 }
 .refresh-btn:hover:not(:disabled) { border-color: var(--accent); background: rgba(71, 199, 255, 0.2); transform: translateY(-1px); }
 .refresh-btn:disabled { opacity: 0.6; cursor: default; }
-
-/* Invert Scale — visual-only price-scale inversion toggle (TradingView-style).
-   OFF matches the muted toolbar buttons; ON gets the accent treatment so the
-   active state is obvious at a glance. */
-.invert-toggle {
-  border: 1px solid var(--border); background: var(--panel-2); color: var(--muted);
-  border-radius: 6px; padding: 4px 9px; cursor: pointer; font-weight: 600; font-size: 0.7rem;
-  font-variant-numeric: tabular-nums; white-space: nowrap;
-  transition: color 0.15s, border-color 0.15s, background 0.15s;
-}
-.invert-toggle:hover { color: var(--text); border-color: var(--accent); }
-.invert-toggle.on {
-  color: #06121b; background: var(--accent); border-color: var(--accent);
-  box-shadow: 0 0 10px rgba(56, 189, 248, 0.35);
-}
 
 /* ── Stream status chip ─────────────────────────────────────── */
 .stream-chip {
@@ -452,6 +435,30 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 }
 .scroll-to-latest-btn:hover { opacity: 1; border-color: var(--accent); color: var(--accent); }
 .scroll-to-latest-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Chart context menu (right-click on the plot) — compact TradingView-style
+   chart menu, rendered inside .chart-canvas-wrap (positions with the chart).
+   Same quiet panel tone as the other chart overlays; subtle border + small
+   shadow. z-index 60 clears every chart overlay (chart chips 5, replay dock
+   30, EMA-control dropdown 45) while staying under the modal backdrop (100). */
+.chart-context-menu {
+  position: absolute; z-index: 60;
+  min-width: 190px; padding: 4px;
+  background: rgba(11, 14, 20, 0.94);
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  user-select: none;
+}
+.chart-context-menu-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  width: 100%; padding: 6px 10px; font-size: 0.72rem; line-height: 1.2;
+  color: var(--text); background: transparent;
+  border: 0; border-radius: 5px; cursor: pointer; text-align: left;
+}
+.chart-context-menu-item:hover,
+.chart-context-menu-item:focus-visible { background: var(--accent-soft); color: var(--accent); outline: none; }
+.chart-context-menu-check { font-size: 0.72rem; color: var(--accent); visibility: hidden; }
+.chart-context-menu-item[aria-checked="true"] .chart-context-menu-check { visibility: visible; }
 
 
 /* ── MA Structure panel (EMA9 • EMA20 • SMA20) ─────────────

@@ -251,6 +251,19 @@ export default function App() {
     saveChartSettings(chartSettings);
   }, [chartSettings]);
 
+  // ── Shared chart-control actions ────────────────────────────────────────────
+  // The chart's right-click context menu calls THESE — the old header "Auto" /
+  // "Invert" buttons were removed, so the context menu is their single home.
+  // One implementation per action, one state source, no duplicates.
+  /** Invert Scale toggle: the single mutation of the persisted display
+      setting; the chart context menu invokes it. */
+  const toggleInvertScale = useCallback(() => {
+    setChartSettings((prev) => ({ ...prev, invertScale: !prev.invertScale }));
+  }, []);
+  /** Auto (auto-follow) toggle: flips the `autoFollow` state consumed by the
+      chart's ViewportBridge — the context menu invokes it. */
+  const toggleAutoFollow = useCallback(() => setAutoFollow((prev) => !prev), []);
+
   // ── EMA Reversal Alerts ───────────────────────────────────────────────────
   // Initial config + state from the backend (the engine is the source of truth).
   useEffect(() => {
@@ -740,33 +753,6 @@ export default function App() {
             />
           </div>
           <div className="toolbar-group toolbar-group--actions" aria-label="Chart controls">
-            <label className="auto-toggle" title="Auto-follow the latest candle; turn off to pan freely">
-            <input
-              type="checkbox"
-              checked={autoFollow}
-              onChange={(e) => setAutoFollow(e.target.checked)}
-            />
-            Auto
-          </label>
-          {/* Invert Scale — visual-only price-scale inversion (TradingView-style).
-              Native LWC `invertScale` on the main right scale via
-              InvertScaleBridge (TradingChart). Pure viewport transform —
-              candle data, crosshair values and the time axis are untouched. */}
-          <button
-            type="button"
-            className={`invert-toggle ${chartSettings.invertScale ? "on" : ""}`}
-            aria-pressed={chartSettings.invertScale}
-            title={
-              chartSettings.invertScale
-                ? "Inverted: higher prices appear lower and bull/bear candle colors are swapped (click to restore)"
-                : "Click to invert the price scale — higher prices will appear lower and candle colors will swap"
-            }
-            onClick={() =>
-              setChartSettings((prev) => ({ ...prev, invertScale: !prev.invertScale }))
-            }
-          >
-            Invert: {chartSettings.invertScale ? "ON" : "OFF"}
-          </button>
           <button
             className="refresh-btn"
             onClick={() => {
@@ -807,6 +793,8 @@ export default function App() {
           pineSymbol={pineSymbol}
           onPineStatus={handlePineStatus}
           invertScale={chartSettings.invertScale}
+          onToggleInvertScale={toggleInvertScale}
+          onToggleAutoFollow={toggleAutoFollow}
           replaySymbol={selectedEpic || undefined}
           onLoadMoreHistory={loadMoreHistory}
           historyStatus={historyStatus}

@@ -43,6 +43,7 @@ import type { PineSymbolMeta } from "../../services/pineEngineTypes";
 import type { Candle, CandleGap } from "../../types/candle";
 import { ActiveIndicatorsOverlay } from "./ActiveIndicatorsOverlay";
 import { CandleCountdownPrimitive, type CountdownCandle } from "./CandleCountdownPrimitive";
+import { ChartContextMenu } from "./ChartContextMenu";
 import { EmaBridge } from "./EmaBridge";
 import { InvertScaleBridge } from "./InvertScaleBridge";
 import { InvertDebugProbe } from "./invertDebug"; // ⚠ TEMP debug probe (?debugInvert)
@@ -251,6 +252,14 @@ interface Props {
    * in App via chartSettings.ts.
    */
   invertScale?: boolean;
+  /**
+   * Right-click context-menu actions — REUSE App's existing controls (no
+   * duplicated state): the chart's context menu reflects `invertScale` /
+   * `autoFollow` and these callbacks invoke the exact handlers the header
+   * controls use.
+   */
+  onToggleInvertScale?: () => void;
+  onToggleAutoFollow?: () => void;
   /** Instrument scope key (used to scope a replay session). */
   replaySymbol?: string;
   /**
@@ -791,6 +800,8 @@ export function TradingChart({
   pineSymbol = null,
   onPineStatus,
   invertScale = false,
+  onToggleInvertScale,
+  onToggleAutoFollow,
   replaySymbol,
   onLoadMoreHistory,
   historyStatus,
@@ -945,6 +956,9 @@ export function TradingChart({
    * axis — re-measured on chart resize / timeframe switch via the effect below.
    */
   const [priceScaleInset, setPriceScaleInset] = useState(0);
+  /** Chart container (`.chart-canvas-wrap`) — the right-click context menu's
+      positioning context and right-click area (see ChartContextMenu). */
+  const chartWrapRef = useRef<HTMLDivElement | null>(null);
   const [session, setSession] = useState<{
     rc: ReplayController;
     manifest: Parameters<ReplayController["load"]>[0];
@@ -1198,7 +1212,7 @@ export function TradingChart({
           active, CandleKit's native ReplayControls + Exit render as a floating
           dock bottom-center INSIDE the plot area (.replay-dock), so the header
           chrome and the right price scale are never covered. */}
-      <div className="chart-canvas-wrap">
+      <div className="chart-canvas-wrap" ref={chartWrapRef}>
         <ChartView
           data={session ? NO_BARS : data}
           seriesType="candlestick"
@@ -1367,6 +1381,19 @@ export function TradingChart({
           bucketSec={bucketSec}
           replayActive={session !== null}
           rightInset={priceScaleInset}
+        />
+        {/* Right-click context menu — chart UI overlay (presentation-only).
+            Reflects App's EXISTING Invert Scale / Auto state and invokes the
+            SAME actions the header controls use; it never touches candle data,
+            Pine, whitespace or replay state. scopeKey = instrument | timeframe
+            | replay: a change closes the menu so toggles never go stale. */}
+        <ChartContextMenu
+          containerRef={chartWrapRef}
+          invertScale={invertScale}
+          autoFollow={autoFollow}
+          onToggleInvertScale={onToggleInvertScale}
+          onToggleAutoFollow={onToggleAutoFollow}
+          scopeKey={`${replaySymbol ?? ""}|${bucketSec}|${session ? "replay" : "live"}`}
         />
       </div>
     </div>
