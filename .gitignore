@@ -26,3 +26,10 @@ Thumbs.db
 
 # deploy hook runtime log (also covered by *.log — kept explicit for discoverability)
 .last-deploy.log
+
+# frontend deploy freshness state + atomic-swap staging dirs (VM-local only —
+# .last-frontend-sha records the commit the live dist was built from; dist.next/
+# dist.prev/ are the build/swap staging dirs used by deploy/redeploy.sh)
+deploy/.last-frontend-sha
+frontend/dist.next/
+frontend/dist.prev/
