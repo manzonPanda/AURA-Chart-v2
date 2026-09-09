@@ -31,6 +31,8 @@ import {
   type PineSymbolMeta,
 } from "./pineEngineTypes.ts";
 import { createPineEngine } from "./pineEngineFactory.ts";
+import { isPriceSource } from "./priceSource.ts";
+import { sanitizeStyleOverrides, type PineStyleOverrides } from "./pineStyle.ts";
 
 export type { PineSymbolMeta };
 
@@ -88,6 +90,10 @@ export interface PineInputMetaSnapshot {
   step?: number;
   /** Enum choices for `input.string(..., options=[...])`. */
   options?: string[];
+  /** TradingView-style group header (`input.*(..., group="...")`). */
+  group?: string;
+  /** TradingView-style hover hint (`input.*(..., tooltip="...")`). */
+  tooltip?: string;
 }
 
 /** Snapshot of one renderable output discovered at compile time. */
@@ -137,6 +143,12 @@ export interface ImportedPineIndicator {
   inputMeta: PineInputMetaSnapshot[];
   /** Plot metadata snapshot captured at compile time (drives series creation). */
   plotMeta: PinePlotMetaSnapshot[];
+  /**
+   * Style overrides (the settings modal's Style tab) keyed by plot key —
+   * render-level color/width/visibility applied by PineBridge. Absent = the
+   * script's own styling.
+   */
+  style?: PineStyleOverrides;
   /** Import-time diagnostics (what the script uses vs what AURA renders). */
   diagnostics?: PineImportDiagnostics;
   createdAt: number;
@@ -321,7 +333,12 @@ export function friendlyPineError(raw: string): string {
 
 const HEX_COLOR_RE = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
 
-const EDITABLE_INPUT_TYPES = new Set(["int", "float", "bool", "string", "color"]);
+// `source` joins the editable set: the Piner engine (0.13.0, probed) applies
+// host overrides for source inputs when given an OHLC leaf-name string
+// ("open" | "high" | "low" | "close" | "hl2" | "hlc3" | "ohlc4") — the exact
+// concept of AURA's PRICE_SOURCES. timeframe/symbol/session/enum/etc. remain
+// read-only: overriding them with a CHANGED value crashes the engine.
+const EDITABLE_INPUT_TYPES = new Set(["int", "float", "bool", "string", "color", "source"]);
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -356,16 +373,20 @@ export function sanitizeInputMeta(raw: unknown): PineInputMetaSnapshot | null {
     const opts = raw.options.filter((o): o is string => typeof o === "string").slice(0, 32);
     if (opts.length > 0) meta.options = opts;
   }
+  if (typeof raw.group === "string" && raw.group.trim().length > 0) meta.group = raw.group.trim().slice(0, 60);
+  if (typeof raw.tooltip === "string" && raw.tooltip.trim().length > 0) meta.tooltip = raw.tooltip.trim().slice(0, 300);
   return meta;
 }
 
 /**
  * Map Piner's `InputDecl` (from `compile().metadata.inputs`) to AURA's
- * `PineInputMetaSnapshot`. Piner's `kind` values that AURA's settings UI
- * cannot edit (source, price, timeframe, symbol, session, time, text_area,
- * enum) fall through to the read-only `defval` path.
+ * `PineInputMetaSnapshot`. Piner's `kind` values that the engine cannot
+ * accept as changed overrides (timeframe, symbol, session, time, enum,
+ * text_area, price — probed 0.13.0) fall through to the read-only path;
+ * `source` stays editable (leaf-name overrides verified working).
+ * Exported for the settings-metadata unit tests.
  */
-function sanitizePinerInput(decl: {
+export function sanitizePinerInput(decl: {
   key: string;
   title?: string;
   kind: string;
@@ -374,6 +395,8 @@ function sanitizePinerInput(decl: {
   maxval?: number;
   step?: number;
   options?: (string | number)[];
+  group?: string;
+  tooltip?: string;
 }): PineInputMetaSnapshot | null {
   if (!decl || typeof decl.key !== "string" || decl.key.length === 0) return null;
   // Map Piner's kind values to AURA's expected type names.
@@ -403,6 +426,9 @@ function sanitizePinerInput(decl: {
     const opts = decl.options.filter((o): o is string => typeof o === "string").slice(0, 32);
     if (opts.length > 0) meta.options = opts;
   }
+  if (typeof decl.group === "string" && decl.group.trim().length > 0) meta.group = decl.group.trim().slice(0, 60);
+  if (typeof decl.tooltip === "string" && decl.tooltip.trim().length > 0)
+    meta.tooltip = decl.tooltip.trim().slice(0, 300);
   return meta;
 }
 
@@ -433,6 +459,14 @@ export function sanitizeInputValue(meta: PineInputMetaSnapshot, raw: unknown): u
       if (typeof raw === "string" && HEX_COLOR_RE.test(raw.trim())) return raw.trim().toLowerCase();
       return fallback;
     }
+    case "source": {
+      // Leaf-name strings are the verified engine override shape (probe):
+      // "open" | "high" | "low" | "close" | "hl2" | "hlc3" | "ohlc4".
+      // Anything else (incl. null/undefined) → fallback (null for source, which
+      // callers omit so the script's declared default series applies).
+      if (typeof raw === "string" && isPriceSource(raw)) return raw;
+      return fallback;
+    }
     default:
       // source / session / symbol / … are displayed read-only in v1.
       return fallback;
@@ -442,6 +476,38 @@ export function sanitizeInputValue(meta: PineInputMetaSnapshot, raw: unknown): u
 /** Can the settings UI edit this input type? */
 export function isEditableInputType(type: string): boolean {
   return EDITABLE_INPUT_TYPES.has(type);
+}
+
+/** One section of the grouped Inputs tab: `group: null` = ungrouped (first). */
+export interface PineInputGroup {
+  group: string | null;
+  items: PineInputMetaSnapshot[];
+}
+
+/**
+ * Group input metadata TradingView-style: ungrouped inputs come FIRST (no
+ * header), then each `group="…"` in first-appearance order. Pure — exported
+ * for the settings tests.
+ */
+export function groupPineInputMeta(meta: readonly PineInputMetaSnapshot[]): PineInputGroup[] {
+  const ungrouped: PineInputMetaSnapshot[] = [];
+  const groupsOut: PineInputGroup[] = [];
+  const index = new Map<string, PineInputGroup>();
+  for (const m of meta) {
+    const group = typeof m.group === "string" && m.group.length > 0 ? m.group : null;
+    if (group === null) {
+      ungrouped.push(m);
+      continue;
+    }
+    let bucket = index.get(group);
+    if (!bucket) {
+      bucket = { group, items: [] };
+      index.set(group, bucket);
+      groupsOut.push(bucket);
+    }
+    bucket.items.push(m);
+  }
+  return [...(ungrouped.length > 0 ? [{ group: null, items: ungrouped }] : []), ...groupsOut];
 }
 
 // ── Record sanitization (localStorage can contain anything) ────────────────
@@ -519,6 +585,7 @@ export function sanitizeImportedIndicator(raw: unknown): ImportedPineIndicator |
     ? raw.plotMeta.map(sanitizePlotMeta).filter((m): m is PinePlotMetaSnapshot => m !== null).slice(0, MAX_PLOT_SERIES_PER_INDICATOR)
     : [];
   const diagnostics = sanitizeDiagnostics(raw.diagnostics);
+  const style = sanitizeStyleOverrides(raw.style);
   return {
     id: typeof raw.id === "string" && raw.id.length > 0 ? raw.id.slice(0, 64) : newImportedPineId(),
     name:
@@ -531,6 +598,7 @@ export function sanitizeImportedIndicator(raw: unknown): ImportedPineIndicator |
     inputs,
     inputMeta,
     plotMeta,
+    ...(Object.keys(style).length > 0 ? { style } : {}),
     ...(diagnostics ? { diagnostics } : {}),
     createdAt: typeof raw.createdAt === "number" && Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),
   };

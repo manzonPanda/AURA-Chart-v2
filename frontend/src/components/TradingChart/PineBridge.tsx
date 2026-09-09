@@ -33,12 +33,15 @@ import {
   type PineVisual,
 } from "../../services/pineEngineTypes";
 import { createPineEngine } from "../../services/pineEngineFactory";
+import type { PinePlotStyleOverride, PineStyleOverrides } from "../../services/pineStyle";
 import type { RealtimeCandleMsg } from "../../services/realtime";
 import { PineLabelPrimitive } from "./pineLabelPrimitive";
 import { PineLineBoxPrimitive } from "./pineLineBoxPrimitive";
 
 /** Stable empty identity — optional-prop absence never changes effect deps. */
 const EMPTY_SLOTS: readonly number[] = [];
+/** Stable empty style-overrides map for indicators without a Style tab. */
+const EMPTY_STYLE: PineStyleOverrides = {};
 
 interface Props {
   /** The chart's bucket-aligned candles (history or live-only accumulation). */
@@ -95,6 +98,8 @@ type IndicatorChartState = {
   priceLines: IPriceLine[];
   priceLineSig: string;
   priceLineHost: ISeriesApi<"Line"> | null;
+  /** Last-applied style overrides per visual key (style-change-only re-create). */
+  styleSigRef: Map<string, string>;
 };
 
 /**
@@ -163,6 +168,7 @@ export function PineBridge({
     priceLines: [],
     priceLineSig: "",
     priceLineHost: null,
+    styleSigRef: new Map(),
   });
 
   /** Desired pane assignment: overlay → 0, each separate-pane script → 1..n. */
@@ -276,11 +282,31 @@ export function PineBridge({
 
   // ── creation helpers ───────────────────────────────────────────────────────
 
-  const toLineData = (p: { ts: number; value: number; color?: string }) => ({
+  const toLineData = (p: { ts: number; value: number; color?: string }, stripColor = false) => ({
     time: (p.ts / 1000) as UTCTimestamp,
     value: p.value,
-    ...(p.color ? { color: p.color } : {}),
+    // A uniform color override replaces per-bar script colors entirely.
+    ...(!stripColor && p.color ? { color: p.color } : {}),
   });
+
+  /**
+   * Resolve the style override the renderer should apply for one visual:
+   * falls back to the script's own options when the override is absent (
+   * `style[visualKey]`), preserving the exact current appearance.
+   */
+  const resolveStyle = (
+    style: PineStyleOverrides,
+    key: string,
+    scriptColor: string | null,
+    scriptWidth: number | null,
+  ): { color: string | null; width: number | null } => {
+    const o: PinePlotStyleOverride | undefined = style[key];
+    if (!o) return { color: scriptColor, width: scriptWidth };
+    return {
+      color: typeof o.color === "string" ? o.color : scriptColor,
+      width: typeof o.lineWidth === "number" ? o.lineWidth : scriptWidth,
+    };
+  };
 
   /** Hex (#RGB/#RRGGBB/#RRGGBBAA) → rgba() with the given alpha (area fills). */
   const withAlpha = (color: string, alpha: number): string => {
@@ -315,6 +341,7 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
     visuals: PineVisual[],
     candleSeries: ISeriesApi<"Line"> | null,
     barsNow: readonly Bar[],
+    style: PineStyleOverrides,
   ): boolean => {
     const seenData = new Set<string>();
     const markers: SeriesMarker<Time>[] = [];
@@ -339,9 +366,24 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
     for (const v of visuals) {
       if (v.type === "line" || v.type === "histogram" || v.type === "area") {
         const ident = v.key;
+        const override = style[ident] as PinePlotStyleOverride | undefined;
+        // Hidden override → skip painting WITHOUT registering the ident, so the
+        // stale-cleanup below clears the previously-painted series DATA. The
+        // series OBJECT stays in st.data and repaints on un-hide.
+        if (override?.visible === false) continue;
         seenData.add(ident);
+        // Re-create when the STYLE changes (color/width) — applyOptions would
+        // need extra plumbing across the Line/Histogram/Area union, so we keep
+        // the freshest signature per ident and let the create-branch re-add.
+        const styleSig = JSON.stringify(override ?? {});
+        const styleChanged = st.styleSigRef.get(ident) !== styleSig;
         let entry = st.data.get(ident);
-        if (!entry || entry.kind !== v.type || (v.type === "line" && entry.stepLine !== v.stepLine)) {
+        if (
+          !entry ||
+          entry.kind !== v.type ||
+          (v.type === "line" && entry.stepLine !== v.stepLine) ||
+          styleChanged
+        ) {
           if (entry) {
             try {
               chart.removeSeries(entry.series as ISeriesApi<"Line">);
@@ -351,14 +393,17 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
             st.data.delete(ident);
             entry = undefined;
           }
+          st.styleSigRef.set(ident, styleSig);
           try {
             const base = {
               priceLineVisible: false,
               ...(st.paneIndex === 0 ? { priceScaleId: "right" } : {}),
             };
-            const color = v.color ?? "#38bdf8";
+            // Style overrides win over the script; otherwise fall back exactly.
+            const r = resolveStyle(style, ident, v.color ?? null, v.type === "histogram" ? null : v.lineWidth ?? null);
+            const color = r.color ?? "#38bdf8";
             // histogram visuals carry no script linewidth — default 2.
-            const width = ((v.type === "histogram" ? undefined : v.lineWidth) ?? 2) as LineWidth;
+            const width = (r.width ?? (v.type === "histogram" ? undefined : v.lineWidth) ?? 2) as LineWidth;
             if (v.type === "line") {
               const s = chart.addSeries(
                 LineSeries,
@@ -398,6 +443,9 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
         entry = entry!;
         if (entry.kind !== v.type) continue;
         const series = entry.series as ISeriesApi<"Line">;
+        // A uniform color override replaces per-bar script colors (LWC series
+        // color handles the rest — the per-point color must not fight it).
+        const stripColor = typeof override?.color === "string";
         try {
           if (v.data.length === 0) {
             if (entry.painted !== null) {
@@ -415,9 +463,9 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
             entry.painted.lastTs === last.ts;
           if (shapeUnchanged) {
             // Only the forming bucket's values moved — replace the last point.
-            series.update(toLineData(last));
+            series.update(toLineData(last, stripColor));
           } else {
-            series.setData(v.data.map(toLineData));
+            series.setData(v.data.map((p) => toLineData(p, stripColor)));
             entry.painted = { count: v.data.length, firstTs: first.ts, lastTs: last.ts };
           }
           paintedAny = true;
@@ -688,7 +736,7 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
           return;
         }
 
-        const painted = applyVisuals(chart, st, run.visuals, candleSeries ?? null, bars);
+        const painted = applyVisuals(chart, st, run.visuals, candleSeries ?? null, bars, ind.style ?? EMPTY_STYLE);
         report(
           s.id,
           painted

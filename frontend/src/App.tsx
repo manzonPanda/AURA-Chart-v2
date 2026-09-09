@@ -469,7 +469,15 @@ export default function App() {
       setSmaSettings(next.config);
     } else {
       setImportedPine((prev) =>
-        prev.map((x) => (x.id === next.id ? { ...x, inputs: next.inputs } : x)),
+        prev.map((x) => {
+          if (x.id !== next.id) return x;
+          const merged = { ...x, inputs: next.inputs };
+          // Style tab — render-level overrides. Empty means "script styling":
+          // drop the key entirely so a cleared Style tab truly resets.
+          if (Object.keys(next.style).length > 0) merged.style = next.style;
+          else delete (merged as Record<string, unknown>).style;
+          return merged;
+        }),
       );
     }
     setSettingsTarget(null);

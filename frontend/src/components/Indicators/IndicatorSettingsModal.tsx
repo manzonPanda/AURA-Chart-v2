@@ -20,16 +20,25 @@ import { MAX_EMA_PERIOD, MIN_EMA_PERIOD } from "../../services/ema";
 import {
   PRICE_SOURCES,
   PRICE_SOURCE_LABEL,
+  isPriceSource,
   type PriceSource,
 } from "../../services/priceSource";
 import { SMA_PERIODS, type SmaConfig } from "../../config/smaSettings";
 import type { EmaConfig, EmaSlotId } from "../../config/emaSettings";
 import {
+  groupPineInputMeta,
   isEditableInputType,
+  sanitizeInputValue,
   type ImportedPineIndicator,
   type PineInputMetaSnapshot,
   type PineRunStatus,
 } from "../../services/pineImport";
+import {
+  isDefaultPlotStyle,
+  PINE_PLOT_WIDTHS,
+  type PinePlotStyleOverride,
+  type PineStyleOverrides,
+} from "../../services/pineStyle";
 
 /** Which indicator the modal edits — built from the EXISTING App state. */
 export type SettingsTarget =
@@ -46,7 +55,13 @@ export type SettingsTarget =
 export type SettingsApply =
   | { kind: "ema"; slotId: EmaSlotId; config: EmaConfig }
   | { kind: "sma"; config: SmaConfig }
-  | { kind: "pine"; id: string; inputs: Record<string, unknown> };
+  | {
+      kind: "pine";
+      id: string;
+      inputs: Record<string, unknown>;
+      /** Style-tab overrides (render-level) — empty object = script styling. */
+      style: PineStyleOverrides;
+    };
 
 interface Props {
   target: SettingsTarget;
@@ -80,7 +95,12 @@ function toPickerHex(color: unknown): string {
   return "#000000";
 }
 
-/** One imported-Pine input editor, driven by the compile-time metadata. */
+/**
+ * One imported-Pine input editor, driven by the compile-time metadata.
+ * `onValue(null)` removes the override — the script's declared default then
+ * applies (used by the source picker's "Default (script)" entry; the engine
+ * boundary omits null keys, so the default series is never clobbered).
+ */
 function PineInputField({
   meta,
   value,
@@ -88,14 +108,21 @@ function PineInputField({
 }: {
   meta: PineInputMetaSnapshot;
   value: unknown;
-  onValue: (next: unknown) => void;
+  onValue: (next: unknown | null) => void;
 }) {
   const label = meta.title || meta.varId;
+  const tooltip = typeof meta.tooltip === "string" && meta.tooltip.length > 0 ? meta.tooltip : undefined;
   if (!isEditableInputType(meta.type)) {
     return (
-      <label className="ind-field" title={`${meta.type} inputs are read-only in this version`}>
+      <label className="ind-field" title={tooltip ?? `${meta.type} inputs cannot be edited yet`}>
         <span>{label}</span>
-        <input type="text" value={String(value ?? "")} readOnly disabled />
+        <input
+          type="text"
+          value={String(value ?? meta.defval ?? "")}
+          readOnly
+          disabled
+          title={`${meta.type} — the Pine engine doesn't support overriding this input kind yet`}
+        />
       </label>
     );
   }
@@ -103,7 +130,7 @@ function PineInputField({
     case "int": {
       const v = typeof value === "number" && Number.isInteger(value) ? value : meta.defval;
       return (
-        <label className="ind-field">
+        <label className="ind-field" title={tooltip}>
           <span>{label}</span>
           <input
             type="number"
@@ -123,7 +150,7 @@ function PineInputField({
     case "float": {
       const v = typeof value === "number" && Number.isFinite(value) ? value : meta.defval;
       return (
-        <label className="ind-field">
+        <label className="ind-field" title={tooltip}>
           <span>{label}</span>
           <input
             type="number"
@@ -142,14 +169,14 @@ function PineInputField({
     }
     case "bool":
       return (
-        <label className="ind-field ind-enabled">
+        <label className="ind-field ind-enabled" title={tooltip}>
           <span>{label}</span>
           <input type="checkbox" checked={value === true} onChange={(e) => onValue(e.target.checked)} />
         </label>
       );
     case "color":
       return (
-        <label className="ind-field">
+        <label className="ind-field" title={tooltip}>
           <span>{label}</span>
           <input
             type="color"
@@ -158,9 +185,29 @@ function PineInputField({
           />
         </label>
       );
+    case "source":
+      // TradingView-style price-source picker. "" = "Default (script)" — the
+      // override key is REMOVED so the script's declared series applies (the
+      // engine metadata does not expose the default expression's name).
+      return (
+        <label className="ind-field" title={tooltip}>
+          <span>{label}</span>
+          <select
+            value={typeof value === "string" && isPriceSource(value) ? value : ""}
+            onChange={(e) => onValue(e.target.value === "" ? null : e.target.value)}
+          >
+            <option value="">Default (script)</option>
+            {PRICE_SOURCES.map((s) => (
+              <option key={s} value={s}>
+                {PRICE_SOURCE_LABEL[s]}
+              </option>
+            ))}
+          </select>
+        </label>
+      );
     case "string":
       return meta.options ? (
-        <label className="ind-field">
+        <label className="ind-field" title={tooltip}>
           <span>{label}</span>
           <select value={String(value ?? meta.options[0])} onChange={(e) => onValue(e.target.value)}>
             {meta.options.map((o) => (
@@ -171,7 +218,7 @@ function PineInputField({
           </select>
         </label>
       ) : (
-        <label className="ind-field">
+        <label className="ind-field" title={tooltip}>
           <span>{label}</span>
           <input
             type="text"
@@ -201,6 +248,10 @@ export function IndicatorSettingsModal({ target, onApply, onCancel }: Props) {
   const [pineInputs, setPineInputs] = useState<Record<string, unknown> | null>(() =>
     target.kind === "pine" ? { ...target.indicator.inputs } : null,
   );
+  // Style-tab draft — overrides keyed by plot key (render-level only).
+  const [pineStyle, setPineStyle] = useState<PineStyleOverrides | null>(() =>
+    target.kind === "pine" ? { ...(target.indicator.style ?? {}) } : null,
+  );
 
   // Escape = Cancel (discard draft).
   useEffect(() => {
@@ -225,7 +276,42 @@ export function IndicatorSettingsModal({ target, onApply, onCancel }: Props) {
   const apply = (): void => {
     if (target.kind === "ema" && emaDraft) onApply({ kind: "ema", slotId: target.slotId, config: emaDraft });
     else if (target.kind === "sma" && smaDraft) onApply({ kind: "sma", config: smaDraft });
-    else if (target.kind === "pine" && pineInputs) onApply({ kind: "pine", id: target.id, inputs: pineInputs });
+    else if (target.kind === "pine")
+      onApply({ kind: "pine", id: target.id, inputs: pineInputs ?? {}, style: pineStyle ?? {} });
+  };
+
+  /** One Pine input edit — `null` removes the override (script default wins). */
+  const patchPineInput = (varId: string, next: unknown | null): void => {
+    setPineInputs((prev) => {
+      const out = { ...(prev ?? {}) };
+      if (next === null) delete out[varId];
+      else out[varId] = next;
+      return out;
+    });
+  };
+
+  /** One Style-tab edit — identity-valued overrides are pruned immediately. */
+  const patchPineStyle = (key: string, patch: Partial<PinePlotStyleOverride>): void => {
+    setPineStyle((prev) => {
+      const out: PineStyleOverrides = { ...(prev ?? {}) };
+      const merged: PinePlotStyleOverride = { ...(out[key] ?? {}), ...patch };
+      if (isDefaultPlotStyle(merged)) delete out[key];
+      else out[key] = merged;
+      return out;
+    });
+  };
+
+  /** Defaults — restore every input to the script's declared value and drop
+      all style overrides (the import-time `inputs0` shape, exactly). */
+  const resetPineDefaults = (): void => {
+    if (target.kind !== "pine") return;
+    const fresh: Record<string, unknown> = {};
+    for (const m of target.indicator.inputMeta) {
+      const v = sanitizeInputValue(m, undefined);
+      if (v !== null && v !== undefined) fresh[m.varId] = v;
+    }
+    setPineInputs(fresh);
+    setPineStyle({});
   };
 
   return (
@@ -328,13 +414,18 @@ export function IndicatorSettingsModal({ target, onApply, onCancel }: Props) {
               {target.indicator.inputMeta.length === 0 ? (
                 <div className="iset-note">This script declares no configurable inputs.</div>
               ) : (
-                target.indicator.inputMeta.map((m) => (
-                  <PineInputField
-                    key={m.varId}
-                    meta={m}
-                    value={pineInputs?.[m.varId]}
-                    onValue={(v) => setPineInputs((prev) => ({ ...(prev ?? {}), [m.varId]: v }))}
-                  />
+                groupPineInputMeta(target.indicator.inputMeta).map((grp) => (
+                  <div className="iset-group" key={grp.group ?? "__ungrouped"}>
+                    {grp.group !== null && <div className="iset-group-title">{grp.group}</div>}
+                    {grp.items.map((m) => (
+                      <PineInputField
+                        key={m.varId}
+                        meta={m}
+                        value={pineInputs?.[m.varId]}
+                        onValue={(v) => patchPineInput(m.varId, v)}
+                      />
+                    ))}
+                  </div>
                 ))
               )}
             </>
@@ -368,33 +459,78 @@ export function IndicatorSettingsModal({ target, onApply, onCancel }: Props) {
           )}
 
           {tab === "style" && isPine && (
-            <div className="iset-note">
-              Line colors and styles are defined by the Pine script itself.
-              {(() => {
-                const colored = target.indicator.plotMeta.filter((p) => p.color);
-                if (colored.length === 0) return null;
-                return (
-                  <span className="iset-swatches">
-                    {colored.map((p) => (
-                      <span key={`${p.type}:${p.key}`} className="iset-swatch" title={p.title ?? p.key}>
-                        <span className="iset-swatch-dot" style={{ background: p.color }} aria-hidden="true" />
-                        {p.title ?? p.key}
+            <>
+              {target.indicator.plotMeta.length === 0 ? (
+                <div className="iset-note">This script exposes no renderable plots to style.</div>
+              ) : (
+                target.indicator.plotMeta.map((p) => {
+                  const o = pineStyle?.[p.key];
+                  const visible = o?.visible !== false;
+                  // Shown value: explicit override, else the script's own color.
+                  const shownColor = o?.color ?? p.color ?? "#38bdf8";
+                  const shownWidth = o?.lineWidth ?? p.linewidth ?? 2;
+                  return (
+                    <div className="iset-plotrow" key={p.key} data-hidden={visible ? undefined : ""}>
+                      <input
+                        type="checkbox"
+                        checked={visible}
+                        title={visible ? "Visible — uncheck to hide this plot" : "Hidden — check to show this plot"}
+                        aria-label={`${p.title} visibility`}
+                        onChange={(e) => patchPineStyle(p.key, { visible: e.target.checked })}
+                      />
+                      <input
+                        type="color"
+                        value={toPickerHex(shownColor)}
+                        title={`${p.title} color`}
+                        aria-label={`${p.title} color`}
+                        onChange={(e) => patchPineStyle(p.key, { color: e.target.value })}
+                      />
+                      <span className="iset-plotname" title={p.key}>
+                        {p.title}
                       </span>
-                    ))}
-                  </span>
-                );
-              })()}
-            </div>
+                      <select
+                        value={shownWidth}
+                        title={`${p.title} line width`}
+                        aria-label={`${p.title} width`}
+                        onChange={(e) => patchPineStyle(p.key, { lineWidth: Number(e.target.value) })}
+                      >
+                        {PINE_PLOT_WIDTHS.map((w) => (
+                          <option key={w} value={w}>
+                            {w}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  );
+                })
+              )}
+              <div className="iset-note">
+                Style overrides apply at render time — the script itself is never modified. Per-bar
+                script colors are replaced while overridden; hline/fill styling is not supported yet.
+              </div>
+            </>
           )}
         </div>
 
         <div className="iset-foot">
-          <button type="button" className="iset-btn" onClick={onCancel}>
-            Cancel
-          </button>
-          <button type="button" className="iset-btn primary" onClick={apply}>
-            Apply
-          </button>
+          {isPine && (
+            <button
+              type="button"
+              className="iset-btn"
+              onClick={resetPineDefaults}
+              title="Restore the script's declared input defaults and clear style overrides"
+            >
+              Defaults
+            </button>
+          )}
+          <div className="iset-foot-actions">
+            <button type="button" className="iset-btn" onClick={onCancel}>
+              Cancel
+            </button>
+            <button type="button" className="iset-btn primary" onClick={apply}>
+              Apply
+            </button>
+          </div>
         </div>
       </div>
     </div>
