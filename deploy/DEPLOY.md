@@ -194,3 +194,84 @@ Notes:
   same-origin requests never trigger CORS. The `/ws` upgrade handler never
   checked origins in the first place.
 - Local dev keeps working exactly as before (`npm run dev` + Vite proxy).
+
+## CI/CD — automatic deploy from GitHub Actions (push to main)
+
+`.github/workflows/deploy.yml` turns every push to `main` into a deploy. The
+runner **never builds anything** — it SSHes into the Oracle VM and drives the
+VM's own pipeline (`deploy/redeploy.sh` via `deploy/gha-deploy-remote.sh`), so
+manual pulls (git hooks) and push deploys share ONE code path.
+
+### Flow
+
+```
+push main
+  └─ GitHub Actions (concurrency: aura-deploy-production — queued, never parallel)
+      ├─ fail fast if required secrets are missing (names printed, never values)
+      ├─ SSH key → $RUNNER_TEMP (0600) + pinned host key (SSH_KNOWN_HOSTS)
+      └─ ssh "bash -s" -- <deploy/gha-deploy-remote.sh>
+          ├─ verify repo + branch main
+          ├─ git fetch origin main
+          ├─ git reset --hard origin/main   (no hooks fired → one deploy per push;
+          │                                  only TRACKED files touched → VM-side
+          │                                  .env / backend/.env / data/ / logs preserved)
+          ├─ bash deploy/redeploy.sh auto <old> <new>   (or --full via manual run)
+          └─ gate: systemctl is-active + loopback /api/health ok:true + HEAD == origin/main
+```
+
+`git reset --hard` (instead of `git pull`) is deliberate: it fires no
+`post-merge`/`post-rewrite` hooks, so the push-triggered deploy never triggers
+a second, duplicate hook deploy. Reruns are safe: an up-to-date `auto` run is a
+no-op plus the health gate.
+
+### Required GitHub secrets (repository or `production` environment)
+
+| Secret | Value | Notes |
+|---|---|---|
+| `SSH_PRIVATE_KEY` | full PEM private key (`-----BEGIN OPENSSH PRIVATE KEY-----` … incl. newlines) | dedicated deploy key; public half in the VM's `~/.ssh/authorized_keys` |
+| `SSH_HOST` | Oracle VM public IP / hostname | never echoed to logs |
+| `SSH_USER` | `ubuntu` | the VM user that owns the checkout + sudoers rule |
+
+### Optional secrets
+
+| Secret | Default | Purpose |
+|---|---|---|
+| `SSH_PORT` | `22` | if the VM SSH moved |
+| `SSH_KNOWN_HOSTS` | `ssh-keyscan` (TOFU, warns) | **recommended**: pin the host key (`ssh-keyscan -p 22 HOST`) so MITM fails the run |
+| `AURA_DEPLOY_PATH` | `/home/ubuntu/apps/AURA-Chart-v2` | override only if the checkout lives elsewhere (this is the path in the committed systemd unit + nginx conf) |
+| `HEALTH_URL` | *(skipped)* | extra runner-side check of the public URL (e.g. `http://<vm>/api/health`) — must report `ok:true` |
+
+### Manual run
+
+Actions → **Deploy (Oracle VM)** → *Run workflow*: leaves the diff-driven
+behavior as-is, or tick **Force FULL rebuild** to ignore the diff and rebuild
+both sides (`redeploy.sh --full`).
+
+### Safety properties
+
+- **No secrets in logs**: only the SSH key ever crosses the boundary; the
+  workflow prints secret *names* on failure, never values; GitHub's automatic
+  masking is the second layer. IG/Supabase/VAPID/`.env` values never touch GitHub.
+- **No concurrent deploys**: `concurrency: aura-deploy-production` with
+  `cancel-in-progress: false` — a second push queues and runs after the first
+  completes (a running restart is never killed).
+- **Idempotent**: rerunning an up-to-date `main` is a no-op + health gate;
+  builds are incremental (`npm ci` only when a lockfile changed, per
+  `redeploy.sh` diff logic); a failed build aborts BEFORE the restart, so the
+  service keeps running the previous healthy release.
+- **VM state is never overwritten from GitHub**: `.env`, `backend/.env`,
+  `backend/data/`, logs are gitignored/untracked — `git reset --hard` cannot
+  touch them.
+
+### First-time setup checklist
+
+1. Push this repo to GitHub; on the VM, `git remote set-url origin <github-url>`
+   (or clone to `/home/ubuntu/apps/AURA-Chart-v2`).
+2. Generate a dedicated keypair; append the public key to the VM's
+   `~ubuntu/.ssh/authorized_keys`.
+3. Add the secrets above (repository, or an `environment: production` with
+   required-reviewer protection).
+4. Grab the host key: `ssh-keyscan -p 22 <SSH_HOST>` → `SSH_KNOWN_HOSTS`.
+5. Push to `main` → watch the run; afterwards
+   `journalctl -u aura-backend -f` on the VM if anything is off.
+

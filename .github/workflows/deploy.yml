@@ -1,0 +1,136 @@
+# ═════════════════════════════════════════════════════════════════════════════
+# AURA-Chart v2 — CI/CD deploy to the Oracle Ubuntu VM
+#
+# Trigger : every push to main (also manual runs from the Actions tab)
+# Model   : THIN SSH DRIVER — the runner never builds. It SSHes into the VM and
+#           drives the repo's OWN deploy pipeline (deploy/redeploy.sh), which
+#           already implements: diff-driven installs (npm ci only when a
+#           lockfile changed), build-before-restart, systemd restart +
+#           /api/health gate. ONE deploy code path for manual pulls (git
+#           hooks) and push deploys (this workflow).
+#
+# On the VM the driver (deploy/gha-deploy-remote.sh):
+#   1. verifies the repo + branch        4. runs deploy/redeploy.sh <mode>
+#   2. git fetch origin main             5. gates: service active + loopback
+#   3. git reset --hard origin/main        /api/health ok:true + HEAD sha
+#
+# `git reset --hard` (NOT git pull) fires no post-merge/post-rewrite hooks, so
+# exactly ONE deploy runs per push even with core.hooksPath configured. Reset
+# touches only tracked files — .env / backend/.env / data/ / logs on the VM are
+# never overwritten from GitHub.
+#
+# Secrets (repository or `production` environment — NEVER hardcode):
+#   required : SSH_PRIVATE_KEY, SSH_HOST, SSH_USER
+#   optional : SSH_PORT (default 22), SSH_KNOWN_HOSTS (recommended, pinned host
+#              key; absent → ssh-keyscan TOFU), AURA_DEPLOY_PATH (default
+#              /home/ubuntu/apps/AURA-Chart-v2 — the path in the committed
+#              systemd unit + nginx conf), HEALTH_URL (extra runner-side check)
+#
+# Only the SSH key crosses the boundary. IG / Supabase / VAPID / .env values
+# never reach GitHub, and GitHub's secret masking keeps them out of logs (the
+# workflow additionally avoids echoing host/user/paths).
+# ═════════════════════════════════════════════════════════════════════════════
+name: Deploy (Oracle VM)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Force FULL rebuild of backend + frontend (ignore diff)"
+        type: boolean
+        default: false
+
+# Never two deploys at once: a second run QUEUES (cancel-in-progress: false —
+# a running deploy is never killed mid-restart).
+concurrency:
+  group: aura-deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - name: Checkout (for the versioned remote driver script)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Check required secrets (names only — never values)
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in SSH_PRIVATE_KEY SSH_HOST SSH_USER; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::secret '$name' is not set — add it to the repository or 'production' environment secrets"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Prepare SSH key + pinned host key (outside the workspace, 0600)
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS || '' }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/aura_deploy_key"
+          kh="$RUNNER_TEMP/aura_known_hosts"
+          install -m 600 /dev/null "$key"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$key"
+          if [ -n "$SSH_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$SSH_KNOWN_HOSTS" > "$kh"
+          else
+            echo "::warning::SSH_KNOWN_HOSTS not set — pinning via ssh-keyscan (TOFU). Set it for strict host verification."
+            ssh-keyscan -p "$SSH_PORT" "$SSH_HOST" > "$kh" 2>/dev/null
+          fi
+          [ -s "$kh" ] || { echo "::error::no host key could be captured for the SSH host"; exit 1; }
+
+      - name: Deploy to Oracle VM (pull + diff-driven rebuild + restart + health)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+          AURA_DEPLOY_PATH: ${{ secrets.AURA_DEPLOY_PATH || '/home/ubuntu/apps/AURA-Chart-v2' }}
+          DEPLOY_FULL: ${{ inputs.full == true }}
+          OLD_SHA: ${{ github.event.before || '' }}
+          NEW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/aura_deploy_key"
+          kh="$RUNNER_TEMP/aura_known_hosts"
+          if [ "$DEPLOY_FULL" = "true" ]; then mode="--full"; else mode="auto"; fi
+          ssh \
+            -i "$key" \
+            -p "$SSH_PORT" \
+            -o UserKnownHostsFile="$kh" \
+            -o StrictHostKeyChecking=yes \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o ServerAliveInterval=30 \
+            "$SSH_USER@$SSH_HOST" "bash -s" -- "$AURA_DEPLOY_PATH" "$mode" "$OLD_SHA" "$NEW_SHA" \
+            < deploy/gha-deploy-remote.sh
+
+      - name: Optional public health check (HEALTH_URL from the runner)
+        if: env.HAS_HEALTH_URL == 'true'
+        env:
+          HAS_HEALTH_URL: ${{ secrets.HEALTH_URL != '' }}
+          HEALTH_URL: ${{ secrets.HEALTH_URL }}
+        run: |
+          set -euo pipefail
+          curl -sf --retry 5 --retry-delay 3 --retry-all-errors -m 15 "$HEALTH_URL" \
+            | grep -q '"ok"[[:space:]]*:[[:space:]]*true' \
+            || { echo "::error::public health check failed at HEALTH_URL"; exit 1; }
+          echo "✅ public health check passed"
