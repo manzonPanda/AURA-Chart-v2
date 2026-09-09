@@ -590,37 +590,19 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .ohlc-item.down { color: var(--down); }
 .ohlc-item.time { border-color: rgba(71, 199, 255, 0.18); color: var(--text); font-size: 0.68rem; }
 
-/* ── Feed statistics (unified header) ────────────────────── */
-/* ENV · BARS · TICKS · LAST TICK — relocated from the old bottom statusbar.
-   The green dot reads as "feed alive"; metric pairs reuse .status-metric. */
-.market-stats {
-  display: flex; align-items: center; flex-wrap: nowrap; gap: 4px 9px;
-  padding-left: 10px; border-left: 1px solid var(--border);
-  color: var(--muted); font-size: 0.62rem; white-space: nowrap; min-width: 0;
-}
-.status-metric { display: flex; align-items: center; gap: 4px; }
-.market-stats-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--up); box-shadow: 0 0 8px var(--up); flex-shrink: 0; }
-.status-label { color: #5f7186; font-size: 0.52rem; font-weight: 800; letter-spacing: 0.1em; }
-.status-metric strong { color: var(--text); font-size: 0.62rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-
 /* One-row priority ladder (desktop >860px NEVER wraps): as width shrinks,
-   secondary info drops out in order — LAST TICK → TICKS → BARS → stats →
-   quote timestamp → LIVE chip → EMA control — while all primary controls and
-   O/H/L/C stay visible. */
+   secondary info drops out in order — quote timestamp → LIVE chip → EMA
+   control — while all primary controls and O/H/L/C stay visible. */
 @media (max-width: 1500px) {
   .instrument-epic { display: none; }
-  .status-metric--lasttick { display: none; }
 }
 @media (max-width: 1366px) {
   .brand-sub { display: none; }
-  .status-metric--ticks { display: none; }
 }
 @media (max-width: 1280px) {
-  .status-metric--bars { display: none; }
   .ohlc-item.time { display: none; }
 }
 @media (max-width: 1180px) {
-  .market-stats { display: none; }
   .instrument-select { max-width: 112px; font-size: 0.84rem; }
 }
 @media (max-width: 1080px) {

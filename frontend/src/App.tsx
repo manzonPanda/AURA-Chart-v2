@@ -626,14 +626,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [candles]);
 
-  // Feed statistics for the unified header — the SAME sources the old bottom
-  // statusbar consumed via the removed `marketStatus` prop (App owns them all).
-  const barsCount = candles.length > 0 ? candles.length : realtime.candle ? 1 : 0;
-  const lastTickAge =
-    realtime.lastTickAt > 0
-      ? Math.max(0, Math.round((nowTick - realtime.lastTickAt) / 1000))
-      : null;
-
   return (
     <div className="app">
       <header className="topbar">
@@ -704,16 +696,6 @@ export default function App() {
           <OHLCReadout candle={quoteCandle} invertScale={chartSettings.invertScale} />
         </div>
         <div className="topbar-actions">
-          {/* Feed statistics — relocated from the removed bottom statusbar.
-              The dot alone reads as "feed alive" (full label lives in title). */}
-          <div className="market-stats" aria-label="Market feed status">
-            <span className="market-stats-dot" title="Market feed" />
-            <span className="status-metric status-metric--bars"><span className="status-label">BARS</span><strong>{barsCount}</strong></span>
-            <span className="status-metric status-metric--ticks"><span className="status-label">TICKS</span><strong>{realtime.ticks}</strong></span>
-            {lastTickAge !== null && (
-              <span className="status-metric status-metric--lasttick"><span className="status-label">LAST TICK</span><strong>{lastTickAge}s</strong></span>
-            )}
-          </div>
           {/* Replay entry — a first-class chart control in the unified header.
               Hidden while a session is active (the in-plot dock takes over);
               disabled while there is nothing to replay. */}
