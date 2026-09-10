@@ -120,7 +120,6 @@ export default function App() {
   /** Epic reported by the last successful history load (display fallback). */
   const [historyEpic, setHistoryEpic] = useState<string>("");
   const [loading, setLoading] = useState(false);
-  const [autoFollow, setAutoFollow] = useState(true); // TradingView-style follow
   const [historyMissing, setHistoryMissing] = useState(false);
   const [health, setHealth] = useState<{ configured: boolean; environment: string } | null>(null);
   const [streamEpoch, setStreamEpoch] = useState(0);
@@ -260,10 +259,6 @@ export default function App() {
   const toggleInvertScale = useCallback(() => {
     setChartSettings((prev) => ({ ...prev, invertScale: !prev.invertScale }));
   }, []);
-  /** Auto (auto-follow) toggle: flips the `autoFollow` state consumed by the
-      chart's ViewportBridge — the context menu invokes it. */
-  const toggleAutoFollow = useCallback(() => setAutoFollow((prev) => !prev), []);
-
   // ── EMA Reversal Alerts ───────────────────────────────────────────────────
   // Initial config + state from the backend (the engine is the source of truth).
   useEffect(() => {
@@ -776,7 +771,6 @@ export default function App() {
           liveCandle={realtime.candle}
           streamStatus={realtime.status}
           loading={loading}
-          autoFollow={autoFollow}
           emaSettings={emaSettings}
           smaSettings={smaSettings}
           pineIndicators={importedPine}
@@ -785,7 +779,6 @@ export default function App() {
           onPineStatus={handlePineStatus}
           invertScale={chartSettings.invertScale}
           onToggleInvertScale={toggleInvertScale}
-          onToggleAutoFollow={toggleAutoFollow}
           replaySymbol={selectedEpic || undefined}
           onLoadMoreHistory={loadMoreHistory}
           historyStatus={historyStatus}

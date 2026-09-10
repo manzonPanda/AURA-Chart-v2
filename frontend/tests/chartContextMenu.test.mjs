@@ -8,7 +8,7 @@
  *     anchors are nudged in, tiny containers pin at the margin;
  *   - WIRING (source contracts, same style as invertScaleColors.test.mjs):
  *     the menu is a presentation-only overlay that REUSES App's existing
- *     Invert Scale / Auto state and actions (no duplicated state, no candle-
+ *     Invert Scale state and action (no duplicated state, no candle-
  *     data access), prevents the native browser menu, closes on outside
  *     click / Escape / scope change, and never blocks left-click chart
  *     interaction (no preventDefault/stopPropagation on the outside path).
@@ -37,7 +37,7 @@ const stripComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\
 
 // ── Geometry: the menu must stay fully inside the chart container ─────────────
 
-const MENU = { width: 190, height: 76 }; // ~rendered menu size (min-width 190px + 2 items)
+const MENU = { width: 190, height: 76 }; // math fixture (menu min-width 190px, single item)
 const CHART = { width: 1200, height: 640 }; // a roomy chart container
 
 test("clampMenuPosition: anchor with room on both axes → menu opens at the cursor", () => {
@@ -94,11 +94,13 @@ test("menu exposes BOTH existing controls with right-aligned state indicators", 
   const code = stripComments(readSrc("src/components/TradingChart/ChartContextMenu.tsx"));
   assert.ok(code.includes('role="menu"'), "semantic menu container");
   assert.ok(code.includes("Invert Scale"), "the existing Invert Scale control");
-  assert.ok(code.includes("Auto"), "the existing Auto control");
+  // The Auto (auto-follow) toggle is REMOVED — the viewport follows the
+  // latest candle unconditionally; the menu carries no auto item at all.
+  assert.ok(!code.includes("Auto"), "no Auto item in the menu");
+  assert.ok(!code.includes("autoFollow"), "no auto-follow plumbing in the menu");
   // Toggle state is REFLECTED via aria-checked (the ✓ indicator alignment
   // itself lives in CSS) — the component owns neither piece of state.
   assert.ok(code.includes("aria-checked={invertScale}"));
-  assert.ok(code.includes("aria-checked={autoFollow}"));
   assert.ok(!code.includes("setInvertScale"), "no duplicated invert-scale state");
   assert.ok(!code.includes("setAutoFollow"), "no duplicated auto-follow state");
 });
@@ -119,8 +121,7 @@ test("menu selection invokes the EXISTING actions and then closes", () => {
   const code = stripComments(readSrc("src/components/TradingChart/ChartContextMenu.tsx"));
   const invert = code.match(/const pickInvertScale = useCallback\(\(\) => \{\s*onToggleInvertScale\?\.\(\);\s*setOpen\(false\);/);
   assert.ok(invert, "Invert Scale item calls the shared action, then closes");
-  const auto = code.match(/const pickAuto = useCallback\(\(\) => \{\s*onToggleAutoFollow\?\.\(\);\s*setOpen\(false\);/);
-  assert.ok(auto, "Auto item calls the shared action, then closes");
+  assert.ok(!code.includes("pickAuto"), "no Auto item action remains");
 });
 
 
@@ -165,9 +166,8 @@ test("TradingChart mounts the menu inside the chart container with shared state"
   assert.ok(code.includes('<div className="chart-canvas-wrap" ref={chartWrapRef}>'), "overlay lives inside the chart wrap");
   assert.ok(code.includes("<ChartContextMenu"), "context menu is mounted");
   assert.ok(code.includes("invertScale={invertScale}"), "reflects the existing invertScale prop");
-  assert.ok(code.includes("autoFollow={autoFollow}"), "reflects the existing autoFollow prop");
   assert.ok(code.includes("onToggleInvertScale={onToggleInvertScale}"), "reuses the shared invert action");
-  assert.ok(code.includes("onToggleAutoFollow={onToggleAutoFollow}"), "reuses the shared auto action");
+  assert.ok(!code.includes("autoFollow"), "auto-follow plumbing removed from the chart");
   // Replay-aware scope — mirrors the MaStructurePanel resetKey contract:
   assert.ok(code.includes('session ? "replay" : "live"'), "replay enter/exit closes the menu");
 });
@@ -180,15 +180,12 @@ test("App keeps ONE state source: header controls removed, the context menu driv
     "exactly ONE invert-scale mutation — shared, never duplicated",
   );
   assert.ok(app.includes("onToggleInvertScale={toggleInvertScale}"), "context menu uses the shared action");
-  assert.equal(
-    (app.match(/const \[autoFollow, setAutoFollow\] = useState/g) || []).length,
-    1,
-    "autoFollow state is declared exactly once — the menu flips the SAME state",
-  );
-  assert.ok(app.includes("setAutoFollow((prev) => !prev)"), "menu toggle goes through the existing setter");
-  assert.ok(app.includes("onToggleAutoFollow={toggleAutoFollow}"), "context menu uses the shared auto action");
+  // The Auto (auto-follow) toggle is REMOVED entirely: no state, no handler,
+  // no prop — the viewport follows the latest candle unconditionally.
+  assert.ok(!app.includes("autoFollow"), "autoFollow state removed from App");
+  assert.ok(!app.includes("toggleAutoFollow"), "auto toggle function removed from App");
   // The old header "Auto" checkbox and "Invert" button are GONE — the right-click
-  // context menu is the single home for these toggles (no duplicated UI).
+  // context menu is the single home for the Invert toggle (no duplicated UI).
   assert.ok(!app.includes("auto-toggle"), "header Auto checkbox removed");
   assert.ok(!app.includes("invert-toggle"), "header Invert button removed");
   assert.ok(!app.includes('Invert: {chartSettings'), "header Invert ON/OFF label removed");

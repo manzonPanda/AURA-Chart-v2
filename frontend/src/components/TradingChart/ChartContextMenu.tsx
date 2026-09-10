@@ -15,20 +15,10 @@ interface Props {
    */
   invertScale: boolean;
   /**
-   * Current "Auto" (auto-follow) state — App's `autoFollow` passed down
-   * through TradingChart. Reflection ONLY.
-   */
-  autoFollow: boolean;
-  /**
-   * Invokes App's EXISTING Invert Scale toggle — the same handler the header
-   * button uses. No second implementation lives here.
+   * Invokes App's EXISTING Invert Scale toggle. No second implementation
+   * lives here.
    */
   onToggleInvertScale?: () => void;
-  /**
-   * Invokes App's EXISTING auto-follow toggle — the same `autoFollow` state
-   * the header checkbox drives. No second implementation lives here.
-   */
-  onToggleAutoFollow?: () => void;
   /**
    * Dataset scope (`instrument|timeframe|replay`). Any change — timeframe
    * switch, instrument switch, replay enter/exit — closes the menu so it can
@@ -43,21 +33,18 @@ interface Props {
  * positions with the chart and sits above every chart overlay.
  *
  * Presentation-only by contract:
- *   - it reflects the EXISTING Invert Scale / Auto state handed down from App
- *     and invokes the SAME actions the header controls use — no duplicated
- *     state, no second implementation;
+ *   - it reflects the EXISTING Invert Scale state handed down from App and
+ *     invokes the SAME action — no duplicated state, no second implementation;
  *   - it never touches candle data, Pine, whitespace slots, DATA GAP bands or
- *     replay state (Invert Scale is a pure price-scale transform and Auto is
- *     pure follow behavior — both remain valid during replay);
+ *     replay state (Invert Scale is a pure price-scale transform — valid
+ *     during replay too);
  *   - only the `contextmenu` handler calls preventDefault; a left click that
  *     closes the menu still reaches the chart (pan/zoom/crosshair unaffected).
  */
 export function ChartContextMenu({
   containerRef,
   invertScale,
-  autoFollow,
   onToggleInvertScale,
-  onToggleAutoFollow,
   scopeKey = "",
 }: Props) {
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -148,11 +135,6 @@ export function ChartContextMenu({
     setOpen(false);
   }, [onToggleInvertScale]);
 
-  const pickAuto = useCallback(() => {
-    onToggleAutoFollow?.();
-    setOpen(false);
-  }, [onToggleAutoFollow]);
-
   if (!open) return null;
 
   return (
@@ -171,18 +153,6 @@ export function ChartContextMenu({
         onClick={pickInvertScale}
       >
         <span>Invert Scale</span>
-        <span className="chart-context-menu-check" aria-hidden="true">
-          ✓
-        </span>
-      </button>
-      <button
-        type="button"
-        role="menuitemcheckbox"
-        aria-checked={autoFollow}
-        className="chart-context-menu-item"
-        onClick={pickAuto}
-      >
-        <span>Auto</span>
         <span className="chart-context-menu-check" aria-hidden="true">
           ✓
         </span>

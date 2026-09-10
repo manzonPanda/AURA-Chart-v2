@@ -20,7 +20,6 @@ import {
   isExhausted,
   isNearHistoryEdge,
   mergeOlderCandles,
-  resolveViewportAction,
   shouldShowLoadMore,
 } from "../src/services/historyPagination.ts";
 
@@ -271,34 +270,6 @@ test("the history control is hidden during an active Replay session", () => {
   assert.equal(
     shouldShowLoadMore({ replayActive: false, exhausted: false, nearEdge: true, hasData: false }),
     false,
-  );
-});
-
-test("viewport: a captured range restores the exact window after the prepend", () => {
-  assert.equal(
-    resolveViewportAction({ hasCapturedRange: true, autoFollow: true, following: true }),
-    "restore",
-  );
-  assert.equal(
-    resolveViewportAction({ hasCapturedRange: true, autoFollow: false, following: false }),
-    "restore",
-    "restore wins even when panned away with auto-follow off",
-  );
-});
-
-test("viewport: without a capture, normal repaint behavior is unchanged", () => {
-  assert.equal(
-    resolveViewportAction({ hasCapturedRange: false, autoFollow: true, following: true }),
-    "follow-latest",
-  );
-  assert.equal(
-    resolveViewportAction({ hasCapturedRange: false, autoFollow: true, following: false }),
-    "none",
-    "panned-away user is never yanked to the latest candle",
-  );
-  assert.equal(
-    resolveViewportAction({ hasCapturedRange: false, autoFollow: false, following: true }),
-    "none",
   );
 });
 

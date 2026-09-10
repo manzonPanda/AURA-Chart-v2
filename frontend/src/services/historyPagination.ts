@@ -121,8 +121,7 @@ export function shouldShowLoadMore(opts: {
  * bucket start, not the rightmost pixel or a slot count.
  *
  * Mirrors the follow-edge check in TradingChart.tsx's ViewportBridge.onPan so
- * the "Scroll to latest" button and the auto-follow behaviour can never disagree.
- *
+ * the "Scroll to latest" button and the follow behaviour can never disagree.
  * `range.to` is LWC's visible-range right edge (epoch seconds). `bucketSec` is
  * the active timeframe granularity. We tolerate being up to one bucket short
  * of the latest candle (its own forming bucket hasn't fully closed yet).
@@ -143,27 +142,4 @@ export function shouldShowScrollToLatest(opts: {
   hasCandles: boolean;
 }): boolean {
   return !!opts.hasCandles && !opts.replayActive && !opts.atEdge;
-}
-
-// ── Viewport decision ────────────────────────────────────────────────────────
-
-export type ViewportAction = "restore" | "follow-latest" | "none";
-
-/**
- * What the bus-"data" handler should do after a full-history setData.
- *
- *  - "restore"       → a prepend repaint: put the user back exactly where they
- *                      were (the captured visible range still resolves to the
- *                      same candles because prepends are strictly older).
- *  - "follow-latest" → normal initial-load / rollover repaint at the edge.
- *  - "none"          → user is panned away and nothing was prepended — hands off.
- */
-export function resolveViewportAction(opts: {
-  hasCapturedRange: boolean;
-  autoFollow: boolean;
-  following: boolean;
-}): ViewportAction {
-  if (opts.hasCapturedRange) return "restore";
-  if (opts.autoFollow && opts.following) return "follow-latest";
-  return "none";
 }

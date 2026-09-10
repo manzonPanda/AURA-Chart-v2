@@ -59,9 +59,7 @@ import {
   replayEngineOptions,
 } from "../../services/replay";
 import {
-  isAtLatestEdge,
   isNearHistoryEdge,
-  resolveViewportAction,
   shouldShowLoadMore,
   type HistoryStatus,
 } from "../../services/historyPagination";
@@ -234,8 +232,6 @@ interface Props {
   liveCandle?: RealtimeCandleMsg | null;
   streamStatus?: RealtimeStatus;
   loading?: boolean;
-  /** When true the viewport follows the latest bar; when false the user's pan is respected. */
-  autoFollow?: boolean;
   /** EMA overlay configuration (localStorage-persisted in App). */
   emaSettings?: EmaSettings;
   /** SMA overlay configuration (localStorage-persisted in App). */
@@ -257,13 +253,11 @@ interface Props {
    */
   invertScale?: boolean;
   /**
-   * Right-click context-menu actions — REUSE App's existing controls (no
-   * duplicated state): the chart's context menu reflects `invertScale` /
-   * `autoFollow` and these callbacks invoke the exact handlers the header
-   * controls use.
+   * Right-click context-menu action — REUSES App's existing control (no
+   * duplicated state): the chart's context menu reflects `invertScale` and
+   * this callback invokes the exact handler the menu item uses.
    */
   onToggleInvertScale?: () => void;
-  onToggleAutoFollow?: () => void;
   /** Instrument scope key (used to scope a replay session). */
   replaySymbol?: string;
   /**
@@ -618,37 +612,29 @@ function LiveBarBridge({
  *
  *  - After EVERY full history data set (initial load, timeframe switch,
  *    Refresh — CandleKit fires the bus "data" event at the end of setData) the
- *    viewport scrolls to the real-time edge, so the latest candle is always on
- *    screen while the user is following.
- *  - Tracks whether the user panned away from the real-time edge; once panned,
- *    it stops forcing the viewport back on every tick (LWC only auto-shifts
- *    when the visible range sits at the realtime edge anyway).
+ *    viewport is left exactly where the user has it. The auto-follow
+ *    behaviour was REMOVED: the chart never slides right on its own. The
+ *    Scroll-to-latest button is the only way back to the live edge.
+ *  - EXCEPTION: when "Load More History" captured a visible range, the next
+ *    prepend repaint restores that exact window (the user stays anchored on
+ *    the candles they were reading).
  *  - Emits the crosshair-hovered candle — or `null` (→ fall back to the latest
  *    forming/historical candle) — to the OHLC readout.
  */
 function ViewportBridge({
   candles,
-  liveCandle,
   bucketSec,
-  autoFollow = true,
   onCrosshairCandle,
-  replayCursor = null,
   preserveRangeRef,
   onNearHistoryEdge,
 }: {
   candles: readonly Candle[];
-  liveCandle: RealtimeCandleMsg | null;
   bucketSec: number;
-  autoFollow: boolean;
   onCrosshairCandle: (c: Candle | null) => void;
-  /** While Replay is active the "latest" bar is the replay cursor bar, never
-   *  the live candle — the crosshair/OHLC and the follow-edge stay replay-
-   *  scoped. */
-  replayCursor?: Candle | null;
   /** When set (by the "Load More History" click) the NEXT bus-"data" repaint —
-   *  the prepend — restores this exact visible window instead of jumping to
-   *  the latest candle, keeping the user's historical viewport anchored.
-   *  Structural type: a mutable ref to the captured LWC visible range. */
+   *  the prepend — restores this exact visible window instead of leaving the
+   *  bar layout to shift underneath the user, keeping the historical viewport
+   *  anchored. Structural type: a mutable ref to the captured LWC visible range. */
   preserveRangeRef?: { current: { from: number; to: number } | null } | null;
   /** Reports whether the visible range's left edge sits near the oldest
    *  loaded candle (reveals the "Load More History" control). */
@@ -656,17 +642,10 @@ function ViewportBridge({
 }) {
   const api = useChartApi();
   const candlesRef = useRef(candles);
-  const liveRef = useRef(liveCandle);
-  const autoRef = useRef(autoFollow);
-  const replayCursorRef = useRef<Candle | null>(replayCursor);
-  replayCursorRef.current = replayCursor;
-  const followingRef = useRef(true);
   const nearEdgeRef = useRef(false);
   const nearEdgeCbRef = useRef(onNearHistoryEdge);
   nearEdgeCbRef.current = onNearHistoryEdge;
   candlesRef.current = candles;
-  liveRef.current = liveCandle;
-  autoRef.current = autoFollow;
 
   useEffect(() => {
     const controller = api.controller;
@@ -675,20 +654,6 @@ function ViewportBridge({
     const ts = lwc.timeScale();
     const series = controller.getSeries();
     let disposed = false;
-
-    const latestCandle = (): Candle | null => {
-      // Replay active → the current bar is the replay cursor bar.
-      if (replayCursorRef.current) return replayCursorRef.current;
-      const lc = liveRef.current;
-      if (lc) {
-        return toCandle(alignToBucketStart(lc.time * 1000, bucketSec), {
-          open: lc.open, high: lc.high, low: lc.low, close: lc.close,
-          ...(lc.volume !== undefined && Number.isFinite(lc.volume) ? { volume: lc.volume } : {}),
-        });
-      }
-      const arr = candlesRef.current;
-      return arr.length > 0 ? arr[arr.length - 1] : null;
-    };
 
     const onMove = (param: unknown) => {
       if (disposed) return;
@@ -711,10 +676,8 @@ function ViewportBridge({
       let range: { from: number; to: number } | null = null;
       try {
         range = ts.getVisibleRange();
-        const lastSec = (latestCandle()?.ts ?? 0) / 1000;
-        followingRef.current = isAtLatestEdge(range, lastSec, bucketSec);
       } catch {
-        followingRef.current = true;
+        /* older LWC */
       }
       // Historical-edge proximity → reveal/hide the "Load More History" control.
       const edgeCb = nearEdgeCbRef.current;
@@ -733,28 +696,16 @@ function ViewportBridge({
 
     const applyViewportAfterData = () => {
       const captured = preserveRangeRef?.current ?? null;
-      const action = resolveViewportAction({
-        hasCapturedRange: captured !== null,
-        autoFollow: autoRef.current,
-        following: followingRef.current,
-      });
-      if (action === "restore" && captured) {
-        // Prepend repaint: put the user back on the exact candles they were
-        // viewing (the captured times still resolve to the same candles —
-        // prepends are strictly older and never re-time existing bars).
-        if (preserveRangeRef) preserveRangeRef.current = null;
-        try {
-          ts.setVisibleRange(captured);
-        } catch {
-          try { ts.scrollToRealTime(); } catch { /* older LWC */ }
-        }
-        return;
+      if (!captured) return; // Auto-follow removed: the user's viewport is never moved.
+      // Prepend repaint: put the user back on the exact candles they were
+      // viewing (the captured times still resolve to the same candles —
+      // prepends are strictly older and never re-time existing bars).
+      if (preserveRangeRef) preserveRangeRef.current = null;
+      try {
+        ts.setVisibleRange(captured);
+      } catch {
+        /* older LWC — keep the current view */
       }
-      if (action === "follow-latest") {
-        // Auto ON + user at the realtime edge → keep the latest candle visible.
-        try { ts.scrollToRealTime(); } catch { /* older LWC */ }
-      }
-      // "none" → the user panned away and nothing was prepended: hands off.
     };
 
     try { ts.subscribeVisibleTimeRangeChange(onPan); } catch { /* older LWC */ }
@@ -797,7 +748,6 @@ export function TradingChart({
   liveCandle = null,
   streamStatus = "DISCONNECTED",
   loading = false,
-  autoFollow = true,
   emaSettings = defaultEmaSettings(),
   smaSettings,
   pineIndicators = [],
@@ -806,7 +756,6 @@ export function TradingChart({
   onPineStatus,
   invertScale = false,
   onToggleInvertScale,
-  onToggleAutoFollow,
   replaySymbol,
   onLoadMoreHistory,
   historyStatus,
@@ -910,28 +859,20 @@ export function TradingChart({
         // candle rightOffset bars away from the right edge and let the axis
         // render future time labels in that empty area.
         //
-        // CandleKit's base options force `shiftVisibleRangeOnNewBar: false`
-        // (so replay setData never auto-scrolls). With `false`, LWC compensates
-        // every appended realtime bar by DECREMENTING the right offset
-        // (TimeScale._internal_update → compensationShift), so the 8-bar future
-        // space is eaten one bar per rollover until the live candle sits flush
-        // against the right edge. Re-enabling LWC's native default makes the
-        // time scale advance WITH the last bar while preserving the fixed
-        // right offset. Replay is unaffected: it paints full slices via setData
-        // and ViewportBridge already re-anchors at the edge.
-        shiftVisibleRangeOnNewBar: true,
-        // The LIVE trailing whitespace slots (whitespaceRows opts.live) make
-        // every rollover a whitespace-REPLACING update: WhitespaceBridge's
-        // setData() has `firstChangedPointIndex === undefined`, which LWC
-        // treats as "replaced existing whitespace" and — with this option at
-        // its default `false` — SUPPRESSES the shift above and instead
-        // decrements the right offset by one bar per new candle (measured:
-        // 8 → -4 over 12 rollovers). Enabling it restores the TradingView
-        // follow so the candle keeps exactly `rightOffset` bars of labeled
-        // future space while realtime candles advance. Verified headless:
-        // scrollPosition stays 8/8/8… and `to === lastSlotLogical` exactly.
-        // Replay is unaffected — replay registers no whitespace at all.
-        allowShiftVisibleRangeOnWhitespaceReplacement: true,
+        // AUTO-FOLLOW REMOVED: the chart must never slide right on its own.
+        // `shiftVisibleRangeOnNewBar` stays `false` (CandleKit's base default,
+        // chosen so replay never auto-scrolls). With `true`, LWC advances the
+        // time scale with every appended realtime bar — that automatic
+        // right-march is exactly the behavior the "Auto" feature provided and
+        // was removed by request.
+        shiftVisibleRangeOnNewBar: false,
+        // WhitespaceBridge re-sets the trailing-slot series on every rollover,
+        // and LWC classifies that setData as a whitespace-replacing update.
+        // With this flag left disabled, even that refresh never nudges the
+        // viewport right — the user's position always wins. (The right-side
+        // future-space labels still render from the whitespace slots; the
+        // scale simply does not chase them.)
+        allowShiftVisibleRangeOnWhitespaceReplacement: false,
         // Missing-gap whitespace slots PARTICIPATE in grid lines, tick marks
         // and crosshair snapping — the IG-like empty-time behavior. This is
         // already the LWC default for standard charts; set explicitly to
@@ -1264,11 +1205,8 @@ export function TradingChart({
           <LiveBarBridge liveCandle={liveCandle} bucketSec={bucketSec} replayActive={replayActive} />
           <ViewportBridge
             candles={candles}
-            liveCandle={liveCandle}
             bucketSec={bucketSec}
-            autoFollow={autoFollow}
             onCrosshairCandle={setCrosshairCandle}
-            replayCursor={replayCursorCandle ?? undefined}
             preserveRangeRef={preserveRangeRef}
             onNearHistoryEdge={setNearEdge}
           />
@@ -1424,16 +1362,14 @@ export function TradingChart({
           rightInset={priceScaleInset}
         />
         {/* Right-click context menu — chart UI overlay (presentation-only).
-            Reflects App's EXISTING Invert Scale / Auto state and invokes the
-            SAME actions the header controls use; it never touches candle data,
-            Pine, whitespace or replay state. scopeKey = instrument | timeframe
-            | replay: a change closes the menu so toggles never go stale. */}
+            Reflects App's EXISTING Invert Scale state and invokes the SAME
+            action the menu item uses; it never touches candle data, Pine,
+            whitespace or replay state. scopeKey = instrument | timeframe
+            | replay: a change closes the menu so the toggle never goes stale. */}
         <ChartContextMenu
           containerRef={chartWrapRef}
           invertScale={invertScale}
-          autoFollow={autoFollow}
           onToggleInvertScale={onToggleInvertScale}
-          onToggleAutoFollow={onToggleAutoFollow}
           scopeKey={`${replaySymbol ?? ""}|${bucketSec}|${session ? "replay" : "live"}`}
         />
       </div>

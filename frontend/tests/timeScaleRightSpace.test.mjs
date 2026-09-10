@@ -2,18 +2,15 @@
  * Time-scale right-side future-space contract tests (Node type-stripping runner):
  *   npm --prefix frontend run test
  *
- * Pins the TradingView-style behavior: the latest REAL candle must keep a
- * positive `rightOffset` of empty/future time to its right, the X axis must
- * continue rendering labels into that area, and realtime rollovers must NOT
- * erode the offset one bar at a time.
- *
- * The erosion mechanism is inside Lightweight Charts: when
- * `shiftVisibleRangeOnNewBar` is false (CandleKit's base default, chosen so
- * replay setData never auto-scrolls), LWC compensates each appended bar by
- * DECREMENTING the right offset (TimeScale._internal_update →
- * compensationShift). TradingChart.tsx therefore overrides it back to LWC's
- * native default `true` so the time scale advances with the last bar while
- * preserving the fixed right offset.
+ * Pins the no-auto-follow contract: the latest REAL candle keeps a positive
+ * `rightOffset` of future time to its right, the X axis renders labels into
+ * that area, and — critically — the chart NEVER slides right on its own.
+ * Auto-follow was removed by request: `shiftVisibleRangeOnNewBar` stays
+ * `false` (as in CandleKit's base options, chosen so replay setData never
+ * auto-scrolls) so LWC never advances the time scale with appended bars, and
+ * the whitespace-replacement refresh is also prevented from nudging the
+ * viewport. The user's position always wins; the "Scroll to latest" button is
+ * the only way back to the live edge.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -42,8 +39,8 @@ test("TradingChart re-enables shiftVisibleRangeOnNewBar so rollovers preserve th
   const code = stripComments(readSrc("src/components/TradingChart/TradingChart.tsx"));
   assert.match(
     code,
-    /shiftVisibleRangeOnNewBar:\s*true/,
-    "LWC must advance the time scale with the last bar instead of eating the right offset per rollover",
+    /shiftVisibleRangeOnNewBar:\s*false/,
+    "Auto-follow removed: LWC must never advance the time scale with appended bars (the viewport stays where the user put it)",
   );
 });
 
@@ -55,20 +52,20 @@ test("TradingChart never calls fitContent() at runtime (would zero the right off
   );
 });
 
-test("TradingChart allows the shift when an update replaces whitespace slots", () => {
+test("TradingChart keeps the whitespace-replacement shift disabled (auto-follow removed)", () => {
   // LWC gate (lightweight-charts 5.2.1, ChartModel._internal_updateTimeScale):
   //   needShift = isLastSeriesBarVisible
   //     && (!replacedExistingWhitespace || allowShiftVisibleRangeOnWhitespaceReplacement)
   //     && shiftVisibleRangeOnNewBar;
   // WhitespaceBridge's trailing-slot setData() on every live rollover IS a
-  // whitespace-replacing update (firstChangedPointIndex === undefined), so
-  // without this native option LWC suppresses the shift and eats one bar of
-  // right offset per new candle. Must stay `true` in live mode.
+  // whitespace-replacing update; keeping this native option disabled means
+  // even that refresh never nudges the viewport right — the user's position
+  // always wins.
   const code = stripComments(readSrc("src/components/TradingChart/TradingChart.tsx"));
   assert.match(
     code,
-    /allowShiftVisibleRangeOnWhitespaceReplacement:\s*true/,
-    "trailing-slot setData() replaces whitespace each rollover — LWC must still shift or the right offset decays 1 bar/candle",
+    /allowShiftVisibleRangeOnWhitespaceReplacement:\s*false/,
+    "whitespace-slot refreshes must not re-enable auto-follow motion",
   );
 });
 
