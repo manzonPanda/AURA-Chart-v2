@@ -35,6 +35,7 @@ import { useChartApi } from "@getcandlekit/charts/react";
 
 import type { Candle, CandleGap } from "../../types/candle.ts";
 import { buildWhitespacePlan } from "../../services/whitespaceRows.ts";
+import type { HorizonCalendar } from "../../services/marketCalendar.ts";
 
 /** Matches `chart.addSeries(LineSeries, ...)` (LWC default `Time` generic). */
 type WhitespaceSeries = ISeriesApi<"Line">;
@@ -44,6 +45,8 @@ export function WhitespaceBridge({
   gaps,
   bucketSec,
   replayActive,
+  calendar = null,
+  formingBucketSec = null,
 }: {
   candles: readonly Candle[];
   /** Detected market-data gaps (epoch ms) — only these establish slots. */
@@ -51,6 +54,14 @@ export function WhitespaceBridge({
   bucketSec: number;
   /** Replay owns the chart while active — whitespace must vanish. */
   replayActive: boolean;
+  /** Instrument market calendar → session-aware ~24h trading-time future
+   *  horizon (breaks/weekends/holidays excluded). Null → minimal fixed
+   *  rightOffset reservation fallback. */
+  calendar?: HorizonCalendar | null;
+  /** Forming candle's bucket-start (epoch s) — the ROLLOVER trigger. Changes
+   *  once per completed bucket (never per tick), so the horizon slides forward
+   *  exactly one bucket per new candle without any per-tick recompute. */
+  formingBucketSec?: number | null;
 }): null {
   const api = useChartApi();
   const seriesRef = useRef<WhitespaceSeries | null>(null);
@@ -89,10 +100,19 @@ export function WhitespaceBridge({
 
   // Whitespace payload — recomputed ONLY when the underlying data changes
   // (memoized: a fresh object identity per render would re-run setData).
+  // `formingBucketSec` is the deliberate ROLLOVER trigger: the forming
+  // candle's bucket-start is constant within a bucket and advances once per
+  // completed bucket, so the future horizon slides one bucket per new candle
+  // — once per minute at 1m, never on intrabucket price ticks.
   const plan = useMemo(() => {
     if (replayActive) return { slots: [] as readonly number[], anchors: [] }; // replay: no whitespace
-    return buildWhitespacePlan(candles, gaps ?? [], bucketSec);
-  }, [candles, gaps, bucketSec, replayActive]);
+    // Live mode: register the session-aware future horizon (OHLC-free trailing
+    // time slots) so the X axis renders native future-time labels into the
+    // empty right-side area (TradingView-style). Replay is already suppressed
+    // above; exhausted sessions receive live:false at the parent.
+    return buildWhitespacePlan(candles, gaps ?? [], bucketSec, { live: true, calendar });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candles, gaps, bucketSec, replayActive, calendar, formingBucketSec]);
 
   useEffect(() => {
     const series = seriesRef.current;

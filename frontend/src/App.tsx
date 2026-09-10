@@ -781,6 +781,7 @@ export default function App() {
           smaSettings={smaSettings}
           pineIndicators={importedPine}
           pineSymbol={pineSymbol}
+          marketCalendar={selectedInstrument?.calendar ?? null}
           onPineStatus={handlePineStatus}
           invertScale={chartSettings.invertScale}
           onToggleInvertScale={toggleInvertScale}

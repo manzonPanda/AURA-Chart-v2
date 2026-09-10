@@ -40,6 +40,7 @@ import { defaultEmaSettings, type EmaSettings } from "../../config/emaSettings";
 import type { SmaSettings } from "../../config/smaSettings";
 import type { ImportedPineIndicator, PineRunStatus } from "../../services/pineImport";
 import type { PineSymbolMeta } from "../../services/pineEngineTypes";
+import type { HorizonCalendar } from "../../services/marketCalendar";
 import type { Candle, CandleGap } from "../../types/candle";
 import { ActiveIndicatorsOverlay } from "./ActiveIndicatorsOverlay";
 import { CandleCountdownPrimitive, type CountdownCandle } from "./CandleCountdownPrimitive";
@@ -243,6 +244,9 @@ interface Props {
   pineIndicators?: ImportedPineIndicator[];
   /** Active instrument metadata → syminfo (mintick etc.) for scripts. */
   pineSymbol?: PineSymbolMeta | null;
+  /** Instrument's market calendar (from /api/instruments) — drives the
+   *  session-aware future time-axis horizon (breaks/weekends excluded). */
+  marketCalendar?: HorizonCalendar | null;
   /** Runtime status reporter for imported Pine indicators. */
   onPineStatus?: (id: string, status: PineRunStatus) => void;
   /**
@@ -798,6 +802,7 @@ export function TradingChart({
   smaSettings,
   pineIndicators = [],
   pineSymbol = null,
+  marketCalendar = null,
   onPineStatus,
   invertScale = false,
   onToggleInvertScale,
@@ -901,6 +906,32 @@ export function TradingChart({
       timeScale: {
         barSpacing: 9,
         rightOffset: 8,
+        // TradingView-style future-time breathing room: keep the latest REAL
+        // candle rightOffset bars away from the right edge and let the axis
+        // render future time labels in that empty area.
+        //
+        // CandleKit's base options force `shiftVisibleRangeOnNewBar: false`
+        // (so replay setData never auto-scrolls). With `false`, LWC compensates
+        // every appended realtime bar by DECREMENTING the right offset
+        // (TimeScale._internal_update → compensationShift), so the 8-bar future
+        // space is eaten one bar per rollover until the live candle sits flush
+        // against the right edge. Re-enabling LWC's native default makes the
+        // time scale advance WITH the last bar while preserving the fixed
+        // right offset. Replay is unaffected: it paints full slices via setData
+        // and ViewportBridge already re-anchors at the edge.
+        shiftVisibleRangeOnNewBar: true,
+        // The LIVE trailing whitespace slots (whitespaceRows opts.live) make
+        // every rollover a whitespace-REPLACING update: WhitespaceBridge's
+        // setData() has `firstChangedPointIndex === undefined`, which LWC
+        // treats as "replaced existing whitespace" and — with this option at
+        // its default `false` — SUPPRESSES the shift above and instead
+        // decrements the right offset by one bar per new candle (measured:
+        // 8 → -4 over 12 rollovers). Enabling it restores the TradingView
+        // follow so the candle keeps exactly `rightOffset` bars of labeled
+        // future space while realtime candles advance. Verified headless:
+        // scrollPosition stays 8/8/8… and `to === lastSlotLogical` exactly.
+        // Replay is unaffected — replay registers no whitespace at all.
+        allowShiftVisibleRangeOnWhitespaceReplacement: true,
         // Missing-gap whitespace slots PARTICIPATE in grid lines, tick marks
         // and crosshair snapping — the IG-like empty-time behavior. This is
         // already the LWC default for standard charts; set explicitly to
@@ -980,6 +1011,14 @@ export function TradingChart({
   // every indicator keep running on REAL candles; these slots exist solely so
   // drawing anchors can be remapped onto the shifted logical grid. Empty
   // during replay — the replay timeline is compacted (no whitespace).
+  //
+  // Deliberately WITHOUT opts.live: these slots feed PineBridge's drawing-anchor
+  // REMAP, whose future-extension formula `logical + slots.length` assumes
+  // every slot PRECEDES the future logicals. The 8 LIVE trailing slots sit
+  // AFTER the last candle — they fill the rightOffset breathing room on the
+  // axis (WhitespaceBridge registers them) but must NOT shift future engine
+  // logicals, or extrapolated drawing edges (session boxes) would land 8 bars
+  // too far right.
   const whitespaceSlots = useMemo(
     () => (session ? [] : buildWhitespacePlan(candles, gaps ?? [], bucketSec).slots),
     [session, candles, gaps, bucketSec],
@@ -1297,6 +1336,8 @@ export function TradingChart({
             gaps={gaps}
             bucketSec={bucketSec}
             replayActive={session !== null}
+            calendar={marketCalendar}
+            formingBucketSec={liveCandle?.time ?? null}
           />
         </ChartView>
         {/* Upper-left indicator legend — compact TradingView-style control
