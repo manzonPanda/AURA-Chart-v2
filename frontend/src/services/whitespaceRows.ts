@@ -27,6 +27,16 @@
  */
 import type { CandleGap } from "../types/candle.ts";
 import { mergeGapIntervals } from "./gapRegions.ts";
+import { buildFutureHorizon, type HorizonCalendar } from "./marketCalendar.ts";
+
+/** Bars of future, OHLC-free time-scale space reserved after the last real
+ * candle in live view — mirrors TradingChart.tsx `timeScale.rightOffset` (=8).
+ * The trailing slots exist solely so the X axis can render native tick marks
+ * and future-time labels into the blank area TradingView shows to the right of
+ * the latest live candle. If this ever drifts from `rightOffset`, labels still
+ * render but may not span the full empty region. NOT a constant candle count
+ * or fake OHLC — just registered timestamps on the time scale. */
+const RIGHT_OFFSET_BARS = 8;
 
 /** One real candle bounding a gap — anchor row for the invisible series. */
 export interface WhitespaceAnchor {
@@ -114,13 +124,17 @@ export function buildWhitespacePlan(
   candles: readonly { ts: number; close: number }[],
   gaps: readonly CandleGap[],
   bucketSec: number,
+  /** When true (live view), append `RIGHT_OFFSET_BARS` future time-only slots
+   * after the last real candle so Lightweight Charts can render native tick
+   * marks / future-time labels into the empty right-side area. Supplied as
+   * `live: false` (or omitted) during replay / exhausted sessions. */
+  opts?: { live?: boolean; calendar?: HorizonCalendar | null },
 ): WhitespacePlan {
   if (!Number.isFinite(bucketSec) || bucketSec <= 0 || candles.length === 0) {
     return { slots: [], anchors: [] };
   }
   const bucketMs = bucketSec * 1000;
   const merged = mergeGapIntervals(gaps);
-  if (merged.length === 0) return { slots: [], anchors: [] };
   const times = candles.map((c) => c.ts);
 
   const slotSet = new Set<number>();
@@ -151,6 +165,40 @@ export function buildWhitespacePlan(
       anchors.set(right.ts, { time: right.ts, value: right.close });
     }
   }
+  // ── LIVE trailing whitespace ─────────────────────────────────────────────
+  // TradingView-style future time labels: register empty, OHLC-free,
+  // bucket-aligned time points strictly AFTER the last real candle so native
+  // tick marks / labels render into the `rightOffset: 8` blank breathing room.
+  //
+  // Session-aware horizon (approved design): when the instrument's market
+  // calendar is supplied, the horizon is ~24h of TRADING time via the backend
+  // calendar port (`buildFutureHorizon`) — daily breaks (DAX 05:00–08:00,
+  // Gold 22:00–23:00), weekends and holidays are EXCLUDED (labels there would
+  // be fiction), the DAX overnight session is INCLUDED, and a weekend/holiday
+  // anchor extends until ≥ MIN_TAIL_SLOTS with 7-day / 6000-slot caps.
+  // Without a calendar (defensive fallback, e.g. catalog not yet loaded) the
+  // minimal fixed RIGHT_OFFSET_BARS reservation keeps the breathing room.
+  //
+  //   - time-only (no OHLC): only `{ time }` rows, never an anchor close;
+  //   - strictly after the last candle, so no collision with real data; the
+  //     shared Set dedups against gap slots for defensive parity;
+  //   - bounded & deterministic (caps above) — never an unbounded series;
+  //   - inactive on `live: false` (replay/exhausted) so replay stays compacted.
+  if (opts?.live) {
+    const lastTs = candles[candles.length - 1]!.ts;
+    if (opts.calendar) {
+      for (const t of buildFutureHorizon(opts.calendar, lastTs, bucketSec)) {
+        slotSet.add(t);
+      }
+    } else {
+      const lastBucketStart = Math.floor(lastTs / bucketMs) * bucketMs;
+      const firstFuture = lastBucketStart + bucketMs; // strictly > lastTs
+      for (let i = 0; i < RIGHT_OFFSET_BARS; i++) {
+        slotSet.add(firstFuture + i * bucketMs);
+      }
+    }
+  }
+
   return {
     slots: [...slotSet].sort((a, b) => a - b),
     anchors: [...anchors.values()].sort((a, b) => a.time - b.time),
