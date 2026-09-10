@@ -67,6 +67,7 @@ import { resolveGapBands } from "../../services/gapRegions";
 import { GapRegionsPrimitive } from "./GapRegionsPrimitive";
 import { WhitespaceBridge } from "./WhitespaceBridge";
 import { buildWhitespacePlan } from "../../services/whitespaceRows";
+import { mergeBridgeBars } from "../../services/pineSeries";
 
 /**
  * DATA GAP shading — attaches the gap primitive to the chart's main series
@@ -774,7 +775,28 @@ export function TradingChart({
   // We accumulate live candles in a state array and merge into each bucket.
   // NEVER call setData per tick — only on NEW buckets or history sync.
   // Intrabucket ticks are handled by LiveBarBridge's incremental updateBar.
-  const [liveCandles, setLiveCandles] = useState<Bar[]>([]);
+      const [liveCandles, setLiveCandles] = useState<Bar[]>([]);
+
+  // ── Closed-live-bucket ledger ────────────────────────────────────────────────
+  // App's `candles` history is frozen at load — live bucket rollovers are only
+  // painted into the CandleKit controller (LiveBarBridge), never written back to
+  // state. The indicator bridges (EMA/SMA/Pine) build their input from a frozen
+  // history slice + the single forming candle, so every live bucket that closes
+  // after the last history load silently disappears from the Pine input.
+  //
+  // This ledger captures each genuinely-closed live bucket exactly once so the
+  // bridges can reconstruct the complete:
+  //   [historical bars] + [closed-live ledger] + [forming candle]
+  // series. It is:
+  //   - scoped to the current instrument + timeframe (reset on switch / refresh);
+  //   - only populated in LIVE mode (cleared and unused during replay);
+  //   - never fed to ChartView / history / pagination / viewport.
+  const [closedLiveBars, setClosedLiveBars] = useState<Bar[]>([]);
+  // Track the previous forming candle's bucket time to detect rollovers WITHOUT
+  // stale React closures — refs always hold the latest value inside effects.
+  const prevFormingTsRef = useRef<number | null>(null);
+  // Ref storing the previous forming candle's full OHLC (for rollover capture).
+  const prevFormingBarRef = useRef<RealtimeCandleMsg | null>(null);
 
   const bucketSec = resolutionToBucketSec(resolution);
 
@@ -822,14 +844,82 @@ export function TradingChart({
       }
       return prev;
     });
-  }, [candles.length, liveCandle, bucketSec]);
+      }, [candles.length, liveCandle, bucketSec]);
+
+  // ── Closed-live-bucket capture (LIVE mode only) ──────────────────────────────
+  // When history IS present, the `liveCandles` effect above early-returns and
+  // never sees rollovers. This parallel effect runs on every live tick whenever
+  // history exists, detects bucket rollovers by comparing the forming candle's
+  // bucket time against the previous frame, and commits the previous forming
+  // candle's TRUE OHLC to the closed-live ledger — exactly once per bucket.
+  //
+  // Each WS `liveCandle` is a full server OHLC snapshot of the forming bucket
+  // (TCP-ordered, last-write-wins). So the last frame before a rollover IS the
+  // closed bucket's final OHLC — there is no glide/animated value here.
+  //
+  // Stale-closure safety: refs hold the live values (`prevFormingTsRef.current`,
+  // `prevFormingBarRef.current`), so the comparison is always against the real
+  // previous frame, not a closure snapshot. No tick is missed and no bucket is
+  // recorded twice: we only push when the bucket time strictly advances, and
+  // dedup by ts on insert.
+  useEffect(() => {
+    if (candles.length === 0) {
+      // Live-only mode: liveCandles accumulates the full series; no ledger needed.
+      prevFormingTsRef.current = liveCandle ? liveCandle.time : null;
+      prevFormingBarRef.current = liveCandle ?? null;
+      return;
+    }
+    if (!liveCandle) return;
+
+    const prevTs = prevFormingTsRef.current;
+
+    // Rollover: the forming bucket advanced → the previous bucket is now closed.
+    if (prevTs !== null && liveCandle.time > prevTs) {
+      const prev = prevFormingBarRef.current;
+      if (prev) {
+        const bucketMs = bucketSec * 1000;
+        const prevBucketTs = Math.floor((prev.time * 1000) / bucketMs) * bucketMs;
+        const closedBar: Bar = {
+          ts: prevBucketTs,
+          open: prev.open,
+          high: prev.high,
+          low: prev.low,
+          close: prev.close,
+          ...(Number.isFinite(prev.volume) ? { volume: prev.volume } : {}),
+        };
+        setClosedLiveBars((prevList) => {
+          // Dedup by bucket ts — never record the same rollover twice.
+          if (prevList.some((b) => b.ts === prevBucketTs)) return prevList;
+          return [...prevList, closedBar];
+        });
+      }
+    }
+
+    // Store the current forming frame for the next rollover detection.
+    prevFormingTsRef.current = liveCandle.time;
+    prevFormingBarRef.current = liveCandle;
+  }, [liveCandle, candles.length, bucketSec]);
+
+
+
 
   const data = useMemo<Bar[]>(() => {
     if (candles.length > 0) {
       return candles.map((c) => asBar({ ...c, ts: alignToBucketStart(c.ts, bucketSec) }));
     }
     return liveCandles;
-  }, [candles, bucketSec, liveCandles]);
+    }, [candles, bucketSec, liveCandles]);
+
+  // ── Closed-live-bucket ledger reset ───────────────────────────────────────────
+  // The ledger is scoped to the current instrument + timeframe. When the
+  // instrument changes (candles cleared by App) or the timeframe changes
+  // (bucketSec changes), reset the refs AND the ledger state so stale
+  // candles from another context can never leak into the new stream.
+  useEffect(() => {
+    setClosedLiveBars([]);
+    prevFormingTsRef.current = null;
+    prevFormingBarRef.current = null;
+  }, [candles, bucketSec]);
 
   // OHLC strip: crosshair-hovered candle takes priority, else the latest forming candle.
   const last: Candle | undefined = liveCandle
@@ -1166,6 +1256,32 @@ export function TradingChart({
   })();
   const replayActive = session !== null;
 
+  // ── Bridge bars: authoritative series for EMA / SMA / Pine ──────────────────
+  // During LIVE mode: historical bars + closed-live ledger + forming candle.
+  // During REPLAY: the cursor slice (visibleBars) — no ledger, no forming, so
+  // indicators can NEVER see live future data or closed-live buckets.
+  //
+  // Declared AFTER `session`/`visibleBars` so the useMemo closure captures the
+  // final values (a TDZ reference here throws at runtime — this is the
+  // "Cannot access 'session' before initialization" crash from the bridge
+  // wiring landing above the replay state declarations).
+  const bridgeBars = useMemo<readonly Bar[]>(() => {
+    if (session) {
+      // Replay: use the cursor slice exactly as before.
+      return visibleBars;
+    }
+    // Live: merge historical + closed-live ledger + forming candle into the
+    // complete, strictly-ordered, no-duplicates series the bridges need.
+    return mergeBridgeBars(
+      candles.length > 0
+        ? candles.map((c) => asBar({ ...c, ts: alignToBucketStart(c.ts, bucketSec) }))
+        : liveCandles,
+      closedLiveBars,
+      liveCandle ?? null,
+      bucketSec,
+    );
+  }, [session, candles, bucketSec, liveCandles, closedLiveBars, liveCandle, visibleBars]);
+
   // ── Unified-header reporting (the old bottom `.chart-footer` is gone) ──────
   // Quote candle (crosshair ?? replay cursor ?? latest) is pushed UP to App,
   // which renders the OHLC strip in the top header. App's setter is
@@ -1235,8 +1351,8 @@ export function TradingChart({
               is active the bars are the cursor slice and the present-day
               forming candle is withheld, so indicators can never see the
               future. */}
-          <EmaBridge
-            bars={visibleBars}
+                                        <EmaBridge
+            bars={bridgeBars}
             liveCandle={session ? null : liveCandle}
             bucketSec={bucketSec}
             settings={emaSettings}
@@ -1245,8 +1361,8 @@ export function TradingChart({
               candles, same lifecycle + anti-look-ahead guarantees as EmaBridge
               (cursor slice during Replay, live truth merged per tick). */}
           {smaSettings && (
-            <SmaBridge
-              bars={visibleBars}
+                        <SmaBridge
+              bars={bridgeBars}
               liveCandle={session ? null : liveCandle}
               bucketSec={bucketSec}
               settings={smaSettings}
@@ -1254,8 +1370,8 @@ export function TradingChart({
           )}
           {/* Imported Pine indicators — same generic Piner engine path as the
               EMAs, rendered via native LWC panes when overlay=false. */}
-          <PineBridge
-            bars={visibleBars}
+                    <PineBridge
+            bars={bridgeBars}
             liveCandle={session ? null : liveCandle}
             bucketSec={bucketSec}
             indicators={pineIndicators}

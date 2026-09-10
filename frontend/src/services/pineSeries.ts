@@ -44,6 +44,71 @@ export interface PineSeriesLiveCandle {
 }
 
 /**
+ * Merge historical candles + closed-live-bucket ledger + forming candle into the
+ * single authoritative bar series the indicator bridges feed to Pine/EMA/SMA.
+ *
+ * WHY THIS EXISTS:
+ *   App's `candles` history state is only refreshed on history load / timeframe
+ *   switch / refresh. Live rollovers, however, are painted by LiveBarBridge
+ *   directly into the CandleKit controller — they NEVER flow back into the React
+ *   `candles` array. Without this merge, bridges receive
+ *     [historical bars] + [single forming candle]
+ *   and every live bucket that closed AFTER the last history load silently
+ *   vanishes from the Pine input, so EMA/EMA/SMA diverge from TradingView and
+ *   appear stale. This function reconstructs the complete series.
+ *
+ *   - `historical` = App's loaded candles (already bucket-aligned, epoch ms ts).
+ *   - `closedLive` = ledger of live buckets that have closed since the last
+ *     history load (captured by TradingChart on each rollover).
+ *   - `forming`  = latest forming WS candle (bucket start, epoch s) | null.
+ *
+ * Merge rules (same semantics as effectiveCloseSeries in ema.ts):
+ *   - same bucket ts → real/latest candle wins (server truth replaces)
+ *   - strictly ascending ts
+ *   - no duplicate timestamps
+ *   - forming candle is appended LAST
+ *
+ * Pure + framework-free (no React/DOM/engine imports) — unit-testable.
+ */
+export function mergeBridgeBars(
+  historical: readonly PineSeriesBar[],
+  closedLive: readonly PineSeriesBar[],
+  forming: PineSeriesLiveCandle | null,
+  bucketSec: number,
+): PineSeriesBar[] {
+  const bucketMs = bucketSec > 0 ? bucketSec * 1000 : 1000;
+  const out: PineSeriesBar[] = [];
+  const seen = new Set<number>();
+
+  // Historical first — preserves original order, these are already sorted.
+  for (const b of historical) {
+    if (!seen.has(b.ts)) {
+      seen.add(b.ts);
+      out.push(b);
+    }
+  }
+  // Then closed-live ledger — newer than history by construction.
+  for (const b of closedLive) {
+    if (!seen.has(b.ts)) {
+      seen.add(b.ts);
+      out.push(b);
+    }
+  }
+  // Then the forming candle — replaced in place if its bucket ts already exists
+  // (it shouldn't in live mode, but the guard keeps this race-free), else appended.
+  if (forming && Number.isFinite(forming.time)) {
+    const liveBucketTs = Math.floor((forming.time * 1000) / bucketMs) * bucketMs;
+    const idx = out.findIndex((b) => b.ts === liveBucketTs);
+    if (idx >= 0) {
+      out[idx] = { ts: liveBucketTs, open: forming.open, high: forming.high, low: forming.low, close: forming.close, volume: forming.volume };
+    } else {
+      out.push({ ts: liveBucketTs, open: forming.open, high: forming.high, low: forming.low, close: forming.close, volume: forming.volume });
+    }
+  }
+  return out;
+}
+
+/**
  * Build the authoritative, full-OHLCV candle series for the Pine engine from the
  * chart's closed bars + the forming WS candle, REUSING `effectiveCloseSeries`
  * so the close stream feeding indicators is identical to ema.ts.

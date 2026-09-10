@@ -33,6 +33,7 @@ import {
   type PineVisual,
 } from "../../services/pineEngineTypes";
 import { createPineEngine } from "../../services/pineEngineFactory";
+import { CoalescedFlights } from "../../services/pineCoalesce";
 import type { PinePlotStyleOverride, PineStyleOverrides } from "../../services/pineStyle";
 import type { RealtimeCandleMsg } from "../../services/realtime";
 import { PineLabelPrimitive } from "./pineLabelPrimitive";
@@ -156,6 +157,27 @@ export function PineBridge({
   const onStatusRef = useRef(onStatus);
   onStatusRef.current = onStatus;
 
+  // ── Per-indicator coalescing state ──────────────────────────────────────────
+  // Killzone fix: at most ONE compute in flight per indicator. When realtime
+  // frames arrive mid-flight we mark the indicator dirty (never enqueue) and
+  // run exactly one follow-up when the flight resolves, against the engine's
+  // latest candle state — so a slow drawing script stops being discarded by a
+  // global generation counter that invalidates every computation on every tick.
+  // Pure logic in services/pineCoalesce.ts (Node-testable).
+  const flightsRef = useRef<CoalescedFlights>(new CoalescedFlights());
+
+  // Latest-input refs — a dirty follow-up must re-read the CURRENT values
+  // (not the effect closure that scheduled it), so the engine and the renderer
+  // always act on the newest candles / forming bar.
+  const barsRef = useRef<readonly Bar[]>(bars);
+  barsRef.current = bars;
+  const liveCandleRef = useRef<RealtimeCandleMsg | null>(liveCandle);
+  liveCandleRef.current = liveCandle;
+  const bucketSecRef = useRef<number>(bucketSec);
+  bucketSecRef.current = bucketSec;
+  const symbolRef = useRef<PineSymbolMeta | null>(symbol ?? null);
+  symbolRef.current = symbol ?? null;
+
   const newState = (paneIndex: number): IndicatorChartState => ({
     paneIndex,
     data: new Map(),
@@ -252,6 +274,9 @@ export function PineBridge({
 
   /** Tear down EVERYTHING owned by the bridge (series, carriers, panes). */
   const teardownAll = (chart: IChartApi): void => {
+    // Cancel every in-flight computation: any pending result becomes stale and
+    // can never paint into the rebuilt chart; dirty follow-ups are dropped too.
+    flightsRef.current.cancelAll();
     for (const st of stateRef.current.values()) {
       const series: ISeriesApi<"Line">[] = [
         ...[...st.data.values()].map((e) => e.series as ISeriesApi<"Line">),
@@ -652,6 +677,107 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
     return paintedAny;
   };
 
+  /**
+   * Coalesced per-indicator computation flight.
+   *
+   * At most ONE compute per indicator is ever in flight. The caller (data
+   * effect) marks the indicator dirty when realtime frames arrive while this
+   * flight is running — never enqueuing a second compute. When this flight
+   * resolves it paints its result (it is the only flight for its id, so it can
+   * never overwrite a newer completed result), then runs EXACTLY ONE dirty
+   * follow-up against the engine's LATEST candle state. No queue is ever built.
+   *
+   * Stale-result protection is PER INDICATOR / PER FLIGHT: each flight takes a
+   * per-id generation token. Cancellation (layout change / teardown) bumps the
+   * id's token, so a stale resolved compute can never paint over a newer exit.
+   */
+  const computeAndPaint = async (id: string): Promise<void> => {
+    if (!api) return;
+    const flights = flightsRef.current;
+    const token = flights.begin(id);
+    if (!token) return; // a flight is already in flight (the effect guards this too)
+
+    const s = desiredLayout(indicatorsRef.current).find((x) => x.id === id);
+    const ind = indicatorsRef.current.find((x) => x.id === id);
+    if (!s || !ind) {
+      // Indicator removed while this flight was pending — nothing to paint.
+      flights.cancel(id);
+      return;
+    }
+
+    let st = stateRef.current.get(id);
+    if (!st) {
+      st = newState(s.paneIndex);
+      stateRef.current.set(id, st);
+    }
+    st.paneIndex = s.paneIndex;
+
+    let rawError: string | null = null;
+    let run: { visuals: PineVisual[] } | null = null;
+    try {
+      run = await engineRef.current.computeScriptVisuals(
+        {
+          id: s.id,
+          source: ind.source,
+          bindings: ind.inputMeta.map((m) => ({ title: m.title, paramKey: m.varId })),
+        },
+        ind.inputs,
+        (raw) => {
+          rawError = raw;
+        },
+      );
+    } catch (e) {
+      rawError = e instanceof Error ? e.message : String(e);
+    }
+
+    // Stale-result protection (per indicator / per flight): a resolved compute
+    // paints ONLY while its token is still the CURRENT flight for its id. A
+    // cancelled flight (layout change / teardown) can never paint over a newer
+    // exit.
+    if (!flights.isCurrent(id, token)) {
+      return;
+    }
+
+    const chart: IChartApi = api.controller.getChart();
+    const candleSeries = (api.controller as unknown as { getSeries?: () => unknown }).getSeries?.() as
+      | ISeriesApi<"Line">
+      | undefined
+      | null;
+
+    try {
+      if (run === null) {
+        clearPainted(st);
+        report(id, { ok: false, message: friendlyPineError(rawError ?? "Pine Script execution failed") });
+      } else {
+        // barsRef.current = the LATEST authoritative bridge bars (the forming
+        // candle's truth merged in), so drawings/labels anchor to the newest data.
+        const painted = applyVisuals(chart, st, run.visuals, candleSeries ?? null, barsRef.current, ind.style ?? EMPTY_STYLE);
+        report(
+          id,
+          painted
+            ? { ok: true }
+            : {
+                ok: false,
+                message:
+                  run.visuals.length === 0
+                    ? "Compiled — but nothing AURA can render (see the indicator's import details)."
+                    : "No finite values yet — waiting for enough candles.",
+              },
+        );
+      }
+    } catch {
+      /* one bad indicator must not break the others */
+    }
+
+    // Release the flight; when an update arrived mid-flight, run exactly ONE
+    // dirty follow-up against the engine's LATEST candle state — `setCandles`
+    // is called on every frame before any kick, so the engine is already
+    // current. At most one flight + one pending flag ever exist (no queue).
+    if (flights.finish(id, token)) {
+      void computeAndPaint(id);
+    }
+  };
+
   // ── effects ────────────────────────────────────────────────────────────────
 
   // Controller lifecycle — full teardown + engine reset when the chart
@@ -684,81 +810,46 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
   // Data — recompute from the authoritative candle state on every candle
   // frame / history load / indicator or input change. setCandles and the
   // result cache short-circuit everything that didn't actually change.
+  //
+  // PER-INDICATOR COALESCING (killzone fix): each enabled indicator gets at
+  // most ONE computation in flight. When a realtime frame arrives while a
+  // computation is running we do NOT enqueue another — we mark the indicator
+  // dirty and keep the engine's candle state fresh (setCandles below). When
+  // the running computation resolves it paints (it is the only flight for its
+  // id, so it cannot overwrite a newer result), then exactly one dirty
+  // follow-up runs against the latest engine state. Slow scripts (killzones,
+  // heavy MAs) therefore keep painting under continuous ticks instead of being
+  // discarded by a global generation counter that increments on every frame.
   useEffect(() => {
     if (!api) return;
-    const chart: IChartApi = api.controller.getChart();
-    // CandleKit's candle series hosts overlay markers + price lines. Cast:
-    // those APIs are series-type independent (documented in the header).
-    const candleSeries = (api.controller as unknown as { getSeries?: () => unknown }).getSeries?.() as
-      | ISeriesApi<"Line">
-      | undefined
-      | null;
-    const pineBars = (bars as readonly Bar[]) as readonly PineBar[];
-    const pineLive: PineLiveCandle | null = liveCandle
+    // 1. ALWAYS push the latest authoritative candle state into the engine —
+    //    even while a prior computation is still in flight. The engine reads
+    //    `this.klines` at execution time, so every follow-up operates on the
+    //    newest data (pinePinerEngine `computeScriptVisuals`).
+    const pineBars = (barsRef.current as readonly Bar[]) as readonly PineBar[];
+    const live = liveCandleRef.current;
+    const pineLive: PineLiveCandle | null = live
       ? {
-          time: liveCandle.time,
-          open: liveCandle.open,
-          high: liveCandle.high,
-          low: liveCandle.low,
-          close: liveCandle.close,
-          volume: liveCandle.volume,
+          time: live.time,
+          open: live.open,
+          high: live.high,
+          low: live.low,
+          close: live.close,
+          volume: live.volume,
         }
       : null;
-    engineRef.current.setCandles(pineBars, pineLive, bucketSec, symbol ?? null);
+    engineRef.current.setCandles(pineBars, pineLive, bucketSecRef.current, symbolRef.current);
 
-    void Promise.all(
-      desiredLayout(indicators).map(async (s) => {
-        const ind = indicatorsRef.current.find((x) => x.id === s.id);
-        if (!ind) return;
-
-        let st = stateRef.current.get(s.id);
-        if (!st) {
-          st = newState(s.paneIndex);
-          stateRef.current.set(s.id, st);
-        }
-        st.paneIndex = s.paneIndex;
-
-        let rawError: string | null = null;
-        let run: { visuals: PineVisual[] } | null = null;
-        try {
-          run = await engineRef.current.computeScriptVisuals(
-            {
-              id: s.id,
-              source: ind.source,
-              bindings: ind.inputMeta.map((m) => ({ title: m.title, paramKey: m.varId })),
-            },
-            ind.inputs,
-            (raw) => {
-              rawError = raw;
-            },
-          );
-        } catch (e) {
-          rawError = e instanceof Error ? e.message : String(e);
-        }
-
-        if (run === null) {
-          clearPainted(st);
-          report(s.id, { ok: false, message: friendlyPineError(rawError ?? "Pine Script execution failed") });
-          return;
-        }
-
-        const painted = applyVisuals(chart, st, run.visuals, candleSeries ?? null, bars, ind.style ?? EMPTY_STYLE);
-        report(
-          s.id,
-          painted
-            ? { ok: true }
-            : {
-                ok: false,
-                message:
-                  run.visuals.length === 0
-                    ? "Compiled — but nothing AURA can render (see the indicator's import details)."
-                    : "No finite values yet — waiting for enough candles.",
-              },
-        );
-      }),
-    ).catch(() => {
-      /* one bad indicator must not break the others */
-    });
+    // 2. Kick coalesced recomputes — at most one flight per indicator; anything
+    //    that changes mid-flight is marked dirty for exactly one follow-up.
+    const flights = flightsRef.current;
+    for (const s of desiredLayout(indicatorsRef.current)) {
+      if (flights.isInFlight(s.id)) {
+        flights.markDirty(s.id);
+        continue;
+      }
+      void computeAndPaint(s.id);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, bars, liveCandle, bucketSec, indicators, symbol, whitespaceSlots]);
 
