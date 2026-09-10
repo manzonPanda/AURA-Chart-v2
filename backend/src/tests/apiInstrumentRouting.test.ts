@@ -37,9 +37,56 @@ const DAX = DAX_INSTRUMENT.epic; // IX.D.DAX.IGM.IP
 const GOLD = GOLD_INSTRUMENT.epic; // CS.D.CFIGOLD.CFI.IP
 const INSTRUMENTS: readonly InstrumentMeta[] = [DAX_INSTRUMENT, GOLD_INSTRUMENT];
 
-/** Sunday 2026-08-30 22:30 UTC = 23:30 London (BST): inside IG Spot Gold's
- *  Sunday window (23:00–24:00 UK) — and DAX is closed all Sunday. */
-const SUNDAY_BUCKET_SEC = Math.floor(Date.UTC(2026, 7, 30, 22, 30) / 1000);
+// ── Fixture bucket: most recent COMPLETED Sunday 23:30-London bucket ────────
+// Must sit inside IG Spot Gold's Sunday window (23:00–24:00 UK) while DAX is
+// closed all Sunday. The ORIGINAL hard-coded instant (2026-08-30 22:30 UTC =
+// 23:30 London BST) was a TIME BOMB: /gaps scans at most 240 h back, so once
+// `now` passed 2026-09-09 22:30 UTC the row fell OUTSIDE the scan range and
+// detectGaps' documented contract ("rows outside the range are unexpected —
+// informational") flagged it — a fixture defect, NOT a calendar/detector bug
+// (isBucketExpected provably returns true for Gold on that instant, false for
+// DAX). The fixture is therefore computed RELATIVE to runtime now: the most
+// recent Sunday whose 23:30 London bucket is fully completed and not a Gold
+// closure date. The most recent past Sunday-23:30 is always ≤ ~168 h old, so
+// it can never age out of the ≤240 h lookback. DST-safe: the 23:30 London
+// instant is derived PER DATE through Intl; UK DST transitions run Sundays
+// 01:00/02:00 local — never 23:30 — so the noon-anchored offset below is exact
+// (23:30 London = 22:30 UTC in BST, 23:30 UTC in GMT).
+const SUNDAY_BUCKET_SEC: number = (() => {
+  const fmt = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23", weekday: "short",
+  });
+  const partsOf = (ms: number): Map<string, string> => {
+    const map = new Map<string, string>();
+    for (const part of fmt.formatToParts(new Date(ms))) map.set(part.type, part.value);
+    return map;
+  };
+  const nowMs = Date.now();
+  let cursor = nowMs;
+  for (let hop = 0; hop < 9; hop++) {
+    const p = partsOf(cursor);
+    if (p.get("weekday") === "Sun") {
+      const y = Number(p.get("year"));
+      const mo = Number(p.get("month")) - 1;
+      const d = Number(p.get("day"));
+      // UTC instant of London NOON on this date: guess via UTC, correct once
+      // with the zone offset measured at that instant (constant all day
+      // except the 01:00/02:00 transition hour — far from noon and 23:30).
+      const noonGuess = Date.UTC(y, mo, d, 12);
+      const noonMinutes = Number(partsOf(noonGuess).get("hour")) * 60 +
+        Number(partsOf(noonGuess).get("minute"));
+      const noonUtc = noonGuess + (12 * 60 - noonMinutes) * 60_000;
+      const bucketStartMs = noonUtc + (23 * 60 + 30 - 12 * 60) * 60_000; // +11h30m
+      const date = `${p.get("year")}-${p.get("month")}-${p.get("day")}`;
+      const complete = bucketStartMs + 60_000 <= nowMs; // bucket fully closed
+      const notClosed = !IG_SPOT_GOLD.closedDates.includes(date);
+      if (complete && notClosed) return Math.floor(bucketStartMs / 1000);
+    }
+    cursor -= 24 * 60 * 60_000; // previous London day — at most 7 hops to a Sunday
+  }
+  throw new Error("fixture: no completable Sunday 23:30 London bucket found within 8 days");
+})();
 const ISO = (sec: number): string => new Date(sec * 1000).toISOString();
 
 /** Fake store: rows are instrument-TAGGED and filtered per request, exactly
