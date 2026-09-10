@@ -8,10 +8,31 @@
  * useInstruments() hook wires them to React.
  */
 import { API_BASE, ApiError } from "./api.ts";
+
+/** Trading window in the calendar timezone's wall clock (backend mirror). */
+export interface InstrumentCalendarWindow {
+  /** Inclusive opening minute since midnight (01:10 → 70). */
+  openMin: number;
+  /** Exclusive closing minute (05:00 → 300). */
+  closeMin: number;
+}
+
+/**
+ * Market calendar as served by GET /api/instruments — a structural mirror of
+ * the backend `MarketCalendar` (market/calendar.ts). The frontend NEVER
+ * hardcodes a second calendar; the future time-axis horizon (services/
+ * marketCalendar.ts) evaluates exactly these windows/holidays so forward
+ * whitespace slots agree with the backend gap detector on the bucket grid.
+ */
 export interface InstrumentCalendarInfo {
   id: string;
   label: string;
+  /** IANA zone the dealing hours are quoted in (Europe/London for both). */
   timezone: string;
+  /** ISO weekday (1=Mon … 7=Sun) → trading windows in `timezone` wall clock. */
+  windowsByWeekday: Readonly<Record<number, readonly InstrumentCalendarWindow[]>>;
+  /** Full closure dates ('YYYY-MM-DD' in `timezone`). */
+  closedDates: readonly string[];
 }
 
 export interface InstrumentInfo {

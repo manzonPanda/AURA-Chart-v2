@@ -21,8 +21,18 @@ export function createInstrumentsRouter(
         epic: m.epic,
         label: m.label,
         decimals: m.decimals,
+        // Full calendar serialization: the frontend's future time-axis horizon
+        // (session-aware whitespace slots) evaluates the SAME windows/holidays
+        // as the backend gap detector — one source of truth, no second
+        // calendar hardcoded client-side. Static data (~1.5 KB/instrument).
         calendar: m.calendar
-          ? { id: m.calendar.id, label: m.calendar.label, timezone: m.calendar.timezone }
+          ? {
+              id: m.calendar.id,
+              label: m.calendar.label,
+              timezone: m.calendar.timezone,
+              windowsByWeekday: m.calendar.windowsByWeekday,
+              closedDates: m.calendar.closedDates,
+            }
           : null,
       })),
     }),
