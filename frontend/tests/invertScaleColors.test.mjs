@@ -27,7 +27,11 @@ import {
   effectiveBullish,
   effectiveCandleColors,
 } from "../src/components/TradingChart/candleColors.ts";
-import { sanitizeChartSettings } from "../src/config/chartSettings.ts";
+import {
+  DEFAULT_THEME_ID,
+  defaultChartSettings,
+  sanitizeChartSettings,
+} from "../src/config/chartSettings.ts";
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -173,10 +177,40 @@ test("the App toggle flips only the boolean state — never the candle data", ()
 });
 
 test("chartSettings sanitizer drops color-shaped fields — settings stay presentation-only", () => {
-  assert.deepEqual(
-    sanitizeChartSettings({ invertScale: true, upColor: "red", downColor: "#0f0", bearishColor: "blue" }),
-    { invertScale: true },
-  );
+  const sanitized = sanitizeChartSettings({
+    invertScale: true,
+    upColor: "red",
+    downColor: "#0f0",
+    bearishColor: "blue",
+  });
+  // invertScale preserved; junk color keys never hoist onto the settings:
+  assert.equal(sanitized.invertScale, true, "invertScale preserved");
+    assert.equal(sanitized.upColor, undefined);
+  assert.equal(sanitized.downColor, undefined);
+  assert.equal(sanitized.bearishColor, undefined);
+  // The result is the full default profile plus the inverted flag:
+  assert.deepEqual(sanitized, { ...defaultChartSettings(), invertScale: true });
+  assert.equal(sanitized.appearance.theme, DEFAULT_THEME_ID, "theme fell back to baseline");
+});
+
+// ── Symbol-section wiring: the candle controls reach the existing series
+// through the SUPPORTED series-options API (no canvas hacks, no second series).
+test("CandleStyleBridge: native series.applyOptions + palette re-assert on the theme bus", () => {
+  const code = stripComments(readSrc("src/components/TradingChart/CandleStyleBridge.tsx"));
+  // Reads the EXISTING series (no recreation) and pushes options via the
+  // supported API — exactly how the Symbol section affects live candles:
+  assert.ok(code.includes("controller.getSeries()"), "targets the existing candlestick series");
+  assert.ok(code.includes("series.applyOptions("), "Symbol settings applied via series.applyOptions");
+  // Options are derived from the tested pure functions, never hand-rolled:
+  assert.ok(code.includes("effectiveCandleColors("), "palette derived via effectiveCandleColors");
+  assert.ok(code.includes("candleElementOptions("), "element toggles derived via candleElementOptions");
+  // Re-asserts the user palette whenever CandleKit restyles (same contract as
+  // InvertScaleBridge — never overwrites the user's picked colors):
+  assert.ok(code.includes('bus.on("theme"'), "palette re-asserted when CandleKit restyles");
+  // Guardrails: no canvas pixel hacking, no full-chart reconstruction:
+  assert.ok(!/getImageData|getContext/.test(code), "bridge must not touch the canvas");
+  assert.ok(!/setData(.*)/.test(code), "bridge must not rewrite the series data");
+  assert.ok(!/setTheme/.test(code), "bridge must not drive the chart theme (that is ChartThemeBridge)");
 });
 
 // ── Installed Lightweight-Charts bundle: the native colorer is OHLC-based ─────

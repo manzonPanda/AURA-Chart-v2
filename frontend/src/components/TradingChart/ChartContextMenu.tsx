@@ -20,6 +20,11 @@ interface Props {
    */
   onToggleInvertScale?: () => void;
   /**
+   * Opens App's Chart Settings modal (TradingView-style "Settings" entry).
+   * The modal itself is App-owned state — the menu only invokes it.
+   */
+  onOpenSettings?: () => void;
+  /**
    * Dataset scope (`instrument|timeframe|replay`). Any change — timeframe
    * switch, instrument switch, replay enter/exit — closes the menu so it can
    * never hover stale toggles over a different dataset.
@@ -45,6 +50,7 @@ export function ChartContextMenu({
   containerRef,
   invertScale,
   onToggleInvertScale,
+  onOpenSettings,
   scopeKey = "",
 }: Props) {
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -135,6 +141,11 @@ export function ChartContextMenu({
     setOpen(false);
   }, [onToggleInvertScale]);
 
+  const pickSettings = useCallback(() => {
+    onOpenSettings?.();
+    setOpen(false);
+  }, [onOpenSettings]);
+
   if (!open) return null;
 
   return (
@@ -156,6 +167,14 @@ export function ChartContextMenu({
         <span className="chart-context-menu-check" aria-hidden="true">
           ✓
         </span>
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        className="chart-context-menu-item"
+        onClick={pickSettings}
+      >
+        <span>Settings</span>
       </button>
     </div>
   );

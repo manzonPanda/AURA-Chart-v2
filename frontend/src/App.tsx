@@ -5,6 +5,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TradingChart } from "./components/TradingChart/TradingChart";
+import { ChartSettingsModal } from "./components/TradingChart/ChartSettingsModal";
 import { IndicatorsMenu } from "./components/Indicators/IndicatorsMenu";
 import {
   IndicatorSettingsModal,
@@ -21,10 +22,28 @@ import {
 import { loadEmaSettings, saveEmaSettings, type EmaSettings } from "./config/emaSettings";
 import { loadSmaSettings, saveSmaSettings, type SmaSettings } from "./config/smaSettings";
 import {
+  chartSettingsEqual,
   loadChartSettings,
   saveChartSettings,
+  sanitizeChartSettings,
+  DEFAULT_TEMPLATE_ID,
   type ChartSettings,
 } from "./config/chartSettings";
+import {
+  activeTemplate,
+  BUILT_IN_DEFAULT_TEMPLATE,
+  createTemplate,
+  deleteTemplate,
+  findTemplate,
+  isActiveTemplateDefault,
+  isTemplateDirty,
+  loadChartTemplates,
+  saveChartTemplates,
+  templateNameExists,
+  templateSettings,
+  upsertTemplate,
+  type ChartTemplate,
+} from "./config/chartTemplates";
 import { ApiError, fetchCandlesDb, fetchHealth } from "./services/api";
 import {
   canLoadMore,
@@ -147,7 +166,9 @@ export default function App() {
       if (!params.has("debugInvert")) return loaded;
       const forced = params.get("invert");
       if (forced === "1" || forced === "0") {
-        const seeded: ChartSettings = { invertScale: forced === "1" };
+        // Seed/force ONLY the invert flag — the rest of the display model
+        // (theme, candle palette, active template) loads normally.
+        const seeded: ChartSettings = { ...loaded, invertScale: forced === "1" };
         saveChartSettings(seeded);
         return seeded;
       }
@@ -156,6 +177,12 @@ export default function App() {
     }
     return loaded;
   });
+  // User chart templates — complete ChartSettings snapshots persisted in
+  // localStorage (`aura.chart.templates.v1`). The built-in Default template
+  // is a CODE CONSTANT (chartTemplates.ts) — never stored, never mutated.
+  const [chartTemplates, setChartTemplates] = useState<ChartTemplate[]>(loadChartTemplates);
+  // Chart Settings modal visibility (opened from the chart's context menu).
+  const [chartSettingsOpen, setChartSettingsOpen] = useState(false);
   // Session runtime status per imported indicator (never persisted).
   const [pineStatuses, setPineStatuses] = useState<Record<string, PineRunStatus>>({});
   const requestSeq = useRef(0);
@@ -250,6 +277,12 @@ export default function App() {
     saveChartSettings(chartSettings);
   }, [chartSettings]);
 
+  // Persist user chart templates on every change (built-in Default is never
+  // stored — upsertTemplate/deleteTemplate structurally skip it).
+  useEffect(() => {
+    saveChartTemplates(chartTemplates);
+  }, [chartTemplates]);
+
   // ── Shared chart-control actions ────────────────────────────────────────────
   // The chart's right-click context menu calls THESE — the old header "Auto" /
   // "Invert" buttons were removed, so the context menu is their single home.
@@ -258,6 +291,70 @@ export default function App() {
       setting; the chart context menu invokes it. */
   const toggleInvertScale = useCallback(() => {
     setChartSettings((prev) => ({ ...prev, invertScale: !prev.invertScale }));
+  }, []);
+
+  // ── Chart Settings modal + templates (the SAME chartSettings slice) ────────
+  // One source of truth: the modal live-edits App's chartSettings (persisted
+  // by the effect above); templates are full ChartSettings snapshots.
+  /** Opens the Chart Settings modal — the chart context menu's Settings item. */
+  const openChartSettings = useCallback(() => setChartSettingsOpen(true), []);
+  /** Live-edit channel from the modal — the modal never holds its own draft. */
+  const handleChartSettingsChange = useCallback((next: ChartSettings) => {
+    setChartSettings(next);
+  }, []);
+  /** LOAD a template — applies the complete saved snapshot and ACTIVATES it.
+      The built-in Default resolves from the code constant, not storage. */
+  const handleApplyTemplate = useCallback((id: string): { ok: boolean; error?: string } => {
+    const tpl = id === DEFAULT_TEMPLATE_ID
+      ? BUILT_IN_DEFAULT_TEMPLATE
+      : findTemplate(chartTemplates, id);
+    if (!tpl) return { ok: false, error: "Template not found." };
+    setChartSettings({ ...templateSettings(tpl), activeTemplateId: tpl.id });
+    return { ok: true };
+  }, [chartTemplates]);
+  /** SAVE CURRENT — overwrites the ACTIVE USER template with the live
+      settings. The built-in Default is untouchable (refused; use "Save as"). */
+  const handleSaveCurrentTemplate = useCallback((): { ok: boolean; error?: string } => {
+    if (isActiveTemplateDefault(chartSettings)) {
+      return {
+        ok: false,
+        error: "The built-in Default template cannot be modified — use Save as new to create your own.",
+      };
+    }
+    const current = activeTemplate(chartTemplates, chartSettings);
+    setChartTemplates((prev) =>
+      upsertTemplate(prev, {
+        ...current,
+        settings: sanitizeChartSettings(chartSettings),
+        updatedAt: Date.now(),
+      }),
+    );
+    return { ok: true };
+  }, [chartSettings, chartTemplates]);
+  /** SAVE AS — mints a NEW user template from the live settings and ACTIVATES
+      it. Duplicate names are refused explicitly, never silently overwritten. */
+  const handleSaveAsTemplate = useCallback((name: string): { ok: boolean; error?: string } => {
+    const trimmed = name.trim();
+    if (!trimmed) return { ok: false, error: "Enter a template name." };
+    if (templateNameExists(chartTemplates, trimmed)) {
+      return { ok: false, error: `A template named "${trimmed}" already exists — pick another name.` };
+    }
+    const tpl = createTemplate(trimmed, chartSettings);
+    setChartTemplates((prev) => upsertTemplate(prev, tpl));
+    setChartSettings((prev) => ({ ...prev, activeTemplateId: tpl.id }));
+    return { ok: true };
+  }, [chartSettings, chartTemplates]);
+  /** DELETE — user templates only; the built-in Default is structurally
+      refused, and deleting the ACTIVE template falls back to Default. */
+  const handleDeleteTemplate = useCallback((id: string): { ok: boolean; error?: string } => {
+    if (id === DEFAULT_TEMPLATE_ID) {
+      return { ok: false, error: "The built-in Default template cannot be deleted." };
+    }
+    setChartTemplates((prev) => deleteTemplate(prev, id));
+    setChartSettings((prev) =>
+      prev.activeTemplateId === id ? { ...prev, activeTemplateId: DEFAULT_TEMPLATE_ID } : prev,
+    );
+    return { ok: true };
   }, []);
   // ── EMA Reversal Alerts ───────────────────────────────────────────────────
   // Initial config + state from the backend (the engine is the source of truth).
@@ -779,6 +876,9 @@ export default function App() {
           onPineStatus={handlePineStatus}
           invertScale={chartSettings.invertScale}
           onToggleInvertScale={toggleInvertScale}
+          themeId={chartSettings.appearance.theme}
+          candleSettings={chartSettings.symbol.candles}
+          onOpenSettings={openChartSettings}
           replaySymbol={selectedEpic || undefined}
           onLoadMoreHistory={loadMoreHistory}
           historyStatus={historyStatus}
@@ -807,6 +907,29 @@ export default function App() {
           target={settingsTarget}
           onApply={handleSettingsApply}
           onCancel={() => setSettingsTarget(null)}
+        />
+      )}
+
+      {/* Chart Settings (from the chart's right-click context menu) — live
+          edits route into the SAME chartSettings slice (persisted by the
+          effect above); templates are full ChartSettings snapshots stored
+          in localStorage, with the built-in Default always available. */}
+      {chartSettingsOpen && (
+        <ChartSettingsModal
+          settings={chartSettings}
+          templates={chartTemplates}
+          activeTemplate={activeTemplate(chartTemplates, chartSettings)}
+          dirty={isTemplateDirty(
+            activeTemplate(chartTemplates, chartSettings),
+            chartSettings,
+            chartSettingsEqual,
+          )}
+          onChange={handleChartSettingsChange}
+          onApplyTemplate={handleApplyTemplate}
+          onSaveCurrent={handleSaveCurrentTemplate}
+          onSaveAs={handleSaveAsTemplate}
+          onDeleteTemplate={handleDeleteTemplate}
+          onClose={() => setChartSettingsOpen(false)}
         />
       )}
     </div>

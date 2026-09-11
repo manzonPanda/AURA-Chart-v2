@@ -69,3 +69,49 @@ export function effectiveCandleColors(
     wickDownColor: down,
   };
 }
+
+// ── Symbol-section element visibility (Chart Settings → Candles block) ───────
+
+/** Fully transparent — LWC paints NOTHING for a transparent series option. */
+export const TRANSPARENT_CANDLE_COLOR = "rgba(0, 0, 0, 0)";
+
+/** The Candles block's per-element enable flags (settings.symbol.candles). */
+export interface CandleElementToggles {
+  /** Render candle bodies. */
+  body: boolean;
+  /** Render candle borders (native LWC `borderVisible`). */
+  borders: boolean;
+  /** Render wicks (native LWC `wickVisible`). */
+  wick: boolean;
+}
+
+/** The series options the visibility derivation yields. */
+export type CandleElementOptions = CandleColorOptions & {
+  wickVisible: boolean;
+  borderVisible: boolean;
+};
+
+/**
+ * Apply the Symbol section's element toggles to an (already swap-applied)
+ * palette. PURE function (unit-tested):
+ *   - body has NO native LWC visibility option → hidden by transparent
+ *     up/down colors (borders/wick remain drawn when enabled);
+ *   - borders/wick use the NATIVE `borderVisible`/`wickVisible` options.
+ * All six colors always carry real values, so a toggle re-enable restores the
+ * exact palette statelessly (no accumulation).
+ */
+export function candleElementOptions(
+  palette: CandleColorOptions,
+  toggles: CandleElementToggles,
+): CandleElementOptions {
+  return {
+    upColor: toggles.body ? palette.upColor : TRANSPARENT_CANDLE_COLOR,
+    downColor: toggles.body ? palette.downColor : TRANSPARENT_CANDLE_COLOR,
+    borderUpColor: palette.borderUpColor,
+    borderDownColor: palette.borderDownColor,
+    wickUpColor: palette.wickUpColor,
+    wickDownColor: palette.wickDownColor,
+    borderVisible: toggles.borders,
+    wickVisible: toggles.wick,
+  };
+}

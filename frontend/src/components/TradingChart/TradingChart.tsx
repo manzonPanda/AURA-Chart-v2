@@ -48,6 +48,13 @@ import { ChartContextMenu } from "./ChartContextMenu";
 import { EmaBridge } from "./EmaBridge";
 import { InvertScaleBridge } from "./InvertScaleBridge";
 import { InvertDebugProbe } from "./invertDebug"; // ⚠ TEMP debug probe (?debugInvert)
+import { ChartThemeBridge } from "./ChartThemeBridge";
+import { CandleStyleBridge } from "./CandleStyleBridge";
+import {
+  DEFAULT_THEME_ID,
+  defaultCandleSettings,
+  type CandleSettings,
+} from "../../config/chartSettings";
 import { MaStructurePanel } from "./MaStructurePanel";
 import { PineBridge } from "./PineBridge";
 import { SmaBridge } from "./SmaBridge";
@@ -259,6 +266,19 @@ interface Props {
    * this callback invokes the exact handler the menu item uses.
    */
   onToggleInvertScale?: () => void;
+  /**
+   * Appearance-section theme id (config/chartThemes.ts registry) — applied to
+   * the LIVE chart via CandleKit's own setTheme pipeline (ChartThemeBridge).
+   */
+  themeId?: string;
+  /**
+   * Symbol-section candle appearance (config/chartSettings.ts) — applied to
+   * the EXISTING candlestick series via the supported options API
+   * (CandleStyleBridge). Never a second series, never a data rewrite.
+   */
+  candleSettings?: CandleSettings;
+  /** Opens the Chart Settings modal (App-owned state) from the context menu. */
+  onOpenSettings?: () => void;
   /** Instrument scope key (used to scope a replay session). */
   replaySymbol?: string;
   /**
@@ -757,6 +777,9 @@ export function TradingChart({
   onPineStatus,
   invertScale = false,
   onToggleInvertScale,
+  themeId = DEFAULT_THEME_ID,
+  candleSettings = defaultCandleSettings(),
+  onOpenSettings,
   replaySymbol,
   onLoadMoreHistory,
   historyStatus,
@@ -1333,6 +1356,14 @@ export function TradingChart({
           <InvertScaleBridge invertScale={invertScale} />
           {/* ⚠ TEMP diagnostic probe — inert unless ?debugInvert / aura.debug.invert=1 */}
           <InvertDebugProbe invertScale={invertScale} />
+          {/* APPEARANCE — the selected theme applied to the LIVE chart via
+              CandleKit's own setTheme pipeline (registry of ChartTheme
+              overrides; no second theme engine, no chart recreation). */}
+          <ChartThemeBridge themeId={themeId} />
+          {/* SYMBOL — candle palette + element visibility applied to the
+              EXISTING series through the supported options API (no second
+              series, no data rewrite). Also re-asserts after theme changes. */}
+          <CandleStyleBridge candles={candleSettings} invertScale={invertScale} />
           {/* Compact MM:SS close-countdown pill beside the current/live candle
               — a tiny time-remaining-to-close marker rendered by a series
               primitive (no DOM, no fake candles). The countdown derives from
@@ -1486,6 +1517,7 @@ export function TradingChart({
           containerRef={chartWrapRef}
           invertScale={invertScale}
           onToggleInvertScale={onToggleInvertScale}
+          onOpenSettings={onOpenSettings}
           scopeKey={`${replaySymbol ?? ""}|${bucketSec}|${session ? "replay" : "live"}`}
         />
       </div>
