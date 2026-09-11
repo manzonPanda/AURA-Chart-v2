@@ -18,7 +18,7 @@
  * cents, e.g. bid 4467.47). An UNREGISTERED EPIC falls back to 1 decimal,
  * which is byte-exact the historic behavior for any pre-registry config.
  */
-import { IG_GERMANY_40, IG_SPOT_GOLD, type MarketCalendar } from "./calendar.js";
+import { IG_GERMANY_40, IG_SPOT_GOLD, IG_SPOT_SILVER, type MarketCalendar } from "./calendar.js";
 import type { Config } from "../config.js";
 
 export interface InstrumentMeta {
@@ -51,9 +51,18 @@ export const GOLD_INSTRUMENT: InstrumentMeta = {
   calendar: IG_SPOT_GOLD,
 };
 
+/** Spot Silver ($1) — verified against the account (2-decimal, same CME Globex hours as Gold). */
+export const SILVER_INSTRUMENT: InstrumentMeta = {
+  epic: "CS.D.CFDSILVER.CMG.IP",
+  label: "Spot Silver / IG",
+  decimals: 2,
+  calendar: IG_SPOT_SILVER,
+};
+
 const REGISTRY: ReadonlyMap<string, InstrumentMeta> = new Map([
   [DAX_INSTRUMENT.epic, DAX_INSTRUMENT],
   [GOLD_INSTRUMENT.epic, GOLD_INSTRUMENT],
+  [SILVER_INSTRUMENT.epic, SILVER_INSTRUMENT],
 ]);
 
 /** Metadata for any EPIC — unregistered ones get BC-conservative defaults. */
@@ -79,7 +88,34 @@ export function calendarForInstrument(epic: string): MarketCalendar | null {
 export function configuredInstruments(config: Config): InstrumentMeta[] {
   const out: InstrumentMeta[] = [];
   const seen = new Set<string>();
-  for (const epic of [config.ig.defaultEpic, config.ig.goldEpic]) {
+  // Collection is driven ENTIRELY by which EPICs are non-empty here. An empty
+  // IG_DAX_EPIC/DAX_EPIC therefore means DAX is NOT collected (no stream,
+  // no backfill, no scheduled collection) — while its built-in constants and
+  // existing Supabase rows remain untouched and still selectable via the UI.
+  for (const epic of [config.ig.defaultEpic, config.ig.goldEpic, config.ig.silverEpic]) {
+    const key = epic.trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(instrumentMetaFor(key));
+  }
+  return out;
+}
+
+/**
+ * UI/HISTORICAL instruments — the catalog served by GET /api/instruments and
+ * the epic allowlist of /api/candles/db (Supabase history reads). This is
+ * deliberately WIDER than the collection set: the built-in DAX constant is
+ * ALWAYS included so historical DAX rows stay queryable and viewable in the
+ * chart UI even when IG_DAX_EPIC is empty (DAX collection disabled). Only
+ * Gold/Silver come from config — DAX history viewing is a built-in guarantee,
+ * not a configuration.
+ */
+export function uiInstruments(config: Config): InstrumentMeta[] {
+  const out: InstrumentMeta[] = [DAX_INSTRUMENT];
+  const seen = new Set<string>([DAX_INSTRUMENT.epic]);
+  // Gold/Silver appear in the UI list only when configured (same keys as the
+  // collection set) — a duplicate EPIC (e.g. a copy-paste into DAX) collapses.
+  for (const epic of [config.ig.goldEpic, config.ig.silverEpic]) {
     const key = epic.trim();
     if (!key || seen.has(key)) continue;
     seen.add(key);

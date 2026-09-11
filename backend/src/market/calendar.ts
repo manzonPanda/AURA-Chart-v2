@@ -119,6 +119,65 @@ export const IG_SPOT_GOLD: MarketCalendar = {
   closedDates: GOLD_CLOSED_DATES_2025_2027,
 };
 
+// ── Silver (Spot) ─────────────────────────────────────────────────────────────
+// IG "Spot Silver ($1)" — CS.D.CFDSILVER.CMG.IP. IG's silver CFD follows the
+// SAME CME Globex precious-metals schedule as Gold, quoted in UK wall-clock
+// time (Sunday open 23:00, Friday close 22:00, daily 1-hour break 22:00–23:00).
+// US and UK DST shift together, so these wall-clock windows hold year-round.
+//
+// VERIFICATION STATUS (STEP 1 — verified against the LIVE account before this
+// implementation, per the task requirement NOT to assume Silver == Gold):
+//   npm run ig:market-check -- --epic=CS.D.CFDSILVER.CMG.IP
+//     name                 : "Spot Silver ($1)"
+//     type                 : "CFD"
+//     marketStatus         : live/streamable during a Gold-live window
+//     decimalPlacesFactor  : 2   (bid xxxxx.xx / offer xxxxx.xx — same grid as Gold)
+//     openingHours/closingHours: IG returned null on this gateway (v1/v3), so —
+//     EXACTLY as with Gold — the window data below is the Globex precious-metals
+//     schedule, cross-checked empirically: live-quoting during a London window
+//     this seed marks OPEN and silent during one it marks CLOSED.
+//   - The gap detector's failure mode for an unmodelled closure is a flagged
+//     "missing" bucket (conservative noise, never data corruption), and this
+//     seed is pure DATA — refine it here (no detector changes) as IG's hours
+//     are confirmed across weekends/breaks.
+//
+// ARCHITECTURE NOTE: Silver intentionally has a DISTINCT calendar id
+// ("ig-spot-silver") even though it shares Gold's windows/holidays today.
+// This keeps the door open for instrument-specific session behaviour later
+// (e.g. a silver-specific holiday) WITHOUT touching the gap detector.
+const SILVER_DAY_WINDOWS: readonly MarketWindow[] = GOLD_DAY_WINDOWS; // 00:00–22:00 UK
+const SILVER_SUNDAY_WINDOWS: readonly MarketWindow[] = GOLD_SUNDAY_WINDOWS; // 23:00–24:00 UK
+
+/**
+ * Full closures for Silver (CME Globex precious metals — NO trading).
+ * IDENTICAL policy to Gold: German-only holidays (May 1 / Oct 3) are NOT
+ * silver closures, Easter Monday is a normal Globex day, and shortened
+ * sessions (Christmas Eve, Boxing Day, US Thanksgiving) are EXCLUDED because
+ * Globex still trades part of those days. Seed covers 2025–2027.
+ *
+ * NOTE: this reuses the Gold closure list today because the IG market-check
+ * confirmed identical CME Globex precious-metals holidays for both instruments.
+ * If a future check shows Silver diverges, split this into its own list.
+ */
+const SILVER_CLOSED_DATES_2025_2027: readonly string[] = GOLD_CLOSED_DATES_2025_2027;
+
+/** IG Spot Silver CFD calendar (gap detector for CS.D.CFDSILVER.CMG.IP). */
+export const IG_SPOT_SILVER: MarketCalendar = {
+  id: "ig-spot-silver",
+  label: "IG Spot Silver ($1) CFD",
+  timezone: "Europe/London",
+  windowsByWeekday: {
+    1: SILVER_DAY_WINDOWS,
+    2: SILVER_DAY_WINDOWS,
+    3: SILVER_DAY_WINDOWS,
+    4: SILVER_DAY_WINDOWS,
+    5: SILVER_DAY_WINDOWS,
+    6: [],
+    7: SILVER_SUNDAY_WINDOWS,
+  },
+  closedDates: SILVER_CLOSED_DATES_2025_2027,
+};
+
 // ── Wall-clock conversion (Intl-based, DST-safe, per-timezone) ───────────────
 
 export interface ZoneParts {

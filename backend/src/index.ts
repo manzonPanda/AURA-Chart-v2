@@ -15,7 +15,11 @@ import { defaultEmaAlertSettings, sanitizeEmaAlertSettings } from "./emaAlert/em
 import { IgClient } from "./ig/client.js";
 import { installLifecycle } from "./lib/lifecycle.js";
 import { SecretRedactor } from "./lib/redact.js";
-import { configuredInstruments } from "./market/instruments.js";
+import {
+  configuredInstruments,
+  DAX_INSTRUMENT,
+  uiInstruments,
+} from "./market/instruments.js";
 import { createCandlesDbRouter } from "./routes/candlesDb.js";
 import { createCandlesRouter } from "./routes/candles.js";
 import { createEmaAlertRouter } from "./routes/emaAlert.js";
@@ -90,13 +94,24 @@ app.get("/api/health", (c) =>
 
 app.route("/api", createCandlesRouter(ig, instruments));
 // Instrument registry — the frontend's source of truth for the selector.
-app.route("/api", createInstrumentsRouter(instruments, config.ig.defaultEpic));
+// Uses the WIDER UI/HISTORICAL list (DAX always present) so historical DAX
+// rows stay selectable/queryable even when IG_DAX_EPIC is empty (collection
+// disabled). The default EPIC for a fresh browser = config default when set,
+// else the first UI entry (DAX — the built-in guarantee).
+app.route(
+  "/api",
+  createInstrumentsRouter(
+    uiInstruments(config),
+    config.ig.defaultEpic.trim() || DAX_INSTRUMENT.epic,
+  ),
+);
 app.route("/api", createMarketsRouter(ig));
 // Chart history from OUR persistence — frontend's normal history source; IG
 // REST stays a bootstrap/backfill source only (its 429/403 allowance errors
 // can never affect this endpoint). Instrument-aware: ?epic= validated against
-// the configured set; omitted → DAX default.
-app.route("/api", createCandlesDbRouter(candleStore, instruments));
+// the UI/HISTORICAL set (DAX reads always allowed — collection-disabled DAX
+// still has queryable history); omitted → the catalog default above.
+app.route("/api", createCandlesDbRouter(candleStore, uiInstruments(config)));
 
 // ── EMA Reversal Alerts (server-side detection + Web Push) ──────────────────
 // Runtime state lives in backend/data/*.json (gitignored) — the database is
@@ -126,9 +141,15 @@ const emaAlertEngine = new EmaAlertEngine({
   store: emaSettingsStore,
   broadcast: (msg) => realtime.broadcastAuxiliary(msg),
 });
-realtime.onClosedCandle((candle, timeframe) => {
-  emaAlertEngine.onClosedCandle(candle, timeframe);
-});
+// The EMA engine is DAX-bound (config.ig.defaultEpic). RealtimeService's
+// onClosedCandle gate follows the DEFAULT EPIC (instruments[0]) — when
+// IG_DAX_EPIC is unset that default becomes Gold, and Gold closes must NEVER
+// drive the DAX alert state. DAX collection disabled ⇒ DAX alerts disabled.
+if (config.ig.defaultEpic) {
+  realtime.onClosedCandle((candle, timeframe) => {
+    emaAlertEngine.onClosedCandle(candle, timeframe);
+  });
+}
 // P1 reconnect seed: every newly-added WS client immediately receives the
 // CURRENT alert snapshot — after a backend restart a reconnecting tab restores
 // its bell state without waiting for the next closed-candle broadcast.
@@ -236,12 +257,14 @@ wss.on("connection", (ws, req) => {
   ws.on("error", () => realtime.removeClient(ws));
 });
 
-// Starts the IG Lightstreamer subscription when configured (the service also
-// self-heals on IG disconnects / token expiry without racing auth retries).
-if (isConfigured(config) && config.ig.defaultEpic) {
+// Starts the IG Lightstreamer subscription when configured. The gate is
+// driven by the COLLECTION set (any non-empty configured EPIC), NOT by DAX
+// specifically — so a DAX-less deployment (IG_DAX_EPIC empty) with Gold and/or
+// Silver still streams. Empty IG_DAX_EPIC means DAX is simply never subscribed.
+if (isConfigured(config) && instruments.length > 0) {
   void realtime.start();
 } else {
-  console.log("  [IG] streaming disabled — configure IG_DAX_EPIC + credentials to stream.");
+  console.log("  [IG] streaming disabled — configure IG_DAX_EPIC / IG_GOLD_EPIC / IG_SILVER_EPIC + credentials to stream.");
 }
 
 // EMA alert engine: warms up from persisted 1m candles (if any), then reacts

@@ -13,12 +13,18 @@ export interface Config {
     accountId: string;
     baseUrl: string;
     defaultEpic: string;
-    /**
+        /**
      * Second instrument (Spot Gold CFD). Unset → DAX-only, exactly the
      * historic behavior. Metadata (label/precision/calendar) for each EPIC
      * lives in ../market/instruments.ts — the config only carries EPICs.
      */
     goldEpic: string;
+    /**
+     * Third instrument (Spot Silver CFD, SMT-prep). Unset → collection stops
+     * — no IG stream, no historical backfill, no scheduled collection for an
+     * empty/unset EPIC. Metadata lives in ../market/instruments.ts.
+     */
+    silverEpic: string;
     sessionVersion: string;
     sendEncryptFlag: boolean;
   };
@@ -53,9 +59,15 @@ export function loadConfig(): Config {
       password: process.env.IG_PASSWORD || "",
       accountId: (process.env.IG_ACCOUNT_ID || "").trim(),
       baseUrl,
-      defaultEpic: (process.env.IG_DAX_EPIC || "").trim(),
+            defaultEpic: (process.env.IG_DAX_EPIC || "").trim(),
       // Spot Gold CFD (Phase 0 multi-instrument). Empty = DAX-only (BC).
       goldEpic: (process.env.IG_GOLD_EPIC || "").trim(),
+      // Spot Silver CFD (SMT-prep, Gold vs Silver). Empty/unset = Silver is NOT
+      // collected: no IG stream, no historical backfill, no scheduled collection.
+      // Existing Silver rows, if any, are NEVER deleted. Canonical EPIC:
+      // CS.D.CFDSILVER.CMG.IP — verified against the live IG account (see
+      // market/calendar.ts IG_SPOT_SILVER verification block).
+      silverEpic: (process.env.IG_SILVER_EPIC || "").trim(),
       // Wire format of POST /session, replicating the official API Companion:
       //   version header "1" + RSA(base64(password)) cipher.
       sessionVersion: (process.env.IG_SESSION_VERSION || "1").trim() || "1",
