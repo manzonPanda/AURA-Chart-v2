@@ -24,6 +24,8 @@
  *   - Storage is injectable so unit tests can run without a `window`.
  */
 
+import { DEFAULT_HISTORY_HORIZON, sanitizeHistoryHorizon, type HistoryHorizonKey } from "./chart.ts";
+
 /** localStorage key — display configuration ONLY, never chart data. */
 export const CHART_SETTINGS_STORAGE_KEY = "aura.chart.settings.v1";
 
@@ -79,6 +81,13 @@ export interface ChartSettings {
    * one, least of all the built-in Default.
    */
   activeTemplateId: string;
+  /**
+   * Historical-context horizon (config/chart.ts registry) — how much trading
+   * history the INITIAL load covers, calendar-aware (DAX vs Gold/Silver
+   * sessions differ). A pure session/display preference: candle data,
+   * aggregation and the pagination contract are untouched.
+   */
+  historyHorizon: HistoryHorizonKey;
 }
 
 /** Fresh default candle appearance (AURA's classic bull/bear palette). */
@@ -102,6 +111,8 @@ export function defaultChartSettings(): ChartSettings {
     appearance: { theme: DEFAULT_THEME_ID },
     symbol: { candles: defaultCandleSettings() },
     activeTemplateId: DEFAULT_TEMPLATE_ID,
+    // Calendar-aware history horizon — two weeks of the instrument's TRADING time.
+    historyHorizon: DEFAULT_HISTORY_HORIZON,
   };
 }
 
@@ -163,6 +174,7 @@ export function sanitizeChartSettings(raw: unknown): ChartSettings {
   if (typeof r.activeTemplateId === "string" && r.activeTemplateId.trim()) {
     out.activeTemplateId = r.activeTemplateId.trim().slice(0, 64);
   }
+  out.historyHorizon = sanitizeHistoryHorizon(r.historyHorizon);
   return out;
 }
 

@@ -422,17 +422,48 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .chart-canvas-wrap { position: relative; flex: 1; min-height: 0; background: rgba(4, 9, 15, 0.22); }
 .chart-canvas-wrap canvas { display: block; }
 
-.chart-spinner {
-  position: absolute; top: 10px; right: 12px; z-index: 5;
-  padding: 4px 10px; font-size: 0.8rem; color: var(--accent);
-  background: rgba(0,0,0,0.55); border: 1px solid var(--border); border-radius: 6px;
-  animation: pulse 1.2s ease-in-out infinite;
-}
 @keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+
+/* ── Initial chart-loading overlay (TradingView-style) ─────────────────────
+   Centered, subtle, over the DARK chart background — never a white page, no
+   layout shift (absolute within .chart-area). Shown only until the first
+   history dataset lands; a background refresh on a populated chart never
+   covers it. */
+.chart-area { position: relative; }
+.chart-loading-overlay {
+  position: absolute; inset: 0; z-index: 8;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; pointer-events: none;
+  background: transparent; /* the chart's own dark canvas stays visible */
+}
+.chart-loading-spinner {
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid rgba(71, 199, 255, 0.18);
+  border-top-color: var(--accent);
+  animation: chart-loading-spin 0.9s linear infinite;
+}
+@keyframes chart-loading-spin { to { transform: rotate(360deg); } }
+.chart-loading-title {
+  font-size: 0.85rem; font-weight: 600; color: var(--text);
+  letter-spacing: 0.03em;
+}
+.chart-loading-sub {
+  font-size: 0.72rem; color: var(--muted); letter-spacing: 0.02em;
+}
+/* Error variant — clear but still quiet; Retry is the only interactive bit. */
+.chart-loading-overlay--error { pointer-events: auto; }
+.chart-loading-overlay--error .chart-loading-title { color: #ff9a8a; }
+.chart-loading-retry {
+  margin-top: 4px; padding: 4px 14px; font-size: 0.76rem; font-weight: 600;
+  color: var(--text); background: rgba(11, 14, 20, 0.72);
+  border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
+  transition: border-color 0.15s ease, opacity 0.15s ease;
+}
+.chart-loading-retry:hover { border-color: var(--accent); opacity: 1; }
 
 /* Historical-edge control ("Load More History") — a subtle pill top-left of
    the chart, revealed only while the user's viewport sits near the oldest
-   loaded candle. Same visual language as .chart-spinner: quiet panel chip. */
+   loaded candle. Quiet panel chip, matching the chart's overlay language. */
 .history-more {
   position: absolute; top: 10px; left: 12px; z-index: 5;
   padding: 4px 10px; font-size: 0.78rem;

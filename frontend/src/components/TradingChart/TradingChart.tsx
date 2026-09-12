@@ -239,7 +239,6 @@ interface Props {
   /** Latest forming candle pushed by the backend (time = bucket start, epoch s). */
   liveCandle?: RealtimeCandleMsg | null;
   streamStatus?: RealtimeStatus;
-  loading?: boolean;
   /** EMA overlay configuration (localStorage-persisted in App). */
   emaSettings?: EmaSettings;
   /** SMA overlay configuration (localStorage-persisted in App). */
@@ -768,7 +767,6 @@ export function TradingChart({
   resolution = "",
   liveCandle = null,
   streamStatus = "DISCONNECTED",
-  loading = false,
   emaSettings = defaultEmaSettings(),
   smaSettings,
   pineIndicators = [],
@@ -1472,7 +1470,9 @@ export function TradingChart({
             </button>
           )
         )}
-        {loading && <div className="chart-spinner">…</div>}
+        {/* Chart-loading overlay lives in App (.chart-loading-overlay) — the
+            old top-right .chart-spinner was removed to avoid duplicate
+            loading indicators during the initial history load. */}
         {/* Moving Average Structure (EMA9 • EMA20 • SMA20) — trader-facing
             overlay panel. Same anti-look-ahead contract as the bridges: the
             bars are the replay cursor slice during Replay and the forming

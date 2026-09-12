@@ -42,6 +42,7 @@ import {
   allTemplates,
   type ChartTemplate,
 } from "../../config/chartTemplates";
+import { HISTORY_HORIZONS } from "../../config/chart.ts";
 
 /** Which section the left nav selects. */
 type SectionId =
@@ -50,6 +51,7 @@ type SectionId =
   | "statusline"
   | "scaleslines"
   | "canvas"
+  | "history"
   | "events";
 
 const SECTIONS: { id: SectionId; label: string }[] = [
@@ -58,6 +60,7 @@ const SECTIONS: { id: SectionId; label: string }[] = [
   { id: "statusline", label: "Status line" },
   { id: "scaleslines", label: "Scales and lines" },
   { id: "canvas", label: "Canvas" },
+  { id: "history", label: "History" },
   { id: "events", label: "Events" },
 ];
 
@@ -394,6 +397,33 @@ export function ChartSettingsModal({
               </div>
             )}
 
+            {section === "history" && (
+              <div className="iset-group">
+                <div className="iset-group-title">Historical context</div>
+                <div className="cset-card-grid">
+                  {HISTORY_HORIZONS.map((h) => (
+                    <button
+                      key={h.key}
+                      type="button"
+                      className="cset-card"
+                      data-selected={settings.historyHorizon === h.key || undefined}
+                      onClick={() => onChange({ ...settings, historyHorizon: h.key })}
+                      aria-pressed={settings.historyHorizon === h.key}
+                    >
+                      <span className="cset-card-label">{h.label}</span>
+                      {settings.historyHorizon === h.key && (
+                        <span className="cset-card-check" aria-hidden="true">✓</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+                <p className="iset-note">
+                  How much trading history the chart loads initially — calendar-aware, so DAX,
+                  Gold and Silver sessions are measured with their OWN calendars. Load More always
+                  continues further back in the fixed page size.
+                </p>
+              </div>
+            )}
             {section === "statusline" && <ComingSoon label="Status line" />}
             {section === "scaleslines" && <ComingSoon label="Scales and lines" />}
             {section === "canvas" && <ComingSoon label="Canvas" />}

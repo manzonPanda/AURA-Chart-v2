@@ -18,6 +18,7 @@ import {
   type InstrumentInfo,
   type InstrumentsCatalog,
 } from "./instruments";
+import { GOLD_INSTRUMENT_EPIC, HIDDEN_INSTRUMENT_EPICS } from "../config/chart";
 
 export interface UseInstrumentsResult {
   catalog: InstrumentsCatalog | null;
@@ -62,18 +63,29 @@ export function useInstruments(): UseInstrumentsResult {
   const [error, setError] = useState<string | null>(null);
   const [selectedEpic, setSelectedEpic] = useState("");
 
-  useEffect(() => {
+    useEffect(() => {
     let cancelled = false;
     setLoading(true);
     fetchInstrumentsWithRetry()
       .then((cat) => {
         if (cancelled) return;
         setCatalog(cat);
+        // Build the UI-visible list: the backend registry stays complete
+        // (DAX rows remain queryable via the API), but the UI dropdown only
+        // offers instruments not in HIDDEN_INSTRUMENT_EPICS (e.g. DAX).
+        const visibleEpics = cat.instruments
+          .map((i) => i.epic)
+          .filter((e) => !HIDDEN_INSTRUMENT_EPICS.has(e));
+        // Prefer Gold as the fresh-browser default. If Gold isn't configured,
+        // fall back to the backend's defaultEpic (if visible) or the first
+        // visible registered instrument — matching the historic fallback chain.
+        const uiDefault = GOLD_INSTRUMENT_EPIC;
         setSelectedEpic(
           resolveSelectedEpic(
             cat.instruments.map((i) => i.epic),
-            cat.defaultEpic,
+            uiDefault,
             loadSelectedEpic(),
+            visibleEpics,
           ),
         );
       })

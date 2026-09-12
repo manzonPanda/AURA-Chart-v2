@@ -15,8 +15,10 @@ import {
 import {
   DEFAULT_TIME_FRAME,
   HISTORY_LIMIT,
+  HIDDEN_INSTRUMENT_EPICS,
   INSTRUMENT_LABEL,
   TIMEFRAMES,
+  sanitizeHistoryHorizon,
   type TimeFrameKey,
 } from "./config/chart";
 import { loadEmaSettings, saveEmaSettings, type EmaSettings } from "./config/emaSettings";
@@ -53,6 +55,8 @@ import {
   mergeOlderCandles,
   type HistoryStatus,
 } from "./services/historyPagination";
+import { historyHorizonPages } from "./services/historyHorizon";
+import { findInstrument } from "./services/instruments";
 import { useInstruments } from "./services/useInstruments";
 import {
   compileImportedPine,
@@ -120,6 +124,12 @@ export default function App() {
   // an epic param → the backend serves its default (DAX): the historic behavior.
   const { catalog, selectedEpic, selected: selectedInstrument, selectInstrument } = useInstruments();
   const epic = selectedEpic;
+  // Latest instrument catalog via ref: loadHistory consults the active
+  // instrument's market calendar for the horizon page plan WITHOUT
+  // re-triggering on catalog arrival — the epic/timeframe/horizon
+  // dependencies already reload history when the scope itself changes.
+  const catalogRef = useRef(catalog);
+  catalogRef.current = catalog;
 
   /**
    * Active instrument → syminfo metadata. Derived from the backend
@@ -590,19 +600,78 @@ export default function App() {
     const seq = ++requestSeq.current;
     const wantedEpic = epic; // switch guard: never accept candles for a superseded instrument
     setLoading(true);
-    setHistoryStatus(INITIAL_HISTORY_STATUS); // new dataset → fresh pagination state
+    // Keep the pagination control inactive while the horizon pages are in
+    // flight: until the final dataset is announced, `candles` still holds the
+    // PREVIOUS scope's bars, so the loading flag is what stops a rapid
+    // "Load More" from merging onto them.
+    setHistoryStatus({ loading: true, exhausted: false, error: null });
     try {
-      const data = await fetchCandlesDb(timeframe, HISTORY_LIMIT, wantedEpic || undefined);
+      // Calendar-aware horizon → how many fixed-size OLDER pages to fetch in
+      // addition to the newest page (the SAME before-cursor pagination the
+      // "Load More History" control uses, so every request stays within the
+      // backend's 10,000-row ceiling). Read through `catalogRef` so a late
+      // catalog arrival alone never re-runs this (epic/timeframe/horizon
+      // dependencies already reload when the scope changes).
+      const epicForCalendar = wantedEpic || catalogRef.current?.defaultEpic || "";
+      const plan = historyHorizonPages({
+        horizon: sanitizeHistoryHorizon(chartSettings.historyHorizon),
+        calendar: findInstrument(catalogRef.current, epicForCalendar)?.calendar ?? null,
+        bucketSec: resolutionToBucketSec(timeframe),
+        pageSize: HISTORY_LIMIT,
+        nowMs: Date.now(),
+      });
+
+      // Sequential pages: the before cursor IS the oldest candle loaded so
+      // far, so requests cannot be parallelized by construction. Chart state
+      // is touched exactly ONCE at the end (setCandles with the final merged,
+      // strictly-ascending, deduped dataset) — no intermediate renders.
+      let pages = 0;
+      let loaded: Candle[] = [];
+      let loadedGaps: CandleGap[] = [];
+      let lastHasMore = true;
+      let finalizedEpic = wantedEpic || "";
+      let cursor: number | undefined; // undefined → the newest page
+      while (pages < plan.requests && lastHasMore) {
+        const page = await fetchCandlesDb(
+          timeframe,
+          HISTORY_LIMIT,
+          wantedEpic || undefined,
+          cursor !== undefined ? Math.floor(cursor / 1000) : undefined,
+        );
+        if (seq !== requestSeq.current) return; // superseded by a newer scope — discard
+        if (wantedEpic && page.epic !== wantedEpic) return; // stale instrument — dropped
+        finalizedEpic = page.epic;
+        let added: number;
+        if (loaded.length === 0) {
+          // Newest page adopted as-is (the backend guarantees ascending, chart-ready).
+          loaded = page.candles;
+          added = loaded.length;
+        } else {
+          const res = mergeOlderCandles(loaded, page.candles, loaded[0].ts);
+          loaded = res.merged;
+          added = res.added;
+        }
+        lastHasMore = page.hasMore && added > 0;
+        loadedGaps = mergeGapLists(loadedGaps, page.gaps);
+        pages++;
+        if (loaded.length > 0) cursor = loaded[0].ts;
+      }
       if (seq !== requestSeq.current) return;
-      if (wantedEpic && data.epic !== wantedEpic) return; // stale instrument — dropped
+      if (wantedEpic && finalizedEpic !== wantedEpic) return;
       // Invalidate any in-flight "Load More History" — its resolution would
       // merge onto the STALE (pre-scope-change) closure and could overwrite
       // this freshly-loaded dataset.
       moreHistorySeq.current++;
-            setHistoryEpic(data.epic);
-      setCandles(data.candles);
-      setGaps(data.gaps);
+      setHistoryEpic(finalizedEpic);
+      setCandles(loaded);
+      setGaps(loadedGaps);
       setHistoryMissing(false);
+      setHistoryStatus({ loading: false, exhausted: !lastHasMore, error: null });
+      if (pages > 1) {
+        console.info(
+          `[HISTORY] horizon loaded: pages=${pages}/${plan.requests} bars=${loaded.length} first=${iso(loaded[0]?.ts ?? 0)}`,
+        );
+      }
     } catch (err) {
       if (seq !== requestSeq.current) return;
       const msg = err instanceof ApiError ? `${err.code}: ${err.message}` : (err as Error).message;
@@ -613,7 +682,7 @@ export default function App() {
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
-  }, [timeframe, epic]);
+  }, [timeframe, epic, chartSettings.historyHorizon]);
 
   // "Load More History": fetch the next OLDER page (cursor = oldest loaded
   // bucket) and prepend it. Guards (canLoadMore) keep exactly one request in
@@ -730,7 +799,9 @@ export default function App() {
           <div className="instrument">
           {/* Instrument selector (Phase 3) — populated from the BACKEND
               registry (GET /api/instruments); switching is a clean data/stream
-              boundary (see handleInstrumentChange). */}
+              boundary (see handleInstrumentChange). UI-ONLY filter: EPICs in
+              HIDDEN_INSTRUMENT_EPICS (DAX) are hidden from the dropdown —
+              the backend/API/DB keep full DAX support. */}
           <select
             className="instrument-select"
             value={epic}
@@ -740,11 +811,13 @@ export default function App() {
             disabled={!catalog}
           >
             {!catalog && <option value="">{INSTRUMENT_LABEL}</option>}
-            {catalog?.instruments.map((inst) => (
-              <option key={inst.epic} value={inst.epic}>
-                {inst.label}
-              </option>
-            ))}
+            {catalog?.instruments
+              .filter((inst) => !HIDDEN_INSTRUMENT_EPICS.has(inst.epic))
+              .map((inst) => (
+                <option key={inst.epic} value={inst.epic}>
+                  {inst.label}
+                </option>
+              ))}
           </select>
             <span className="instrument-epic">{epic || historyEpic || "…"}</span>
           </div>
@@ -861,13 +934,12 @@ export default function App() {
       )}
 
       <main className="chart-area">
-                <TradingChart
+        <TradingChart
           candles={candles}
           gaps={gaps}
           resolution={timeframe}
           liveCandle={realtime.candle}
           streamStatus={realtime.status}
-          loading={loading}
           emaSettings={emaSettings}
           smaSettings={smaSettings}
           pineIndicators={importedPine}
@@ -891,6 +963,35 @@ export default function App() {
           onPineChange={handlePineChange}
           onOpenIndicatorSettings={handleOpenIndicatorSettings}
         />
+        {/* Initial chart-loading overlay — represents the ACTUAL historical
+            data lifecycle (loadHistory → setCandles), not a timeout. Shown
+            only while the chart has NO candles yet (a background history
+            refresh on a populated chart never covers it). On failure the
+            overlay becomes an error state with a Retry that re-runs the SAME
+            loadHistory path as the header Refresh button. Realtime is never
+            blocked: the WS stream runs independently underneath. */}
+        {loading && candles.length === 0 && (
+          <div className="chart-loading-overlay" role="status" aria-live="polite">
+            <div className="chart-loading-spinner" aria-hidden="true" />
+            <div className="chart-loading-title">Loading chart data…</div>
+            <div className="chart-loading-sub">Loading historical candles</div>
+          </div>
+        )}
+        {!loading && candles.length === 0 && historyMissing && (
+          <div className="chart-loading-overlay chart-loading-overlay--error" role="alert">
+            <div className="chart-loading-title">Chart data unavailable</div>
+            <div className="chart-loading-sub">
+              Historical candles could not be loaded — realtime continues.
+            </div>
+            <button
+              type="button"
+              className="chart-loading-retry"
+              onClick={() => void loadHistory()}
+            >
+              Retry
+            </button>
+          </div>
+        )}
       </main>
 
       {/* Indicator Settings (⚙ from the chart legend) — keyed so switching

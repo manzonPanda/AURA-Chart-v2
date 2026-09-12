@@ -74,16 +74,32 @@ export function saveSelectedEpic(epic: string, storage: { setItem(key: string, v
  * Resolve the active EPIC: the persisted choice WINS only while the registry
  * still contains it (e.g. IG_GOLD_EPIC removed → falls back to the default).
  * No stored pick → the registry default (DAX). Nothing configured → "".
+ *
+ * `visibleEpics` restricts the candidate list to epics the UI actually offers
+ * (e.g. DAX is excluded from the dropdown). A stale stored pick for a hidden
+ * or removed EPIC falls back to `defaultEpic` restricted to `visibleEpics`,
+ * then to the first visible registered EPIC, matching the historic fallback
+ * chain. The hidden epics remain fully queryable via the backend/API if an
+ * EPIC string reaches them — only the UI-level selection is filtered.
  */
 export function resolveSelectedEpic(
   epics: readonly string[],
   defaultEpic: string,
   stored: string | null,
+  visibleEpics?: readonly string[],
 ): string {
   const list = epics.filter(Boolean);
-  if (stored && list.includes(stored)) return stored;
-  if (defaultEpic && list.includes(defaultEpic)) return defaultEpic;
-  return list[0] ?? "";
+  // If a UI-level visible list is provided (even EMPTY — meaning every epic is
+  // hidden), restrict candidates to it. Hidden instruments (e.g. DAX) stay in
+  // the registry and are still queryable — they just can never be AUTO-selected
+  // or surfaced as a fresh-browser default.
+  const visible = visibleEpics
+    ? list.filter((e) => (visibleEpics as readonly string[]).includes(e))
+    : list;
+
+  if (stored && list.includes(stored) && visible.includes(stored)) return stored;
+  if (defaultEpic && visible.includes(defaultEpic)) return defaultEpic;
+  return visible[0] ?? "";
 }
 
 /** Catalog lookup for the active EPIC (null when not yet resolved). */

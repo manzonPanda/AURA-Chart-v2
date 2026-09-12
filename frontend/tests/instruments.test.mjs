@@ -63,6 +63,31 @@ test("resolveSelectedEpic: degenerate registries never crash (empty → '')", ()
   assert.equal(resolveSelectedEpic([GOLD], "", null), GOLD, "no default → first registered");
 });
 
+// ── UI-visible filter (DAX hidden from the dropdown; Gold default) ───────────
+
+test("resolveSelectedEpic: fresh browser (no stored pick) → Gold via visible filter", () => {
+  // Backend default is DAX, but DAX is hidden from the UI → first VISIBLE wins.
+  assert.equal(resolveSelectedEpic([DAX, GOLD], DAX, null, [GOLD]), GOLD);
+});
+
+test("resolveSelectedEpic: stale stored DAX pick migrates to Gold (hidden epic never wins)", () => {
+  assert.equal(resolveSelectedEpic([DAX, GOLD], DAX, DAX, [GOLD]), GOLD);
+});
+
+test("resolveSelectedEpic: persisted visible pick still wins over the Gold default", () => {
+  const SILVER = "CS.D.CFDSILVER.CMG.IP";
+  assert.equal(resolveSelectedEpic([DAX, GOLD, SILVER], DAX, SILVER, [GOLD, SILVER]), SILVER);
+});
+
+test("resolveSelectedEpic: backend default wins when Gold is not registered", () => {
+  // Gold unconfigured → the visible list is just DAX → backend default applies.
+  assert.equal(resolveSelectedEpic([DAX], DAX, null, [DAX]), DAX);
+});
+
+test("resolveSelectedEpic: no visible epics → '' (never selects a hidden instrument)", () => {
+  assert.equal(resolveSelectedEpic([DAX], DAX, null, []), "");
+});
+
 // ── localStorage persistence ─────────────────────────────────────────────────
 
 test("saveSelectedEpic/loadSelectedEpic round-trips through the storage key", () => {
