@@ -1,6 +1,8 @@
 import { WebSocket } from "ws";
 import type { CandleStore } from "../db/candleStore.js";
 import type { IgClient } from "../ig/client.js";
+import type { CapitalClient } from "../capital/client.js";
+import { CapitalStreamClient, type CapitalStreamSession } from "../capital/capitalStream.js";
 import { instrumentMetaFor, type InstrumentMeta } from "../market/instruments.js";
 import { ClientSeeders } from "./clientSeed.js";
 import { IgStreamClient } from "./igStream.js";
@@ -53,28 +55,44 @@ const STREAM_RECONNECT_MAX_DELAY_MS = 60_000;
 const STATUS_HEARTBEAT_MS = 30_000;
 
 /**
- * Owns ONE Lightstreamer connection PER configured instrument (all sharing the
- * single IgClient REST session), routes every tick to EXACTLY ONE per-
- * instrument InstrumentUnit (own CandleAggregatorSet, forming candles, tick
- * counter, last price, rollover tracking, persistence and diagnostics — see
- * instrumentPipeline.ts), and pushes candle/status frames tagged with `epic`
- * to the WS clients subscribed to that instrument.
+ * Provider-agnostic stream-surface RealtimeService consumes. IgStreamClient
+ * (IG/Lightstreamer) and CapitalStreamClient (Capital.com WS) both satisfy it,
+ * so the aggregator/persistence/relay pipeline never knows the transport.
+ */
+interface StreamClientLike {
+  connect(): void;
+  disconnect(): void;
+  redactables(): string[];
+  getStats(): {
+    ticks: number;
+    lastPrice: number | null;
+    lastTickAt: number;
+    updatesReceived: number;
+    noPriceUpdates: number;
+  };
+}
+
+/**
+ * Owns ONE stream connection PER configured instrument (IG shares a single
+ * Lightstreamer session; Capital instruments use the CapitalStreamClient),
+ * routes every tick to EXACTLY ONE per-instrument InstrumentUnit (own
+ * CandleAggregatorSet, forming candles, tick counter, last price, rollover
+ * tracking, persistence and diagnostics — see instrumentPipeline.ts), and
+ * pushes candle/status frames tagged with `epic` to the WS clients subscribed
+ * to that instrument.
  *
- * Phase 1 contract (DAX + Spot Gold, capture-only Gold):
- *   - instruments[0] (the constructor epic, DAX) stays the DEFAULT: it keeps
- *     the historic snapshot()/stateNow() semantics and is the ONLY instrument
- *     whose closed candles reach onClosedCandle listeners (the EMA alert
- *     engine — untouched). Gold closes are persisted + relayed but NEVER feed
- *     the DAX EMA state.
- *   - Unregistered EPICs keep the exact historic 1-decimal behavior via the
- *     registry's conservative fallback.
+ * Provider selection: `instrumentMetaFor(epic).provider`. "CAPITAL"
+ * instruments connect through the CapitalStreamClient (fresh session per
+ * connect via CapitalClient); everything else uses the historic IG path. The
+ * DEFAULT instrument (constructor epic) keeps snapshot()/stateNow() and the
+ * exclusive closed-candle listener feed (EMA alert engine — untouched).
  */
 export class RealtimeService {
   /** Per-instrument state — NEVER shared across EPICs. Keyed by raw EPIC. */
   private readonly units = new Map<string, InstrumentUnit>();
-  /** One Lightstreamer connection per instrument (shared IG session). */
-  private readonly streams = new Map<string, IgStreamClient>();
-  /** Per-instrument truthful IG connection state. */
+  /** One stream connection per instrument (provider-agnostic). */
+  private readonly streams = new Map<string, StreamClientLike>();
+  /** Per-instrument truthful connection state. */
   private readonly streamStates = new Map<string, StreamState>();
   private readonly lastStateChangeMs = new Map<string, number>();
   private readonly reconnectTimers = new Map<string, NodeJS.Timeout>();
@@ -99,6 +117,10 @@ export class RealtimeService {
     epic: string,
     /** Optional completed-candle persistence — null disables DB writes. */
     private readonly candleStore: CandleStore | null = null,
+    /** Optional Capital.com client — present only when Capital creds are
+     *  configured. Instruments whose registry provider is "CAPITAL" are
+     *  streamed through it (CapitalStreamClient) instead of the IG seam. */
+    private readonly capital: CapitalClient | null = null,
   ) {
     const meta = instrumentMetaFor(epic);
     this.units.set(meta.epic, createInstrumentUnit(meta.epic, meta.label, meta.decimals));
@@ -310,6 +332,59 @@ export class RealtimeService {
     // fire later and tear down the stream this attempt is about to open.
     this.clearReconnectTimer(epic);
 
+    const meta = instrumentMetaFor(epic);
+    const unit = this.units.get(epic);
+    if (!unit) {
+      this.connecting.delete(epic);
+      return;
+    }
+
+    // ── Capital.com provider path ──────────────────────────────────────────
+    // The stream client owns its own session lifecycle (fresh CST/XST on every
+    // connect + proactive renewal), so no pre-fetch is needed here — it gets
+    // sessionProvider and pulls exactly what it needs. Provider decisions use
+    // the one registry (never guessed from epic prefixes).
+    if (meta.provider === "CAPITAL") {
+      if (!this.capital) {
+        this.connecting.delete(epic);
+        console.warn(`[STREAM] ${epic} is a CAPITAL instrument but no CapitalClient is configured — stream skipped.`);
+        this.setStreamState(epic, "DISCONNECTED");
+        return;
+      }
+      if (!this.started || !this.units.has(epic)) return;
+      const previous = this.streams.get(epic);
+      this.streams.delete(epic);
+      previous?.disconnect();
+      this.reachedLive.delete(epic);
+
+      const stream: StreamClientLike = new CapitalStreamClient({
+        symbol: meta.epic, // "GOLD" — Capital's market symbol, NOT an IG epic
+        decimals: unit.decimals,
+        streamingUrl: this.capital.getStreamingInfo().url,
+        sessionProvider: async (): Promise<CapitalStreamSession> => {
+          const s = await this.capital!.getStreamSession();
+          return { cst: s.cst, xSecurityToken: s.xSecurityToken };
+        },
+        onTick: (tick) => {
+          if (this.streams.get(epic) === stream) this.handleTick(epic, tick);
+        },
+        onState: (state) => {
+          if (this.streams.get(epic) !== stream) return;
+          this.setStreamState(epic, state);
+        },
+      });
+      this.streams.set(epic, stream);
+      this.connecting.delete(epic);
+      try {
+        stream.connect();
+      } catch {
+        this.streams.delete(epic);
+        this.setStreamState(epic, "DISCONNECTED");
+        this.scheduleReconnect(epic);
+      }
+      return;
+    }
+
     let session;
     try {
       // ALWAYS a fresh IG login on (re)connect: IG invalidates the CST/XST
@@ -343,7 +418,6 @@ export class RealtimeService {
     previous?.disconnect();
 
     this.reachedLive.delete(epic);
-    const unit = this.units.get(epic)!;
     const stream = new IgStreamClient(
       session,
       epic,

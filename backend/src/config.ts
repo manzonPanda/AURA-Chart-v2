@@ -39,6 +39,20 @@ export interface Config {
     privateKey: string;
     subject: string;
   };
+  /**
+   * Capital.com provider (Gold migration). Server-side ONLY — the key/custom
+   * password never reach the frontend, logs, or the bundle. Unset → the
+   * Capital module is inert and IG keeps serving exactly as before.
+   */
+  capital: {
+    apiKey: string;
+    /** The API custom password — NOT the web-login password. */
+    apiPassword: string;
+    /** Account identifier (email) used by POST /api/v1/session. */
+    identifier: string;
+    baseUrl: string;
+    streamingUrl: string;
+  };
   /** First-run seed for the EMA alert master switch (before any UI change). */
   emaAlertEnabledOnBoot: boolean;
 }
@@ -88,6 +102,20 @@ export function loadConfig(): Config {
       privateKey: (process.env.VAPID_PRIVATE_KEY || "").trim(),
       subject: (process.env.VAPID_SUBJECT || "mailto:aura-alerts@localhost").trim(),
     },
+    // Capital.com provider — loaded ONLY from env (never committed). Unset
+    // values make the Capital module inert; IG continues serving as before.
+    capital: {
+      apiKey: (process.env.CAPITAL_API_KEY || "").trim(),
+      apiPassword: process.env.CAPITAL_API_PASSWORD || "",
+      identifier: (process.env.CAPITAL_IDENTIFIER || "").trim(),
+      baseUrl: (process.env.CAPITAL_API_BASE_URL || "https://api-capital.backend-capital.com")
+        .trim()
+        .replace(/\/+$/, ""),
+      streamingUrl: (
+        process.env.CAPITAL_STREAMING_URL ||
+        "wss://api-streaming-capital.backend-capital.com/connect"
+      ).trim(),
+    },
     emaAlertEnabledOnBoot: ["on", "true", "1"].includes(
       (process.env.EMA_ALERT_ENABLED || "").trim().toLowerCase(),
     ),
@@ -104,6 +132,29 @@ export interface IgCredentials {
   sendEncryptFlag: boolean;
 }
 
+/** Capital.com provider credentials — env-only, never logged. */
+export interface CapitalCredentials {
+  apiKey: string;
+  apiPassword: string;
+  identifier: string;
+  baseUrl: string;
+  streamingUrl: string;
+}
+
 export function isConfigured(cfg: Config): boolean {
   return Boolean(cfg.ig.apiKey && cfg.ig.username && cfg.ig.password && cfg.ig.baseUrl);
+}
+
+/**
+ * Capital.com is usable ONLY with key + custom password + identifier. The
+ * base/streaming URLs always have defaults, so they cannot block. Null-safe on
+ * `cfg.capital` (unit tests construct IG-only config shapes).
+ */
+export function isCapitalConfigured(cfg: Config): boolean {
+  return Boolean(
+    cfg.capital?.apiKey &&
+      cfg.capital?.apiPassword &&
+      cfg.capital?.identifier &&
+      cfg.capital?.baseUrl,
+  );
 }

@@ -10,6 +10,9 @@ build/
 .env
 .env.local
 backend/.env
+# env backups — never commit credential snapshots
+backend/.env.*.bak
+
 
 # EMA alert runtime state (settings + push subscriptions) — VM-local only
 backend/data/

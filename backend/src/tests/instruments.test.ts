@@ -17,10 +17,25 @@ import {
   configuredInstruments,
   instrumentMetaFor,
   roundToInstrumentPrecision,
+  uiInstruments,
 } from "../market/instruments.js";
 
-const cfg = (defaultEpic: string, goldEpic: string, silverEpic = ""): Config =>
-  ({ ig: { defaultEpic, goldEpic, silverEpic } }) as unknown as Config;
+const cfg = (
+  defaultEpic: string,
+  goldEpic = "CS.D.CFIGOLD.CFI.IP",
+  silverEpic = "",
+  capital?: { apiKey?: string; apiPassword?: string; identifier?: string },
+): Config =>
+  ({
+    ig: { defaultEpic, goldEpic, silverEpic },
+    capital: {
+      apiKey: capital?.apiKey ?? "",
+      apiPassword: capital?.apiPassword ?? "",
+      identifier: capital?.identifier ?? "",
+      baseUrl: "https://api-capital.backend-capital.com",
+      streamingUrl: "wss://api-streaming-capital.backend-capital.com/connect",
+    },
+  }) as unknown as Config;
 
 test("registry: DAX metadata — 1-decimal quoting, IG Germany 40 calendar", () => {
   const meta = instrumentMetaFor("IX.D.DAX.IGM.IP");
@@ -31,11 +46,12 @@ test("registry: DAX metadata — 1-decimal quoting, IG Germany 40 calendar", () 
 });
 
 test("registry: Spot Gold metadata — 2-decimal SGD quoting, IG Spot Gold calendar", () => {
-  const meta = instrumentMetaFor("CS.D.CFIGOLD.CFI.IP");
+  const meta = instrumentMetaFor("GOLD");
   assert.equal(meta.epic, GOLD_INSTRUMENT.epic);
   assert.ok(meta.label.includes("Gold"));
   assert.equal(meta.decimals, 2);
   assert.equal(meta.calendar?.id, "ig-spot-gold");
+  assert.equal(meta.provider, "CAPITAL", "Gold streams/persists via Capital.com");
 });
 
 test("registry: unknown EPIC falls back BC-conservatively (1 decimal, no calendar)", () => {
@@ -52,11 +68,12 @@ test("configuredInstruments: DAX-only config (goldEpic unset) → exactly one in
   assert.equal(list[0].epic, "IX.D.DAX.IGM.IP");
 });
 
-test("configuredInstruments: both EPICs → DAX first (default), Gold second", () => {
-  const list = configuredInstruments(cfg("IX.D.DAX.IGM.IP", "CS.D.CFIGOLD.CFI.IP"));
-  assert.equal(list.length, 2);
-  assert.equal(list[0].epic, "IX.D.DAX.IGM.IP");
-  assert.equal(list[1].epic, "CS.D.CFIGOLD.CFI.IP");
+test("configuredInstruments: both EPICs → DAX first (default), Gold identity depends on Capital config", () => {
+  // Without Capital creds → legacy IG Gold (BC behavior)
+  const legacyList = configuredInstruments(cfg("IX.D.DAX.IGM.IP", "CS.D.CFIGOLD.CFI.IP"));
+  assert.equal(legacyList.length, 2);
+  assert.equal(legacyList[0].epic, "IX.D.DAX.IGM.IP");
+  assert.equal(legacyList[1].epic, "CS.D.CFIGOLD.CFI.IP", "Gold via IG epic when Capital not configured");
 });
 
 test("configuredInstruments: duplicate EPICs collapse (never double-persist one market)", () => {
@@ -81,23 +98,31 @@ test("registry: Silver metadata — canonical EPIC CS.D.CFDSILVER.CMG.IP, IG Spo
   assert.notEqual(meta.calendar?.id, "ig-spot-gold", "Silver never silently aliases the Gold calendar object");
 });
 
-test("registry: Gold identity is UNCHANGED — same EPIC, label, decimals, calendar as before Silver", () => {
-  const meta = instrumentMetaFor("CS.D.CFIGOLD.CFI.IP");
-  assert.equal(GOLD_INSTRUMENT.epic, "CS.D.CFIGOLD.CFI.IP", "Gold EPIC frozen");
+test("registry: Gold identity is CAPITAL — GOLD, 2dp, IG Spot Gold calendar, CAPITAL provider", () => {
+  const meta = instrumentMetaFor("GOLD");
+  assert.equal(GOLD_INSTRUMENT.epic, "GOLD", "Gold EPIC is the Capital.com symbol");
   assert.equal(meta.decimals, 2);
   assert.equal(meta.calendar?.id, "ig-spot-gold");
+  assert.equal(meta.provider, "CAPITAL");
+});
+
+test("registry: legacy IG Gold (CS.D.CFIGOLD.CFI.IP) still resolves for backward-compat", () => {
+  const meta = instrumentMetaFor("CS.D.CFIGOLD.CFI.IP");
+  assert.equal(meta.provider, "IG");
+  assert.equal(meta.decimals, 2, "legacy Gold keeps 2dp for existing rows");
 });
 
 test("registry: DAX entry is still REGISTERED (existing rows/DB identity never dropped)", () => {
   const meta = instrumentMetaFor("IX.D.DAX.IGM.IP");
   assert.equal(DAX_INSTRUMENT.epic, "IX.D.DAX.IGM.IP");
+  assert.equal(meta.provider, "IG");
   assert.equal(meta.calendar?.id, "ig-germany-40");
 });
 
-test("configuredInstruments: DAX collection DISABLED when IG_DAX_EPIC is empty — only Gold+Silver collect", () => {
+test("configuredInstruments: DAX collection DISABLED when IG_DAX_EPIC is empty — only Gold+Silver collect (no Capital creds = legacy IG Gold)", () => {
   const list = configuredInstruments(cfg("", "CS.D.CFIGOLD.CFI.IP", "CS.D.CFDSILVER.CMG.IP"));
   assert.equal(list.length, 2, "empty DAX epic ⇒ DAX never enters the collection set");
-  assert.equal(list[0].epic, "CS.D.CFIGOLD.CFI.IP", "Gold enabled");
+  assert.equal(list[0].epic, "CS.D.CFIGOLD.CFI.IP", "legacy Gold enabled (BC, no Capital creds)");
   assert.equal(list[1].epic, "CS.D.CFDSILVER.CMG.IP", "Silver enabled");
   assert.ok(!list.some((i) => i.epic === "IX.D.DAX.IGM.IP"), "no DAX stream/backfill/scheduled collection");
 });
@@ -142,4 +167,52 @@ test("rounding: Spot Gold keeps its cent digit (2dp) that DAX rounding would des
   assert.equal(roundToInstrumentPrecision(4467.97, 2), 4467.97);
   // The old 1-decimal path would quantize Gold onto a 0.1 grid — forbidden:
   assert.notEqual(roundToInstrumentPrecision(4467.476, 1), 4467.48);
+});
+
+// ── Capital.com migration tests ────────────────────────────────────────────
+
+const CAPITAL = { apiKey: "test-key", apiPassword: "test-pw", identifier: "test@example.com" };
+
+test("configuredInstruments: with Capital creds → Gold resolves to CAPITAL provider (GOLD)", () => {
+  const list = configuredInstruments(cfg("IX.D.DAX.IGM.IP", "", "", CAPITAL));
+  // DAX collection is INDEPENDENT of the Gold provider switch (approved Path A):
+  // DAX keeps streaming via IG while Gold collects via Capital.com. DAX stays
+  // FIRST — the default-instrument position consumed by index.ts/EMA alerts.
+  assert.equal(list.length, 2, "DAX (IG) + GOLD (Capital) — one Gold identity");
+  assert.equal(list[0].epic, "IX.D.DAX.IGM.IP", "DAX remains first (default instrument)");
+  assert.equal(list[0].provider, "IG");
+  assert.equal(list[1].epic, "GOLD");
+  assert.equal(list[1].provider, "CAPITAL");
+});
+
+test("configuredInstruments: with Capital creds → legacy IG Gold epic NOT collected", () => {
+  const list = configuredInstruments(cfg("IX.D.DAX.IGM.IP", "CS.D.CFIGOLD.CFI.IP", "", CAPITAL));
+  assert.equal(list.length, 2, "DAX (IG) + GOLD (Capital) — exactly one Gold collection identity");
+  assert.equal(list[0].epic, "IX.D.DAX.IGM.IP", "DAX remains first (default instrument)");
+  assert.equal(list[1].epic, "GOLD");
+  assert.equal(list[1].provider, "CAPITAL");
+  assert.ok(!list.some((i) => i.epic === "CS.D.CFIGOLD.CFI.IP"), "legacy IG Gold excluded when Capital active");
+});
+
+test("configuredInstruments: without Capital creds → legacy IG Gold preserved (BC)", () => {
+  const list = configuredInstruments(cfg("IX.D.DAX.IGM.IP", "CS.D.CFIGOLD.CFI.IP", ""));
+  assert.equal(list.length, 2);
+  assert.equal(list[0].epic, "IX.D.DAX.IGM.IP");
+  assert.equal(list[1].epic, "CS.D.CFIGOLD.CFI.IP");
+  assert.equal(list[1].provider, "IG");
+});
+
+test("uiInstruments: with Capital creds → GOLD in UI catalog, legacy IG Gold absent", () => {
+  const list = uiInstruments(cfg("IX.D.DAX.IGM.IP", "", "", CAPITAL));
+  assert.ok(list.some((i) => i.epic === "GOLD"), "GOLD listed in UI");
+  assert.ok(list.some((i) => i.epic === "IX.D.DAX.IGM.IP"), "DAX retained in UI");
+  assert.ok(!list.some((i) => i.epic === "CS.D.CFIGOLD.CFI.IP"), "legacy IG Gold removed from UI");
+});
+
+test("uiInstruments: legacy IG Gold (CS.D.CFIGOLD.CFI.IP) still resolves via instrumentMetaFor", () => {
+  const meta = instrumentMetaFor("CS.D.CFIGOLD.CFI.IP");
+  assert.equal(meta.epic, "CS.D.CFIGOLD.CFI.IP");
+  assert.equal(meta.provider, "IG");
+  assert.equal(meta.decimals, 2);
+  // Still queryable for backward-compat even though not in the UI catalog
 });
