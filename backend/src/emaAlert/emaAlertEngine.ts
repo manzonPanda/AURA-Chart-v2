@@ -21,7 +21,7 @@
  *     server-side regardless of any browser connection or the timeframe a
  *     chart happens to be viewing.
  */
-import type { CandleStore } from "../db/candleStore.js";
+import type { CandleBackend } from "../db/candleStore.js";
 import { isClosedCandleInSession } from "./nySession.js";
 import type { ReversalDirection } from "./reversalDetector.js";
 import { PineEmaSeries, type EmaCandle } from "./pineEma.js";
@@ -92,7 +92,7 @@ export interface EmaAlertEngineDeps {
   epic: string;
   /** Human instrument label for notification content (e.g. "DAX / IG"). */
   instrumentLabel: string;
-  candleStore: CandleStore | null;
+  candleStore: CandleBackend | null;
   push: PushService;
   store: EmaAlertSettingsStore;
   /** Injectable clock for deterministic cooldown tests (defaults to Date.now). */

@@ -4,10 +4,10 @@
 --
 --   status = 'partial'     collector joined AFTER the bucket began (restart /
 --                          reconnect mid-bucket) — first tick anchored late;
---                          eligible for future IG backfill repair.
+--                          eligible for future Capital backfill repair.
 --   status = 'completed'   collector had coverage from the bucket boundary
 --                          (normal live close, or rows predating this system).
---   status = 'backfilled'  reserved for the future IG historical backfill job
+--   status = 'backfilled'  reserved for the future Capital historical backfill job
 --                          (not implemented yet — schema-ready).
 --
 -- LIVE is deliberately NOT a stored state: the forming candle lives only in
@@ -37,7 +37,7 @@ $$;
 -- Existing rows predate the status system — they all read as 'completed'
 -- (the NOT NULL DEFAULT backfills them automatically on ADD COLUMN).
 comment on column public.ohlc_candles.status is
-    'partial | completed | backfilled. partial = first tick anchored >5s after the bucket boundary (restart/reconnect mid-bucket). completed = full coverage from the boundary. backfilled = repaired/inserted from IG historical (future stage).';
+    'partial | completed | backfilled. partial = first tick anchored >5s after the bucket boundary (restart/reconnect mid-bucket). completed = full coverage from the boundary. backfilled = repaired/inserted from Capital historical (future stage).';
 
 -- Future gap-detection / backfill queries filter by (instrument, timeframe, status).
 create index if not exists ohlc_candles_status_idx

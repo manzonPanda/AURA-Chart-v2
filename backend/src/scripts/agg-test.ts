@@ -1,5 +1,5 @@
 /** TEMPORARY offline unit test for the 3m aggregation (no IG calls). */
-import { aggregateToMinutes } from "../ig/historical.js";
+import { aggregateToMinutes } from "../streaming/aggregation.js";
 
 const U = (h: number, m: number) => Date.UTC(2026, 0, 28, h, m);
 const mk = (ts: number, o: number, c: number, v: number) => ({

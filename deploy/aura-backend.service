@@ -34,6 +34,13 @@ ExecStart=/usr/bin/node dist/index.js
 # contains. Keep HOST=127.0.0.1 in production — nginx is the only caller;
 # the raw API must not be reachable from the internet.
 EnvironmentFile=/home/ubuntu/apps/AURA-Chart-v2/backend/.env
+# PostgreSQL (Oracle VM local `aura` DB) — the CandleStore's canonical store.
+# Provides AURA_DB_URL from the root-only /etc/aura/postgres.env (0600
+# root:root — read by systemd as root, never logged). Placed AFTER backend/.env
+# so the root-only file wins for any DB-related key. Adding this line only
+# requires `systemctl daemon-reload` — the running service is NOT restarted.
+EnvironmentFile=/etc/aura/postgres.env
+
 Environment=NODE_ENV=production
 Environment=HOST=127.0.0.1
 

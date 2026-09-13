@@ -105,7 +105,7 @@ async function main(): Promise<void> {
 
   // ── Seed 9 synthetic 1m candles ────────────────────────────────────────────
   for (let m = 0; m < 9; m++) {
-    await store.saveClosedCandle(INSTRUMENT, "MINUTE_1", minuteCandle(m));
+        await store.saveClosedCandle(INSTRUMENT, "MINUTE_1", minuteCandle(m), "ig");
   }
 
   try {

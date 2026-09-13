@@ -14,9 +14,9 @@
  *   9. A Gold subscriber does not receive DAX frames.
  *   (10/11: existing DAX suites + typecheck run in CI before this file.)
  *
- * The pipeline module under test (instrumentPipeline.ts) is PURE — no ws or
- * lightstreamer imports — so the runner does not hang (lightstreamer-client
- * keeps the Node event loop alive, the same reason other suites avoid
+  * The pipeline module under test (instrumentPipeline.ts) is PURE — no ws or
+ * streaming imports — so the runner does not hang (the streaming websocket
+ * layer keeps the Node event loop alive, the same reason other suites avoid
  * RealtimeService).
  */
 import test from "node:test";

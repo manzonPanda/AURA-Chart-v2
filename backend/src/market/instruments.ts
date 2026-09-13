@@ -1,22 +1,26 @@
 /**
- * Instrument registry — the seam that generalizes AURA beyond DAX.
+ * Instrument registry — the single source of truth for instrument metadata.
  *
- * Phase 0 scope (this file): DATA ONLY. No streaming/API/frontend behavior
- * changes — every consumer keeps its current single-EPIC wiring. Phase 1+
- * consumers (multi-stream realtime, API validation, GET /api/instruments, the
- * frontend selector) read from here, so adding an instrument = one registry
- * entry + one env var, never a pipeline change.
+ * Provider model (IG retired 2026): the ACTIVE collection set
+ * (configuredInstruments) contains ONLY CAPITAL-provider instruments — today
+ * that is exactly [GOLD]. DAX and the legacy IG Gold/Silver identities remain
+ * in the registry as LEGACY-ARCHIVE metadata so historical rows stay
+ * queryable/registered (rounding grid + calendar resolve identically); they
+ * are deliberately NEVER part of the collection set and cannot become active
+ * (RealtimeService also refuses any non-CAPITAL provider at stream time).
+ *
+ * Adding a future instrument (e.g. SILVER → CAPITAL) = one registry entry + a
+ * Capital-market verification — never a pipeline change.
  *
  * Identity rule (DB): the `instrument` column of public.ohlc_candles stores
- * the RAW IG EPIC — existing DAX rows are `IX.D.DAX.IGM.IP` and Gold writes
- * `CS.D.CFIGOLD.CFI.IP`. No symbolic ids, no data migration, and the
- * `(instrument, timeframe, bucket_time)` uniqueness constraint already
- * separates the two instruments.
+ * the raw symbol/EPIC — GOLD = "GOLD" (Capital), archive rows keep their
+ * historic identities (DAX = `IX.D.DAX.IGM.IP`, legacy gold =
+ * `CS.D.CFIGOLD.CFI.IP`, silver = `CS.D.CFDSILVER.CMG.IP`). No symbolic ids,
+ * no data migration, and the `(instrument, timeframe, bucket_time)`
+ * uniqueness constraint already separates the instruments.
  *
- * Price precision: the live stream must round each instrument's MID onto its
- * own quoting grid (DAX = 1 decimal; Spot Gold = 2 — its SGD quotes carry
- * cents, e.g. bid 4467.47). An UNREGISTERED EPIC falls back to 1 decimal,
- * which is byte-exact the historic behavior for any pre-registry config.
+ * Price precision: the live stream rounds each instrument's MID onto its own
+ * quoting grid (Spot Gold = 2). An UNREGISTERED EPIC falls back to 1 decimal.
  */
 import { IG_GERMANY_40, IG_SPOT_GOLD, IG_SPOT_SILVER, type MarketCalendar } from "./calendar.js";
 import { isCapitalConfigured, type Config } from "../config.js";
@@ -41,10 +45,12 @@ export interface InstrumentMeta {
   provider: "IG" | "CAPITAL";
 }
 
-/** Germany 40 Cash (E1) — verified against the account (1-decimal quoting). */
+/** Germany 40 (E1) — LEGACY ARCHIVE metadata (historic IG identity, 1-decimal
+ *  quoting). DAX is never collected any more (IG retired); the entry only keeps
+ *  historical rows registered/queryable. */
 export const DAX_INSTRUMENT: InstrumentMeta = {
   epic: "IX.D.DAX.IGM.IP",
-  label: "DAX / IG",
+  label: "DAX / IG (legacy archive)",
   decimals: 1,
   calendar: IG_GERMANY_40,
   provider: "IG",
@@ -80,10 +86,17 @@ export const LEGACY_GOLD_INSTRUMENT: InstrumentMeta = {
   provider: "IG",
 };
 
-/** Spot Silver ($1) — verified against the account (2-decimal, same CME Globex hours as Gold). */
+/**
+ * Spot Silver — LEGACY ARCHIVE metadata only (historic IG identity
+ * CS.D.CFDSILVER.CMG.IP, verified against the account). Silver is NOT
+ * collected (it is not in the collection set), and it is NOT configured as
+ * Capital because the Capital.com silver identity has not been selected/
+ * verified yet. Adding SILVER → CAPITAL later = verify the Capital symbol,
+ * add a registry entry, push it in configuredInstruments — no pipeline change.
+ */
 export const SILVER_INSTRUMENT: InstrumentMeta = {
   epic: "CS.D.CFDSILVER.CMG.IP",
-  label: "Spot Silver / IG",
+  label: "Spot Silver / IG (legacy archive)",
   decimals: 2,
   calendar: IG_SPOT_SILVER,
   provider: "IG",
@@ -96,7 +109,10 @@ const REGISTRY: ReadonlyMap<string, InstrumentMeta> = new Map([
   [SILVER_INSTRUMENT.epic, SILVER_INSTRUMENT],
 ]);
 
-/** Metadata for any EPIC — unregistered ones get BC-conservative defaults. */
+/** Metadata for any EPIC — unregistered ones get BC-conservative defaults.
+ *  The fallback `provider` is the legacy "IG" label ONLY as a safe default:
+ *  unregistered epics are never part of the collection set, and the realtime
+ *  service refuses every non-CAPITAL provider, so this can never come alive. */
 export function instrumentMetaFor(epic: string): InstrumentMeta {
   const key = epic.trim();
   const hit = REGISTRY.get(key);
@@ -111,73 +127,43 @@ export function calendarForInstrument(epic: string): MarketCalendar | null {
 }
 
 /**
- * Instruments this deployment configures, in canonical order (DAX first =
- * the default instrument; Gold second). DAX comes from IG_DAX_EPIC (kept for
- * BC — its value remains the DB identity), Gold from IG_GOLD_EPIC. Duplicate
- * EPICs collapse so a misconfiguration can never double-persist one market.
- */
-/**
- * Collection set — the instruments actually streamed/persisted. Driven by the
- * configured EPICs; an empty epic means "not collected" (BC).
+ * COLLECTION SET — the instruments actually streamed + persisted. Since IG is
+ * retired this is EXACTLY the configured CAPITAL-provider instruments (today
+ * ["GOLD"] when Capital credentials exist). Duplicate EPICs collapse so a
+ * misconfiguration can never double-persist one market.
  *
- * Provider-aware (Capital migration): when Capital.com credentials are present,
- * Gold's slot resolves to the CAPITAL provider identity ("GOLD") and the legacy
- * IG Gold epic (CS.D.CFIGOLD.CFI.IP) is NOT collected — legacy rows stay in
- * Supabase untouched but no new IG Gold rows are written. Without Capital
- * credentials the exact historic set is returned (DAX + IG Gold + IG Silver).
+ * Deliberately NO IG fallback: without Capital credentials the set is EMPTY
+ * (nothing collected) — a legacy/IG provider entry can never become active
+ * here, and an unavailable Capital provider never degrades to another feed.
  */
 export function configuredInstruments(config: Config): InstrumentMeta[] {
-  const out: InstrumentMeta[] = [];
-  const seen = new Set<string>();
-  const push = (meta: InstrumentMeta | null): void => {
-    // Empty-epic guard (restored from HEAD): an unset config epic resolves to
-    // a fallback meta with epic "" — it means "not collected", never a real
-    // instrument. Skipping it keeps the historic list shapes byte-exact.
-    if (!meta || !meta.epic || seen.has(meta.epic)) return;
-    seen.add(meta.epic);
-    out.push(meta);
-  };
-  // DAX — legacy IG provider (unchanged).
-  push(instrumentMetaFor(config.ig.defaultEpic.trim()));
-  if (isCapitalConfigured(config)) {
-    // Gold — CAPITAL provider identity ("GOLD") when Capital creds exist.
-    push(GOLD_INSTRUMENT);
-  } else {
-    // Gold — legacy IG epic (pre-migration behavior).
-    push(instrumentMetaFor(config.ig.goldEpic.trim()));
-  }
-  // Silver — legacy IG provider (unchanged).
-  push(instrumentMetaFor(config.ig.silverEpic.trim()));
-  return out;
+  if (!isCapitalConfigured(config)) return [];
+  return [GOLD_INSTRUMENT];
 }
 
 /**
- * UI/HISTORICAL instruments — the catalog served by GET /api/instruments and
- * the epic allowlist of /api/candles/db (Supabase history reads). This is
- * deliberately WIDER than the collection set: the built-in DAX constant is
- * ALWAYS included so historical DAX rows stay queryable and viewable in the
- * chart UI even when IG_DAX_EPIC is empty (DAX collection disabled). Gold is
- * the CAPITAL identity when Capital creds are configured, else legacy IG Gold.
- * Silver comes from config — DAX history viewing is a built-in guarantee,
- * not a configuration. The legacy IG Gold epic is intentionally NOT in the
- * UI list post-migration (its rows remain registered/queryable by epic but are
- * superseded by the Capital dataset for the chart).
+ * UI/HISTORICAL catalog — served by GET /api/instruments and the epic
+ * allowlist of /api/candles/db (archive history reads). Deliberately WIDER
+ * than the collection set: DAX + Silver are LEGACY ARCHIVE entries (their
+ * historical rows — Supabase/archive — stay queryable and viewable in the
+ * chart UI) while GOLD is the active CAPITAL instrument. Archive entries are
+ * NEVER collected; they exist purely so the legacy archive remains readable.
+ * The legacy IG Gold epic is intentionally NOT in the UI list post-migration
+ * (its rows remain registered/queryable by epic but are superseded by the
+ * Capital dataset for the chart).
  */
 export function uiInstruments(config: Config): InstrumentMeta[] {
   const out: InstrumentMeta[] = [DAX_INSTRUMENT];
   const seen = new Set<string>([DAX_INSTRUMENT.epic]);
   const push = (meta: InstrumentMeta | null): void => {
-    // Same empty-epic guard as configuredInstruments (see above).
     if (!meta || !meta.epic || seen.has(meta.epic)) return;
     seen.add(meta.epic);
     out.push(meta);
   };
-  if (isCapitalConfigured(config)) {
-    push(GOLD_INSTRUMENT);
-  } else {
-    push(instrumentMetaFor(config.ig.goldEpic.trim()));
-  }
-  push(instrumentMetaFor(config.ig.silverEpic.trim()));
+  push(isCapitalConfigured(config) ? GOLD_INSTRUMENT : LEGACY_GOLD_INSTRUMENT);
+  // Silver — legacy archive entry (NEVER collected; its Capital identity is
+  // not yet selected/verified, so it is deliberately not configured as Capital).
+  push(SILVER_INSTRUMENT);
   return out;
 }
 

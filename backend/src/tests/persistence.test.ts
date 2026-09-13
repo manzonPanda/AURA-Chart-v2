@@ -160,8 +160,8 @@ test("writeJsonAtomic: valid JSON lands, no temp files remain, crash-safe patter
 type SentFrame = Record<string, unknown>;
 
 test("reconnect seed: registered seeders deliver the CURRENT emaAlert snapshot to new clients", () => {
-  // NOTE: the seed registry is exercised directly (streaming/clientSeed.ts) —
-  // the lightstreamer-client package keeps the Node loop alive once imported,
+    // NOTE: the seed registry is exercised directly (streaming/clientSeed.ts) —
+  // the realtime websocket layer keeps the Node loop alive once imported,
   // so importing RealtimeService in a test would hang the runner. RealtimeService
   // composes this class and sends each frame via sendRaw (verified by tsc wiring).
   const state = {

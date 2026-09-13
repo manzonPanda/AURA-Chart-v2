@@ -1,57 +1,45 @@
 /**
- * Phase 2 — API instrument-awareness tests (Node test runner via tsx).
+ * API instrument-routing tests (Node test runner via tsx).
  *   npm --prefix backend run test
  *
- * Proves (against the REAL Hono routers with a FAKE CandleStore / IG client —
- * no network, no Supabase, no lightstreamer import):
- *   1. GET /api/instruments lists the configured registry + default EPIC.
- *   2. /candles/db: valid DAX epic → 200, valid Gold epic → 200.
- *   3. /candles/db: omitted epic → defaults to DAX (BC).
+ * Proves (against the REAL Hono routers with a FAKE CandleStore — no network,
+ * no Supabase, no provider import):
+ *   1. GET /api/instruments lists the registry catalog with the GOLD default.
+ *   2. /candles/db: valid DAX (legacy archive) epic → 200, valid GOLD epic → 200.
+ *   3. /candles/db: omitted epic → defaults to GOLD (the active CAPITAL default).
  *   4. /candles/db: unsupported epic → 400 UNSUPPORTED_EPIC (never an empty
- *      dataset), and the IG REST router never touches IG for it.
- *   5. Candle queries are keyed by the resolved instrument — a DAX request
- *      cannot return Gold rows and vice versa (store sees the right WHERE).
- *   6. /candles/db/gaps: DAX resolves the IG_GERMANY_40 calendar; Gold
- *      resolves IG_SPOT_GOLD — proven behaviorally with a Sunday-evening
- *      bucket that Gold's calendar expects but DAX's does not (unexpected
- *      for DAX, completed for Gold).
- *   7. Registry identity: the calendar routing source is the registry.
+ *      dataset). The store is keyed by the resolved instrument — a DAX request
+ *      cannot return Gold rows and vice versa.
+ *   5. /candles/db/gaps: DAX resolves the IG_GERMANY_40 archive calendar; Gold
+ *      resolves IG_SPOT_GOLD — proven with a Sunday-evening bucket that Gold's
+ *      calendar expects but DAX's does not.
+ *   6. IG RETIREMENT: the IG REST routers (GET /api/candles and GET
+ *      /api/markets) are REMOVED from the API surface — 404s, never a
+ *      provider call. The chart history source is exclusively the store.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 
 import type { CandleStore, PersistedCandle } from "../db/candleStore.js";
-import type { IgClient } from "../ig/client.js";
 import { IG_GERMANY_40, IG_SPOT_GOLD } from "../market/calendar.js";
 import {
   DAX_INSTRUMENT,
   GOLD_INSTRUMENT,
-  instrumentMetaFor,
   type InstrumentMeta,
 } from "../market/instruments.js";
 import { createCandlesDbRouter } from "../routes/candlesDb.js";
-import { createCandlesRouter } from "../routes/candles.js";
 import { createInstrumentsRouter } from "../routes/instruments.js";
 
-const DAX = DAX_INSTRUMENT.epic; // IX.D.DAX.IGM.IP
-const GOLD = GOLD_INSTRUMENT.epic; // CS.D.CFIGOLD.CFI.IP
-const INSTRUMENTS: readonly InstrumentMeta[] = [DAX_INSTRUMENT, GOLD_INSTRUMENT];
+const DAX = DAX_INSTRUMENT.epic; // IX.D.DAX.IGM.IP — legacy archive identity
+const GOLD = GOLD_INSTRUMENT.epic; // GOLD — Capital.com identity
+const CATALOG: readonly InstrumentMeta[] = [DAX_INSTRUMENT, GOLD_INSTRUMENT];
 
 // ── Fixture bucket: most recent COMPLETED Sunday 23:30-London bucket ────────
 // Must sit inside IG Spot Gold's Sunday window (23:00–24:00 UK) while DAX is
-// closed all Sunday. The ORIGINAL hard-coded instant (2026-08-30 22:30 UTC =
-// 23:30 London BST) was a TIME BOMB: /gaps scans at most 240 h back, so once
-// `now` passed 2026-09-09 22:30 UTC the row fell OUTSIDE the scan range and
-// detectGaps' documented contract ("rows outside the range are unexpected —
-// informational") flagged it — a fixture defect, NOT a calendar/detector bug
-// (isBucketExpected provably returns true for Gold on that instant, false for
-// DAX). The fixture is therefore computed RELATIVE to runtime now: the most
-// recent Sunday whose 23:30 London bucket is fully completed and not a Gold
-// closure date. The most recent past Sunday-23:30 is always ≤ ~168 h old, so
-// it can never age out of the ≤240 h lookback. DST-safe: the 23:30 London
-// instant is derived PER DATE through Intl; UK DST transitions run Sundays
-// 01:00/02:00 local — never 23:30 — so the noon-anchored offset below is exact
-// (23:30 London = 22:30 UTC in BST, 23:30 UTC in GMT).
+// closed all Sunday. Computed RELATIVE to runtime now so it can never age out
+// of the ≤240 h lookback. DST-safe: the 23:30 London instant is derived PER
+// DATE through Intl (see the pre-retirement version of this fixture for the
+// full derivation rationale).
 const SUNDAY_BUCKET_SEC: number = (() => {
   const fmt = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit",
@@ -70,28 +58,25 @@ const SUNDAY_BUCKET_SEC: number = (() => {
       const y = Number(p.get("year"));
       const mo = Number(p.get("month")) - 1;
       const d = Number(p.get("day"));
-      // UTC instant of London NOON on this date: guess via UTC, correct once
-      // with the zone offset measured at that instant (constant all day
-      // except the 01:00/02:00 transition hour — far from noon and 23:30).
       const noonGuess = Date.UTC(y, mo, d, 12);
       const noonMinutes = Number(partsOf(noonGuess).get("hour")) * 60 +
         Number(partsOf(noonGuess).get("minute"));
       const noonUtc = noonGuess + (12 * 60 - noonMinutes) * 60_000;
       const bucketStartMs = noonUtc + (23 * 60 + 30 - 12 * 60) * 60_000; // +11h30m
       const date = `${p.get("year")}-${p.get("month")}-${p.get("day")}`;
-      const complete = bucketStartMs + 60_000 <= nowMs; // bucket fully closed
+      const complete = bucketStartMs + 60_000 <= nowMs;
       const notClosed = !IG_SPOT_GOLD.closedDates.includes(date);
       if (complete && notClosed) return Math.floor(bucketStartMs / 1000);
     }
-    cursor -= 24 * 60 * 60_000; // previous London day — at most 7 hops to a Sunday
+    cursor -= 24 * 60 * 60_000;
   }
   throw new Error("fixture: no completable Sunday 23:30 London bucket found within 8 days");
 })();
 const ISO = (sec: number): string => new Date(sec * 1000).toISOString();
 
 /** Fake store: rows are instrument-TAGGED and filtered per request, exactly
- *  like Supabase's `WHERE instrument = …`; the requested instrument is
- *  captured so tests can assert the router queried the RIGHT one. */
+ *  like the DB's `WHERE instrument = …`; the requested instrument is captured
+ *  so tests can assert the router queried the RIGHT one. */
 class FakeCandleStore {
   readonly rows: Array<PersistedCandle & { instrument: string }> = [
     { instrument: DAX, time: SUNDAY_BUCKET_SEC, open: 26000.0, high: 26001.0, low: 25999.0, close: 26000.5, tickCount: 10, status: "completed" },
@@ -107,35 +92,12 @@ class FakeCandleStore {
 }
 
 const makeDbApp = (store: FakeCandleStore) =>
-  createCandlesDbRouter(store as unknown as CandleStore, INSTRUMENTS);
-
-/** Fake IG REST client: captures the requested /prices/{epic} path. */
-function makeFakeIg(): { ig: IgClient; requestedPath: () => string | null } {
-  let path: string | null = null;
-  const ig = {
-    request: async (p: string) => {
-      path = p;
-      return {
-        prices: [
-          {
-            snapshotTimeUTC: "2026-09-04T08:00:00",
-            openPrice: { midTraded: 26000 },
-            highPrice: { midTraded: 26010 },
-            lowPrice: { midTraded: 25990 },
-            closePrice: { midTraded: 26005 },
-            lastTradedVolume: 1,
-          },
-        ],
-      };
-    },
-  } as unknown as IgClient;
-  return { ig, requestedPath: () => path };
-}
+  createCandlesDbRouter(store as unknown as CandleStore, CATALOG, GOLD);
 
 // ── 1. GET /api/instruments ──────────────────────────────────────────────────
 
-test("GET /api/instruments lists the configured registry with the DAX default", async () => {
-  const app = createInstrumentsRouter(INSTRUMENTS, DAX);
+test("GET /api/instruments lists the registry catalog with the GOLD default", async () => {
+  const app = createInstrumentsRouter(CATALOG, GOLD);
   const res = await app.request("/instruments");
   assert.equal(res.status, 200);
   const body = (await res.json()) as {
@@ -143,25 +105,24 @@ test("GET /api/instruments lists the configured registry with the DAX default", 
     count: number;
     instruments: Array<{ epic: string; label: string; decimals: number; calendar: { id: string } | null }>;
   };
-  assert.equal(body.defaultEpic, DAX);
+  assert.equal(body.defaultEpic, GOLD, "the active CAPITAL default is GOLD");
   assert.equal(body.count, 2);
-  assert.equal(body.instruments[0].epic, DAX);
-  assert.equal(body.instruments[0].decimals, 1);
+  assert.equal(body.instruments[0].epic, DAX, "DAX remains catalogued as a legacy ARCHIVE entry");
   assert.equal(body.instruments[0].calendar?.id, IG_GERMANY_40.id);
   assert.equal(body.instruments[1].epic, GOLD);
   assert.equal(body.instruments[1].decimals, 2);
   assert.equal(body.instruments[1].calendar?.id, IG_SPOT_GOLD.id);
 });
 
-// ── 2 + 3 + 5. /candles/db routing & isolation ───────────────────────────────
+// ── 2 + 3. /candles/db routing & isolation ───────────────────────────────────
 
-test("/candles/db: valid DAX epic → 200 and queries the DAX identity", async () => {
+test("/candles/db: valid DAX (archive) epic → 200 and queries the DAX identity", async () => {
   const store = new FakeCandleStore();
   const res = await makeDbApp(store).request(`/candles/db?epic=${encodeURIComponent(DAX)}`);
   assert.equal(res.status, 200);
   const body = (await res.json()) as { epic: string; count: number; candles: Array<{ close: number }> };
-  assert.equal(body.epic, DAX);
-  assert.equal(store.lastInstrument, DAX, "store must be keyed by the DAX identity");
+  assert.equal(body.epic, DAX, "archive reads by the legacy identity still work");
+  assert.equal(store.lastInstrument, DAX);
   assert.equal(body.count, 1);
   assert.equal(body.candles[0].close, 26000.5, "must be the DAX row, never a Gold row");
 });
@@ -172,18 +133,18 @@ test("/candles/db: valid Gold epic → 200 and queries the Gold identity", async
   assert.equal(res.status, 200);
   const body = (await res.json()) as { epic: string; count: number; candles: Array<{ close: number }> };
   assert.equal(body.epic, GOLD);
-  assert.equal(store.lastInstrument, GOLD, "store must be keyed by the Gold identity");
+  assert.equal(store.lastInstrument, GOLD);
   assert.equal(body.count, 1);
   assert.equal(body.candles[0].close, 4477.6, "must be the Gold row, never a DAX row");
 });
 
-test("/candles/db: omitted epic defaults to DAX (BC)", async () => {
+test("/candles/db: omitted epic defaults to GOLD (the active CAPITAL default)", async () => {
   const store = new FakeCandleStore();
   const res = await makeDbApp(store).request("/candles/db");
   assert.equal(res.status, 200);
   const body = (await res.json()) as { epic: string };
-  assert.equal(body.epic, DAX);
-  assert.equal(store.lastInstrument, DAX);
+  assert.equal(body.epic, GOLD, "the chart's default history instrument is GOLD, never DAX/IG");
+  assert.equal(store.lastInstrument, GOLD);
 });
 
 test("/candles/db: unsupported epic → 400 UNSUPPORTED_EPIC (no silent empty set)", async () => {
@@ -199,7 +160,7 @@ test("/candles/db: unsupported epic → 400 UNSUPPORTED_EPIC (no silent empty se
 test("/candles/db: a DAX query cannot return Gold candles and vice versa", async () => {
   const store = new FakeCandleStore();
   const app = makeDbApp(store);
-  const daxRes = await app.request("/candles/db?timeframe=MINUTE_1");
+  const daxRes = await app.request("/candles/db?timeframe=MINUTE_1&epic=" + encodeURIComponent(DAX));
   const goldRes = await app.request("/candles/db?timeframe=MINUTE_1&epic=" + encodeURIComponent(GOLD));
   const daxBody = (await daxRes.json()) as { candles: Array<{ close: number }> };
   const goldBody = (await goldRes.json()) as { candles: Array<{ close: number }> };
@@ -207,41 +168,27 @@ test("/candles/db: a DAX query cannot return Gold candles and vice versa", async
   for (const candle of goldBody.candles) assert.ok(candle.close < 10000, "Gold response carries only Gold-priced rows");
 });
 
-// ── 4. /api/candles (IG REST proxy) validation ───────────────────────────────
+// ── 6. IG RETIREMENT — the IG REST routers are GONE from the API surface ─────
 
-test("/api/candles: unsupported epic → 400 and IG is NEVER called", async () => {
-  const { ig, requestedPath } = makeFakeIg();
-  const app = createCandlesRouter(ig, INSTRUMENTS);
-  const res = await app.request("/candles?epic=NOT.A.REAL.EPIC&resolution=MINUTE");
-  assert.equal(res.status, 400);
-  const body = (await res.json()) as { code: string };
-  assert.equal(body.code, "UNSUPPORTED_EPIC");
-  assert.equal(requestedPath(), null, "rejection must happen before any IG REST call");
+test("/api/candles (IG REST proxy) is REMOVED — 404, no provider call", async () => {
+  // index.ts no longer mounts createCandlesRouter; an app built exactly like
+  // the production surface (only the db + instruments routers) 404s it.
+  const app = makeDbApp(new FakeCandleStore());
+  const res = await app.request("/candles?epic=" + encodeURIComponent(GOLD) + "&resolution=MINUTE_3");
+  assert.equal(res.status, 404, "the IG historical REST route no longer exists");
+  const body = (await res.json().catch(() => null)) as { message?: string } | null;
+  assert.ok(body === null || typeof body.message === "string", "404 body is Hono's default (no IG data shape)");
 });
 
-test("/api/candles: Gold epic routes to IG's Gold /prices path; omitted → DAX", async () => {
-  // NOTE: resolution must be a router-supported one (CHART_RESOLUTIONS is
-  // ["MINUTE_3"] today) — this test asserts EPIC routing, not resolutions.
-  const gold = makeFakeIg();
-  const goldRes = await createCandlesRouter(gold.ig, INSTRUMENTS).request(
-    "/candles?resolution=MINUTE_3&epic=" + encodeURIComponent(GOLD),
-  );
-  assert.equal(goldRes.status, 200);
-  assert.equal(gold.requestedPath(), `/prices/${GOLD}`, "IG must be asked for the GOLD epic");
-  const goldBody = (await goldRes.json()) as { epic: string };
-  assert.equal(goldBody.epic, GOLD);
-
-  const dax = makeFakeIg();
-  const daxRes = await createCandlesRouter(dax.ig, INSTRUMENTS).request("/candles?resolution=MINUTE_3");
-  assert.equal(daxRes.status, 200);
-  assert.equal(dax.requestedPath(), `/prices/${DAX}`, "omitted epic must default to DAX (BC)");
-  const daxBody = (await daxRes.json()) as { epic: string };
-  assert.equal(daxBody.epic, DAX);
+test("/api/markets (IG market discovery) is REMOVED — 404", async () => {
+  const app = makeDbApp(new FakeCandleStore());
+  const res = await app.request("/markets?q=Gold");
+  assert.equal(res.status, 404, "the IG market search/discovery route no longer exists");
 });
 
-// ── 6. /candles/db/gaps — per-instrument MarketCalendar routing ──────────────
+// ── 5. /candles/db/gaps — per-instrument MarketCalendar routing ──────────────
 
-test("/gaps: DAX uses IG_GERMANY_40 — the Sunday-evening bucket is UNEXPECTED for DAX", async () => {
+test("/gaps: DAX (archive) uses IG_GERMANY_40 — the Sunday-evening bucket is UNEXPECTED for DAX", async () => {
   const store = new FakeCandleStore();
   const res = await makeDbApp(store).request("/candles/db/gaps?epic=" + encodeURIComponent(DAX) + "&hours=240");
   assert.equal(res.status, 200);
@@ -252,13 +199,13 @@ test("/gaps: DAX uses IG_GERMANY_40 — the Sunday-evening bucket is UNEXPECTED 
     unexpected: string[];
   };
   assert.equal(body.epic, DAX);
-  assert.equal(body.market.calendar, IG_GERMANY_40.id, "DAX must use the IG Germany 40 calendar");
+  assert.equal(body.market.calendar, IG_GERMANY_40.id, "DAX must use the IG Germany 40 calendar (archive reads)");
   assert.equal(body.summary.unexpectedRows, 1, "the Sunday row is outside DAX hours → unexpected");
   assert.equal(body.summary.completed, 0);
   assert.ok(body.unexpected.includes(ISO(SUNDAY_BUCKET_SEC)));
 });
 
-test("/gaps: Gold uses IG_SPOT_GOLD — the Sunday-evening bucket is EXPECTED for Gold", async () => {
+test("/gaps: GOLD uses IG_SPOT_GOLD — the Sunday-evening bucket is COMPLETED for Gold", async () => {
   const store = new FakeCandleStore();
   const res = await makeDbApp(store).request("/candles/db/gaps?epic=" + encodeURIComponent(GOLD) + "&hours=240");
   assert.equal(res.status, 200);
@@ -266,52 +213,9 @@ test("/gaps: Gold uses IG_SPOT_GOLD — the Sunday-evening bucket is EXPECTED fo
     epic: string;
     market: { calendar: string };
     summary: { unexpectedRows: number; completed: number };
-    unexpected: string[];
-    missing: string[];
   };
   assert.equal(body.epic, GOLD);
-  assert.equal(body.market.calendar, IG_SPOT_GOLD.id, "Gold must use the IG Spot Gold calendar");
-  assert.equal(body.summary.unexpectedRows, 0, "Gold trades Sunday 23:30 UK — the row is a normal bucket");
+  assert.equal(body.market.calendar, IG_SPOT_GOLD.id, "Gold must use the CME Globex gold calendar");
+  assert.equal(body.summary.unexpectedRows, 0);
   assert.equal(body.summary.completed, 1);
-  assert.ok(!body.unexpected.includes(ISO(SUNDAY_BUCKET_SEC)));
-  assert.ok(!body.missing.includes(ISO(SUNDAY_BUCKET_SEC)));
 });
-
-test("/gaps: omitted epic defaults to DAX and its calendar", async () => {
-  const store = new FakeCandleStore();
-  const res = await makeDbApp(store).request("/candles/db/gaps?hours=240");
-  assert.equal(res.status, 200);
-  const body = (await res.json()) as { epic: string; market: { calendar: string } };
-  assert.equal(body.epic, DAX);
-  assert.equal(body.market.calendar, IG_GERMANY_40.id);
-});
-
-test("/gaps: unsupported epic → 400 UNSUPPORTED_EPIC", async () => {
-  const store = new FakeCandleStore();
-  const res = await makeDbApp(store).request("/candles/db/gaps?epic=BOGUS.EPIC&hours=1");
-  assert.equal(res.status, 400);
-  const body = (await res.json()) as { code: string };
-  assert.equal(body.code, "UNSUPPORTED_EPIC");
-});
-
-test("/gaps: a configured EPIC without a registered calendar → 400 NO_MARKET_CALENDAR (never guessed)", async () => {
-  // A configured instrument with NO calendar (the registry's conservative
-  // fallback for unknown EPICs) must be REFUSED, not scanned with DAX hours.
-  const store = new FakeCandleStore();
-  const custom: InstrumentMeta[] = [...INSTRUMENTS, instrumentMetaFor("ZZ.UNREGISTERED.EPIC")];
-  const app = createCandlesDbRouter(store as unknown as CandleStore, custom);
-  const res = await app.request("/candles/db/gaps?epic=ZZ.UNREGISTERED.EPIC&hours=1");
-  assert.equal(res.status, 400);
-  const body = (await res.json()) as { code: string };
-  assert.equal(body.code, "NO_MARKET_CALENDAR");
-});
-
-// ── 7. Registry identity — the calendar routing source ───────────────────────
-
-test("registry: DAX resolves IG_GERMANY_40 and Gold resolves IG_SPOT_GOLD (identity)", () => {
-  assert.equal(instrumentMetaFor(DAX).calendar, IG_GERMANY_40);
-  assert.equal(instrumentMetaFor(GOLD).calendar, IG_SPOT_GOLD);
-  assert.equal(instrumentMetaFor(DAX).decimals, 1);
-  assert.equal(instrumentMetaFor(GOLD).decimals, 2);
-});
-

@@ -81,12 +81,12 @@ export class CapitalClient {
   }
 
   /**
-   * Fresh authoritative session for streaming consumers (mirrors IgClient
-   * getStreamSession): ensures a valid — proactively renewed — session exists
-   * and returns the CURRENT tokens. The WS client calls this on EVERY
-   * (re)connect because a Capital.com streaming session death invalidates its
-   * CST/XST; the reuse window + auth cooldown inside ensureSession keep the
-   * login rate safe without callers needing their own throttling.
+   * Fresh authoritative session for streaming consumers: ensures a valid —
+   * proactively renewed — session exists and returns the CURRENT tokens. The
+   * WS client calls this on EVERY (re)connect because a Capital.com streaming
+   * session death invalidates its CST/XST; the reuse window + auth cooldown
+   * inside ensureSession keep the login rate safe without callers needing
+   * their own throttling.
    */
   async getStreamSession(): Promise<CapitalSession> {
     await this.ensureSession();
@@ -207,7 +207,21 @@ export class CapitalClient {
       );
     }
     if (!res.ok) {
-      throw new CapitalApiError("upstream", res.status, `Capital.com returned an error (HTTP ${res.status}).`);
+      // Capture Capital's own error payload for server-side diagnostics.
+      // SAFE: toHttpError() returns fixed public strings per kind — the detail
+      // below only reaches console/probe output (Capital error bodies carry
+      // the request's error reason, never credentials/tokens).
+      const errBody = (await res.json().catch(() => null)) as
+        | { errorCode?: string; message?: string; detail?: string }
+        | null;
+      const detail = errBody?.message ?? errBody?.detail ?? JSON.stringify(errBody) ?? "";
+      throw new CapitalApiError(
+        "upstream",
+        res.status,
+        `Capital.com returned an error (HTTP ${res.status}).` +
+          (detail ? ` detail: ${detail.slice(0, 300)}` : ""),
+        errBody?.errorCode,
+      );
     }
 
     const body = (await res.json().catch(() => null)) as T | null;

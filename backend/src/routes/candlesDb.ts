@@ -1,5 +1,5 @@
 import { Hono, type Context } from "hono";
-import type { CandleStore, PersistedCandle } from "../db/candleStore.js";
+import type { CandleBackend, PersistedCandle } from "../db/candleStore.js";
 import { instrumentMetaFor, type InstrumentMeta } from "../market/instruments.js";
 import { detectGaps, deriveGapIntervals } from "../market/gapDetector.js";
 import { calendarForInstrument } from "../market/instruments.js";
@@ -53,7 +53,7 @@ function gapsForEpic(epic: string, timesSec: readonly number[], bucketSec: numbe
  *  Also returns derived gaps — market-data intervals that should have had
  *  candles but don't (broker outages), excluding market closures per calendar. */
 async function loadTimeframeCandles(
-  store: CandleStore,
+  store: CandleBackend,
   epic: string,
   timeframe: string,
   limit: number,
@@ -161,7 +161,7 @@ function unsupportedEpic(c: Context, epic: string, instruments: readonly Instrum
  * query can never accidentally read another instrument's candles.
  */
 export function createCandlesDbRouter(
-  store: CandleStore | null,
+  store: CandleBackend | null,
   instruments: readonly InstrumentMeta[],
   defaultEpic: string = instruments[0]?.epic ?? "",
 ): Hono {
@@ -183,7 +183,7 @@ export function createCandlesDbRouter(
     const epic = requested || defaultEpic.trim();
     if (!epic) {
       return c.json(
-        { error: "No instrument EPIC configured — set IG_DAX_EPIC or pass `epic`.", code: "EPIC_MISSING" },
+        { error: "No instrument EPIC configured — pass `epic` as a query parameter.", code: "EPIC_MISSING" },
         400,
       );
     }
@@ -249,7 +249,7 @@ export function createCandlesDbRouter(
     const epic = requested || defaultEpic.trim();
     if (!epic) {
       return c.json(
-        { error: "No instrument EPIC configured — set IG_DAX_EPIC or pass `epic`.", code: "EPIC_MISSING" },
+        { error: "No instrument EPIC configured — pass `epic` as a query parameter.", code: "EPIC_MISSING" },
         400,
       );
     }

@@ -2,9 +2,9 @@
  * Historical prices via GET /api/v1/prices/{symbol}.
  *
  * ▸ RESOLUTION: `MINUTE` buckets (Capital's smallest); callers aggregate to
- *   3m with the SHARED, provider-agnostic aggregateToMinutes (relocated from
- *   ig/historical.ts — one aggregation, both providers).
- * ▸ MIDPOINT: AURA's OHLC basis is IG's mid. Capital returns bid AND ask
+ *   3m with the SHARED, provider-agnostic aggregateToMinutes (in
+ *   streaming/aggregation.ts — provider-neutral).
+ * ▸ MIDPOINT: AURA's OHLC basis is the mid price. Capital returns bid AND ask
  *   OHLC; open/high/low/close = (bid + ask) / 2 rounded onto the instrument's
  *   quoting grid (GOLD 2dp) — the documented Phase 1 decision, NOT a basis
  *   change. Raw bid/ask remain in CapitalCandle for future bid-based views.

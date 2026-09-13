@@ -1,11 +1,11 @@
 /**
  * Capital.com WebSocket streaming client (migration Phase 4).
  *
- * Mirrors the IG stream seam (`streaming/igStream.ts`) so Phase 5 wiring into
- * RealtimeService is a drop-in: `start(handler)` emits `IngTick`s — the SAME
- * normalized forming-candle shape the aggregators already consume — and
- * `stop()` tears the socket down without touching provider-agnostic
- * aggregation/persistence/relay.
+ * Implements the `StreamClientLike` seam so wiring into RealtimeService is a
+ * drop-in: `start(handler)` emits `IngTick`s — the SAME normalized
+ * forming-candle shape the aggregators consume — and `stop()` tears the socket
+ * down without touching provider-agnostic aggregation/persistence/relay.
+ * (IG streaming has been retired — there is no fallback.)
  *
  * Protocol (Capital.com streaming):
  *   wss://api-streaming-capital.backend-capital.com/connect

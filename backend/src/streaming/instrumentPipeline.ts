@@ -1,15 +1,15 @@
 /**
  * Per-instrument realtime state + tick pipeline (PURE — deliberately imports
- * NO ws / lightstreamer so the unit-test runner can load this module without
- * the lightstreamer-client package keeping the event loop alive — the same
+ * NO ws / streaming so the unit-test runner can load this module without
+ * the streaming websocket layer keeping the event loop alive — the same
  * constraint that keeps other suites off RealtimeService).
  *
  * Phase 1 multi-instrument: EVERY instrument gets its own InstrumentUnit —
  * its own CandleAggregatorSet, forming-candle state, tick counter, last
  * price, per-timeframe bucket tracking, rollover detection and first-anchor
- * diagnostics. A tick is routed to EXACTLY ONE unit (the IgStreamClient
- * instance is bound to one EPIC: CHART:<epic>:TICK), so a Gold tick can
- * never enter DAX aggregation state or vice versa.
+ * diagnostics. A tick is routed to EXACTLY ONE unit (the CapitalStreamClient
+ * instance is bound to one symbol: "GOLD"), so a Gold tick can
+ * never enter another instrument's aggregation state or vice versa.
  *
  * The time source stays bucketing-consistent across instruments (the same
  * epoch 60 s grid), but the STATE is fully isolated per unit — independent

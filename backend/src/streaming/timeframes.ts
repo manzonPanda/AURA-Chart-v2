@@ -17,7 +17,7 @@
  * rows and aggregateCompleteToMinutes” branch in routes/candlesDb.ts — nothing
  * in the streaming layer, the schema, or the store needs to change.
  */
-import { aggregateToMinutes } from "../ig/historical.js";
+import { aggregateToMinutes } from "./aggregation.js";
 import type { Candle } from "../types/candle.js";
 
 /** timeframe → bucket start width in seconds. THE registry. */

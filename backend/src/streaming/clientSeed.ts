@@ -1,8 +1,8 @@
 /**
  * WS client-seed registry — first frames for freshly-connected clients.
  *
- * Deliberately dependency-free (no ws / lightstreamer imports) so it is
- * unit-testable in isolation: the lightstreamer-client package keeps the
+  * Deliberately dependency-free (no ws / streaming imports) so it is
+ * unit-testable in isolation: the streaming websocket layer keeps the
  * Node event loop alive once imported, which would hang the test runner.
  *
  * Used by RealtimeService.addClient to deliver auxiliary first frames —

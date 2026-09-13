@@ -1,33 +1,14 @@
 import "dotenv/config";
 
-/** Default public LIVE gateway — the confirmed working environment for this setup. */
-const DEFAULT_BASE_URL = "https://api.ig.com/gateway/deal";
-
 export interface Config {
   port: number;
   host: string;
-  ig: {
-    apiKey: string;
-    username: string;
-    password: string;
-    accountId: string;
-    baseUrl: string;
-    defaultEpic: string;
-        /**
-     * Second instrument (Spot Gold CFD). Unset → DAX-only, exactly the
-     * historic behavior. Metadata (label/precision/calendar) for each EPIC
-     * lives in ../market/instruments.ts — the config only carries EPICs.
-     */
-    goldEpic: string;
-    /**
-     * Third instrument (Spot Silver CFD, SMT-prep). Unset → collection stops
-     * — no IG stream, no historical backfill, no scheduled collection for an
-     * empty/unset EPIC. Metadata lives in ../market/instruments.ts.
-     */
-    silverEpic: string;
-    sessionVersion: string;
-    sendEncryptFlag: boolean;
-  };
+  /**
+   * Legacy Supabase archive access (READ path + fallback only). The archive is
+   * NEVER migrated and NEVER written by active market-data collection — Oracle
+   * PostgreSQL is the canonical store. Kept configured so legacy archive rows
+   * stay queryable through /api/candles/db when PostgreSQL is unavailable.
+   */
   supabase: {
     url: string;
     serviceKey: string;
@@ -40,9 +21,10 @@ export interface Config {
     subject: string;
   };
   /**
-   * Capital.com provider (Gold migration). Server-side ONLY — the key/custom
-   * password never reach the frontend, logs, or the bundle. Unset → the
-   * Capital module is inert and IG keeps serving exactly as before.
+   * Capital.com provider — the ONLY active market-data provider. Server-side
+   * ONLY — the key/custom password never reach the frontend, logs, or the
+   * bundle. Unset → the Capital module is inert and NO market data is
+   * collected (there is deliberately NO IG fallback — IG is retired).
    */
   capital: {
     apiKey: string;
@@ -58,38 +40,24 @@ export interface Config {
 }
 
 /**
- * Reads every IG credential ONLY from process environment variables loaded via
+ * Reads configuration ONLY from process environment variables loaded via
  * dotenv (backend/.env). None of these are ever exposed to the frontend or
  * bundled with `VITE_*` variables.
+ *
+ * IG environment variables are intentionally ABSENT: IG is retired from
+ * active collection. Removed: IG_API_KEY, IG_USERNAME, IG_PASSWORD,
+ * IG_ACCOUNT_ID, IG_BASE_URL, IG_DAX_EPIC, IG_GOLD_EPIC, IG_SILVER_EPIC,
+ * IG_SESSION_VERSION, IG_ENCRYPT_FLAG. (Legacy IG secrets may still exist in
+ * /etc/aura / backend/.env — they are unused by this runtime and are left for
+ * a separate explicit secret-removal task.)
  */
 export function loadConfig(): Config {
-  const baseUrl = (process.env.IG_BASE_URL || DEFAULT_BASE_URL).trim().replace(/\/+$/, "");
   return {
     port: Number(process.env.PORT || 8787),
     host: process.env.HOST || "0.0.0.0",
-    ig: {
-      apiKey: (process.env.IG_API_KEY || "").trim(),
-      username: (process.env.IG_USERNAME || "").trim(),
-      password: process.env.IG_PASSWORD || "",
-      accountId: (process.env.IG_ACCOUNT_ID || "").trim(),
-      baseUrl,
-            defaultEpic: (process.env.IG_DAX_EPIC || "").trim(),
-      // Spot Gold CFD (Phase 0 multi-instrument). Empty = DAX-only (BC).
-      goldEpic: (process.env.IG_GOLD_EPIC || "").trim(),
-      // Spot Silver CFD (SMT-prep, Gold vs Silver). Empty/unset = Silver is NOT
-      // collected: no IG stream, no historical backfill, no scheduled collection.
-      // Existing Silver rows, if any, are NEVER deleted. Canonical EPIC:
-      // CS.D.CFDSILVER.CMG.IP — verified against the live IG account (see
-      // market/calendar.ts IG_SPOT_SILVER verification block).
-      silverEpic: (process.env.IG_SILVER_EPIC || "").trim(),
-      // Wire format of POST /session, replicating the official API Companion:
-      //   version header "1" + RSA(base64(password)) cipher.
-      sessionVersion: (process.env.IG_SESSION_VERSION || "1").trim() || "1",
-      sendEncryptFlag: (process.env.IG_ENCRYPT_FLAG ?? "on").trim().toLowerCase() !== "off",
-    },
     // Server-side ONLY (service-role key never reaches the browser or logs).
-    // When unset, candle persistence + the /api/candles/db endpoint degrade
-    // gracefully; the realtime IG stream is unaffected.
+    // When unset, candle persistence + /api/candles/db degrade gracefully; the
+    // realtime Capital stream is unaffected.
     supabase: {
       url: (process.env.SUPABASE_URL || "").trim(),
       serviceKey: (process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim(),
@@ -102,8 +70,9 @@ export function loadConfig(): Config {
       privateKey: (process.env.VAPID_PRIVATE_KEY || "").trim(),
       subject: (process.env.VAPID_SUBJECT || "mailto:aura-alerts@localhost").trim(),
     },
-    // Capital.com provider — loaded ONLY from env (never committed). Unset
-    // values make the Capital module inert; IG continues serving as before.
+    // Capital.com provider — the ONLY active market-data provider, loaded
+    // exclusively from env (never committed). Unset values make the Capital
+    // module inert and collection stops entirely (no IG fallback).
     capital: {
       apiKey: (process.env.CAPITAL_API_KEY || "").trim(),
       apiPassword: process.env.CAPITAL_API_PASSWORD || "",
@@ -122,16 +91,6 @@ export function loadConfig(): Config {
   };
 }
 
-export interface IgCredentials {
-  apiKey: string;
-  username: string;
-  password: string;
-  accountId: string;
-  baseUrl: string;
-  sessionVersion: string;
-  sendEncryptFlag: boolean;
-}
-
 /** Capital.com provider credentials — env-only, never logged. */
 export interface CapitalCredentials {
   apiKey: string;
@@ -141,14 +100,12 @@ export interface CapitalCredentials {
   streamingUrl: string;
 }
 
-export function isConfigured(cfg: Config): boolean {
-  return Boolean(cfg.ig.apiKey && cfg.ig.username && cfg.ig.password && cfg.ig.baseUrl);
-}
-
 /**
  * Capital.com is usable ONLY with key + custom password + identifier. The
  * base/streaming URLs always have defaults, so they cannot block. Null-safe on
- * `cfg.capital` (unit tests construct IG-only config shapes).
+ * `cfg.capital` (unit tests construct partial config shapes). Because IG is
+ * retired, `isCapitalConfigured` is now the ONLY provider-readiness signal:
+ * when it is false, NO market data is collected at all.
  */
 export function isCapitalConfigured(cfg: Config): boolean {
   return Boolean(

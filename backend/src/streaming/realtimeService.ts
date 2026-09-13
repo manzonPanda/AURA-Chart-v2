@@ -1,11 +1,10 @@
 import { WebSocket } from "ws";
-import type { CandleStore } from "../db/candleStore.js";
-import type { IgClient } from "../ig/client.js";
+import type { CandleBackend, CandleSource } from "../db/candleStore.js";
+import { toCandleSource } from "../db/candleStore.js";
 import type { CapitalClient } from "../capital/client.js";
 import { CapitalStreamClient, type CapitalStreamSession } from "../capital/capitalStream.js";
 import { instrumentMetaFor, type InstrumentMeta } from "../market/instruments.js";
 import { ClientSeeders } from "./clientSeed.js";
-import { IgStreamClient } from "./igStream.js";
 import {
   clientWantsCandle,
   createInstrumentUnit,
@@ -47,7 +46,7 @@ interface WsClient {
 
 /** How long to wait before the FIRST retry of a Lightstreamer connection. */
 const STREAM_RECONNECT_DELAY_MS = 5_000;
-/** Backoff cap for consecutive never-live reconnects (IG-outage friendliness):
+/** Backoff cap for consecutive never-live reconnects (provider-outage friendliness):
  *  5s → 10s → 20s → 40s → 60s, reset to 5s by every LIVE. */
 const STREAM_RECONNECT_MAX_DELAY_MS = 60_000;
 /** Periodic truthful-status heartbeat so the UI's tick counters/ages stay fresh
@@ -55,9 +54,10 @@ const STREAM_RECONNECT_MAX_DELAY_MS = 60_000;
 const STATUS_HEARTBEAT_MS = 30_000;
 
 /**
- * Provider-agnostic stream-surface RealtimeService consumes. IgStreamClient
- * (IG/Lightstreamer) and CapitalStreamClient (Capital.com WS) both satisfy it,
- * so the aggregator/persistence/relay pipeline never knows the transport.
+ * Provider-agnostic stream-surface RealtimeService consumes. CapitalStreamClient
+ * (Capital.com WS) is the only active implementation (IG's IgStreamClient was
+ * removed with the IG retirement) — the aggregator/persistence/relay pipeline
+ * never knows the transport.
  */
 interface StreamClientLike {
   connect(): void;
@@ -73,19 +73,20 @@ interface StreamClientLike {
 }
 
 /**
- * Owns ONE stream connection PER configured instrument (IG shares a single
- * Lightstreamer session; Capital instruments use the CapitalStreamClient),
- * routes every tick to EXACTLY ONE per-instrument InstrumentUnit (own
- * CandleAggregatorSet, forming candles, tick counter, last price, rollover
- * tracking, persistence and diagnostics — see instrumentPipeline.ts), and
- * pushes candle/status frames tagged with `epic` to the WS clients subscribed
- * to that instrument.
+ * Owns ONE stream connection PER configured instrument (each Capital
+ * instrument uses a CapitalStreamClient), routes every tick to EXACTLY ONE
+ * per-instrument InstrumentUnit (own CandleAggregatorSet, forming candles, tick
+ * counter, last price, rollover tracking, persistence and diagnostics — see
+ * instrumentPipeline.ts), and pushes candle/status frames tagged with `epic`
+ * to the WS clients subscribed to that instrument.
  *
- * Provider selection: `instrumentMetaFor(epic).provider`. "CAPITAL"
- * instruments connect through the CapitalStreamClient (fresh session per
- * connect via CapitalClient); everything else uses the historic IG path. The
- * DEFAULT instrument (constructor epic) keeps snapshot()/stateNow() and the
- * exclusive closed-candle listener feed (EMA alert engine — untouched).
+ * Provider selection: `instrumentMetaFor(epic).provider`. ONLY "CAPITAL"
+ * instruments connect (through CapitalStreamClient — fresh session per connect
+ * via CapitalClient). Any other provider ("IG"/legacy epics, unregistered
+ * epics) is REFUSED with a loud log and stays DISCONNECTED — IG is retired and
+ * there is no fallback if Capital is unavailable. The DEFAULT instrument
+ * (constructor epic) keeps snapshot()/stateNow() and the exclusive
+ * closed-candle listener feed (EMA alert engine — untouched).
  */
 export class RealtimeService {
   /** Per-instrument state — NEVER shared across EPICs. Keyed by raw EPIC. */
@@ -113,13 +114,13 @@ export class RealtimeService {
   private readonly reachedLive = new Set<string>();
 
   constructor(
-    private readonly ig: IgClient,
     epic: string,
     /** Optional completed-candle persistence — null disables DB writes. */
-    private readonly candleStore: CandleStore | null = null,
-    /** Optional Capital.com client — present only when Capital creds are
+    private readonly candleStore: CandleBackend | null = null,
+    /** The Capital.com client — present only when Capital creds are
      *  configured. Instruments whose registry provider is "CAPITAL" are
-     *  streamed through it (CapitalStreamClient) instead of the IG seam. */
+     *  streamed through it (CapitalStreamClient). Null ⇒ every instrument is
+     *  left DISCONNECTED (collection off — NO IG fallback exists). */
     private readonly capital: CapitalClient | null = null,
   ) {
     const meta = instrumentMetaFor(epic);
@@ -240,7 +241,7 @@ export class RealtimeService {
     }));
   }
 
-  /** Start one IG subscription PER instrument. Idempotent. */
+  /** Start one CAPITAL stream subscription PER instrument. Idempotent. */
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
@@ -272,7 +273,7 @@ export class RealtimeService {
    */
   redactables(): Array<string | undefined> {
     return [
-      ...this.ig.redactables(),
+      ...(this.capital?.redactables() ?? []), // Capital key/password + session CST / X-SECURITY-TOKEN
       ...[...this.streams.values()].flatMap((stream) => stream.redactables()),
     ];
   }
@@ -385,68 +386,27 @@ export class RealtimeService {
       return;
     }
 
-    let session;
-    try {
-      // ALWAYS a fresh IG login on (re)connect: IG invalidates the CST/XST
-      // once the Lightstreamer session terminates, so retrying cached tokens
-      // earns an instant server rejection — the CONNECTING→DISCONNECTED flap.
-      // (IgClient's SESSION_REUSE_WINDOW_MS + 90s failure cooldown keep the
-      // login rate safe even when this fires every few seconds.)
-      session = await this.ig.getStreamSession({ forceNew: true });
-    } catch (err) {
+        // ── Non-CAPITAL provider path: REFUSED (IG retired, no fallback) ────────
+    // IG/legacy epics (and unregistered epics, whose registry default is the
+    // legacy IG provider label) can never open a stream here. Keeping the
+    // provider gate in the runtime guarantees an IG-provider entry can never
+    // accidentally become active, and an unavailable Capital provider never
+    // falls back to any other provider — the stream simply stays off.
+    if (meta.provider === "IG") {
       this.connecting.delete(epic);
-      console.warn(
-        `[STREAM] IG session unavailable for ${epic} — ${err instanceof Error ? err.message : "unknown error"}; ` +
-          `retrying in ${Math.round(this.nextReconnectDelayMs(epic) / 1000)}s`,
+      console.log(
+        `[STREAM] ${epic}: provider "${meta.provider}" is not an ACTIVE provider — ` +
+          `IG is retired and only CAPITAL instruments are collected. Stream DISABLED (no fallback).`,
       );
       this.setStreamState(epic, "DISCONNECTED");
-      this.scheduleReconnect(epic);
       return;
     }
 
-    // A shutdown raced this in-flight auth (stop() ran while we were awaiting
-    // the session). NEVER open a new IG connection after shutdown — reconnect
-    // stays permanently disabled for the remainder of the process lifetime.
     if (!this.started || !this.units.has(epic)) return;
-
-    // Detach the previous stream BEFORE disconnecting it: its teardown events
-    // (and any in-flight ticks) belong to a dead stream and must not be read
-    // as a NEW outage — that mistake scheduled a reconnect on every teardown
-    // and churned LIVE→DISCONNECTED→CONNECTING even when tokens were healthy.
     const previous = this.streams.get(epic);
     this.streams.delete(epic);
     previous?.disconnect();
-
     this.reachedLive.delete(epic);
-    const stream = new IgStreamClient(
-      session,
-      epic,
-      {
-        onTick: (tick) => {
-          // Events from a replaced (stale) stream are dropped here — only the
-          // CURRENT stream feeds the aggregators.
-          if (this.streams.get(epic) === stream) this.handleTick(epic, tick);
-        },
-        onState: (state) => {
-          if (this.streams.get(epic) !== stream) return; // stale/teardown event — ignore
-          this.setStreamState(epic, state);
-        },
-      },
-      unit.decimals, // per-instrument quoting precision (DAX 1 / Gold 2)
-    );
-    this.streams.set(epic, stream);
-    try {
-      stream.connect();
-    } catch {
-      // connect() throws synchronously when the session is unusable (e.g. no
-      // Lightstreamer endpoint). Swallow it here so the async caller never
-      // produces an unhandled rejection that would kill the whole server.
-      this.streams.delete(epic);
-      this.connecting.delete(epic);
-      this.setStreamState(epic, "DISCONNECTED");
-      this.scheduleReconnect(epic);
-      return;
-    }
     this.connecting.delete(epic);
   }
 
@@ -461,7 +421,7 @@ export class RealtimeService {
     const sec = (s: number) => new Date(s * 1000).toISOString();
     const instrumentTag = unit.label.split(" /")[0] || epic; // "DAX" | "Spot Gold"
 
-    // One pass per timeframe. Every IG tick fans out to BOTH the canonical 1m
+    // One pass per timeframe. Every tick fans out to BOTH the canonical 1m
     // aggregator (closed candles are persisted) and the in-memory 3m overlay
     // (never persisted — formed purely for the live WS forming-candle UX) —
     // ALWAYS within THIS tick's own instrument unit.
@@ -544,19 +504,21 @@ export class RealtimeService {
   }
 
   /**
-   * Persist one COMPLETED candle to Supabase under the given timeframe (the
-   * canonical MINUTE_1 in practice — this method is never called for the 3m
-   * overlay). Fire-and-forget: the promise is fully self-contained (CandleStore
+   * Persist one COMPLETED candle (the canonical MINUTE_1 in practice — never
+   * the 3m overlay). Fire-and-forget: the promise is self-contained (the store
    * logs and swallows its own errors) so a DB outage can never reject into the
    * tick path, slow the stream, or change live chart behavior. Duplicate-safe
-   * by upsert on (instrument, timeframe, bucket_time) — reconnects/restarts
-   * re-close the same bucket and converge on one row.
+   * by upsert on (instrument, timeframe, bucket_time).
+   *
+   * `source` is derived from the instrument's registry provider so live writes
+   * are correctly attributed: "capital" for Capital.com ticks, "ig" for IG.
    */
   private persistClosedCandle(unit: InstrumentUnit, candle: ClosedCandle, timeframe: string): void {
     if (!this.candleStore) return;
     const instrument = persistenceInstrumentFor(timeframe, unit);
     if (!instrument) return;
-    void this.candleStore.saveClosedCandle(instrument, timeframe, candle);
+    const source: CandleSource = toCandleSource(unit.epic);
+    void this.candleStore.saveClosedCandle(instrument, timeframe, candle, source);
   }
 
   private setStreamState(epic: string, state: StreamState): void {
@@ -573,7 +535,7 @@ export class RealtimeService {
       this.failedAttempts.set(
         epic,
         this.reachedLive.has(epic)
-          ? 0 // a healthy session ended (IG kick/maintenance) — reconnect promptly
+          ? 0 // a healthy session ended (provider-side maintenance) — reconnect promptly
           : Math.min((this.failedAttempts.get(epic) ?? 0) + 1, 8), // never-live attempt → back off
       );
       this.reachedLive.delete(epic);
@@ -581,7 +543,7 @@ export class RealtimeService {
     const unit = this.units.get(epic);
     const tag = unit?.label.split(" /")[0] || epic;
     console.log(
-      `[STREAM:${tag}] IG state -> ${state} (ticks=${unit?.ticksReceived ?? 0}${
+      `[STREAM:${tag}] state -> ${state} (ticks=${unit?.ticksReceived ?? 0}${
         unit?.lastTickAt ? `, lastTickAge=${Math.round((Date.now() - unit.lastTickAt) / 1000)}s` : ", no ticks yet"
       })`,
     );

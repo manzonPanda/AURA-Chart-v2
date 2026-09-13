@@ -90,7 +90,7 @@ async function main(): Promise<void> {
 
   // ── DB round-trip: unique/upsert + status persistence ───────────────────
   try {
-    await store.saveClosedCandle(INSTRUMENT, TIMEFRAME, mkCandle(100, 110, 90, 105));
+        await store.saveClosedCandle(INSTRUMENT, TIMEFRAME, mkCandle(100, 110, 90, 105), "ig");
     let rows = await store.loadCandles(INSTRUMENT, TIMEFRAME, 10);
     check(
       "initial upsert saved one row",
@@ -100,7 +100,7 @@ async function main(): Promise<void> {
     check("anchored candle persisted as completed", rows.length === 1 && rows[0].status === "completed");
 
     // Same (instrument, timeframe, bucket_time) — MUST NOT create a duplicate.
-    await store.saveClosedCandle(INSTRUMENT, TIMEFRAME, mkCandle(100, 120, 90, 115));
+        await store.saveClosedCandle(INSTRUMENT, TIMEFRAME, mkCandle(100, 120, 90, 115), "ig");
     rows = await store.loadCandles(INSTRUMENT, TIMEFRAME, 10);
     check("re-upsert same bucket keeps exactly one row", rows.length === 1, `rows=${rows.length}`);
     check(
@@ -118,13 +118,15 @@ async function main(): Promise<void> {
     await store.saveClosedCandle(
       INSTRUMENT,
       TIMEFRAME,
-      mkCandle(105, 118, 98, 116, { bucketSec: PARTIAL_BUCKET_SEC, firstTickDelayMs: 100_125, tickCount: 12 }),
+            mkCandle(105, 118, 98, 116, { bucketSec: PARTIAL_BUCKET_SEC, firstTickDelayMs: 100_125, tickCount: 12 }),
+      "ig",
     );
     // Future backfill job writes explicit 'backfilled' rows.
     await store.saveClosedCandle(
       INSTRUMENT,
       TIMEFRAME,
-      mkCandle(99, 104, 96, 102, { bucketSec: BACKFILLED_BUCKET_SEC, status: "backfilled" }),
+            mkCandle(99, 104, 96, 102, { bucketSec: BACKFILLED_BUCKET_SEC, status: "backfilled" }),
+      "ig",
     );
     rows = await store.loadCandles(INSTRUMENT, TIMEFRAME, 10);
     const byBucket = new Map(rows.map((r) => [r.time, r.status]));
