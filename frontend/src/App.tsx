@@ -59,6 +59,11 @@ import { historyHorizonPages } from "./services/historyHorizon";
 import { findInstrument } from "./services/instruments";
 import { useInstruments } from "./services/useInstruments";
 import {
+  requiredWarmupBars,
+  requiredMinute1Bars,
+  type ActiveIndicatorSpec,
+} from "./services/pineWarmup.ts";
+import {
   compileImportedPine,
   loadImportedPineIndicators,
   MAX_IMPORTED_INDICATORS,
@@ -115,8 +120,40 @@ function streamLabel(status: string, lastTickAt: number, now: number): {
   return { label: status, live: false, noTicks: false, ageSec };
 }
 
+/**
+ * Build the active-indicator spec list from current App state.
+ * Used to compute Pine warmup requirements.
+ */
+function computeActiveWarmupBars(
+  emaSettings: EmaSettings,
+  smaSettings: SmaSettings,
+  importedPine: ImportedPineIndicator[],
+): number {
+  const specs: ActiveIndicatorSpec[] = [];
+
+  // EMA slots (fixed: ema9, ema20)
+  specs.push({ kind: "ema", enabled: emaSettings.ema9.enabled, period: emaSettings.ema9.period });
+  specs.push({ kind: "ema", enabled: emaSettings.ema20.enabled, period: emaSettings.ema20.period });
+
+  // SMA (single slot, period from config)
+  specs.push({ kind: "sma", enabled: smaSettings?.enabled ?? false, period: smaSettings?.period });
+
+  // Imported Pine indicators (custom) — no reliable max_bars_back from metadata
+  for (const _spec of importedPine) {
+    specs.push({ kind: "custom", enabled: true });
+  }
+
+  return requiredWarmupBars(specs);
+}
+
 export default function App() {
-    const [candles, setCandles] = useState<Candle[]>([]);
+  const [candles, setCandles] = useState<Candle[]>([]);
+  // Warmup candles — real candles fetched BEFORE the visible horizon so Pine
+  // indicators have sufficient lookback on the first visible bar. These are
+  // fed to Pine (via TradingChart's bridgeBars) but are NOT displayed, NOT part
+  // of gap detection, and NOT part of Load More cursors. During replay they
+  // are ignored (replay uses its own cursor slice for anti-look-ahead safety).
+  const [warmupCandles, setWarmupCandles] = useState<Candle[]>([]);
   const [gaps, setGaps] = useState<CandleGap[]>([]);
   // Instrument selection (Phase 3) — the BACKEND REGISTRY (GET /api/instruments)
   // is the source of truth; localStorage only persists WHICH entry is active.
@@ -130,6 +167,28 @@ export default function App() {
   // dependencies already reload history when the scope itself changes.
   const catalogRef = useRef(catalog);
   catalogRef.current = catalog;
+  // EMA overlay configuration — localStorage-persisted, frontend-only (never
+  // Supabase; EMA VALUES are always derived client-side from the candles).
+  const [emaSettings, setEmaSettings] = useState<EmaSettings>(loadEmaSettings);
+  // SMA overlay configuration — localStorage-persisted, frontend-only (never
+  // Supabase; SMA VALUES are always derived client-side from the candles).
+  const [smaSettings, setSmaSettings] = useState<SmaSettings>(loadSmaSettings);
+  // Imported Pine indicators — script source + settings ONLY (localStorage,
+  // versioned `aura.pine.indicators`). Values are always recomputed by the
+  // Piner engine against the selected timeframe's candles.
+  const [importedPine, setImportedPine] = useState<ImportedPineIndicator[]>(loadImportedPineIndicators);
+  // Indicator-config refs: loadHistory reads the CURRENT indicator settings
+  // (for Pine warmup sizing) without depending on them — adding them as
+  // dependencies would re-run the whole history load on every indicator
+  // toggle. Toggling an indicator AFTER a load does not refetch warmup until
+  // the next history load (documented graceful degradation: the indicator
+  // warms as visible bars accumulate, exactly like the pre-warmup behavior).
+  const emaSettingsRef = useRef(emaSettings);
+  emaSettingsRef.current = emaSettings;
+  const smaSettingsRef = useRef(smaSettings);
+  smaSettingsRef.current = smaSettings;
+  const importedPineRef = useRef(importedPine);
+  importedPineRef.current = importedPine;
 
   /**
    * Active instrument → syminfo metadata. Derived from the backend
@@ -154,16 +213,6 @@ export default function App() {
   const [streamEpoch, setStreamEpoch] = useState(0);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [timeframe, setTimeframe] = useState<TimeFrameKey>(DEFAULT_TIME_FRAME);
-  // EMA overlay configuration — localStorage-persisted, frontend-only (never
-  // Supabase; EMA VALUES are always derived client-side from the candles).
-  const [emaSettings, setEmaSettings] = useState<EmaSettings>(loadEmaSettings);
-    // SMA overlay configuration — localStorage-persisted, frontend-only (never
-  // Supabase; SMA VALUES are always derived client-side from the candles).
-  const [smaSettings, setSmaSettings] = useState<SmaSettings>(loadSmaSettings);
-  // Imported Pine indicators — script source + settings ONLY (localStorage,
-  // versioned `aura.pine.indicators`). Values are always recomputed by the
-  // Piner engine against the selected timeframe's candles.
-  const [importedPine, setImportedPine] = useState<ImportedPineIndicator[]>(loadImportedPineIndicators);
   // Chart display settings (e.g. Invert Scale) — localStorage-persisted in
   // App, frontend-only presentation state that never touches candle data.
   // ⚠ TEMP debug hook (?debugInvert): `?invert=1|0` seeds/forces the setting so
@@ -502,6 +551,7 @@ export default function App() {
     (nextEpic: string) => {
       if (!nextEpic || nextEpic === epic) return;
       setCandles([]);
+      setWarmupCandles([]); // never leak the previous instrument's warmup into Pine
       selectInstrument(nextEpic);
     },
     [epic, selectInstrument],
@@ -600,6 +650,10 @@ export default function App() {
     const seq = ++requestSeq.current;
     const wantedEpic = epic; // switch guard: never accept candles for a superseded instrument
     setLoading(true);
+    // Stale-warmup guard: drop any previous scope's warmup immediately so it
+    // can never feed the new scope's Pine calculations (re-set below or left
+    // empty when history/warmup is unavailable).
+    setWarmupCandles([]);
     // Keep the pagination control inactive while the horizon pages are in
     // flight: until the final dataset is announced, `candles` still holds the
     // PREVIOUS scope's bars, so the loading flag is what stops a rapid
@@ -671,6 +725,51 @@ export default function App() {
         console.info(
           `[HISTORY] horizon loaded: pages=${pages}/${plan.requests} bars=${loaded.length} first=${iso(loaded[0]?.ts ?? 0)}`,
         );
+      }
+      // ── Pine warmup fetch (ONE bounded request) ─────────────────────────
+      // Fetch real candles strictly BEFORE the visible horizon so Pine
+      // indicators have sufficient lookback on the first visible bar. Warmup
+      // candles go to Pine via TradingChart's bridgeBars — they are NEVER
+      // displayed, gap-analyzed, or used as Load More cursors.
+      //
+      // MINUTE_3: the backend derives M3 rows server-side from canonical M1
+      // (candlesDb requested1m = limit*3+3+1), so requesting `warmupBars` M3
+      // rows yields warmup CONSTRUCTED from M1 — no client-side M1→M3
+      // timestamp arithmetic, no bucket-boundary off-by-one.
+      // Bounded: warmupBars ≤ 2000 ≤ backend's 10,000-row ceiling → one round
+      // trip, no pagination, sized by the active indicator set (never
+      // request-per-indicator).
+      const warmupBars = computeActiveWarmupBars(
+        emaSettingsRef.current,
+        smaSettingsRef.current,
+        importedPineRef.current,
+      );
+      const bucketSec = resolutionToBucketSec(timeframe);
+      if (warmupBars > 0 && loaded.length > 0 && finalizedEpic) {
+        try {
+          const warmData = await fetchCandlesDb(
+            timeframe,
+            warmupBars, // selected-timeframe bars (M3 rows are M1-derived server-side)
+            finalizedEpic,
+            Math.floor(loaded[0].ts / 1000), // `before` is exclusive → strictly older
+          );
+          if (seq !== requestSeq.current) return; // superseded scope — discard
+          if (wantedEpic && warmData.epic !== wantedEpic) {
+            console.info("[WARMUP] stale instrument — warmup discarded");
+          } else {
+            setWarmupCandles(warmData.candles);
+            const warmM1 = requiredMinute1Bars(bucketSec, warmData.candles.length);
+            console.info(
+              `[WARMUP] ${warmData.candles.length} ${timeframe} bars ` +
+                `(≈${warmM1} MINUTE_1-equivalent, first=${iso(warmData.candles[0]?.ts ?? 0)})`,
+            );
+          }
+        } catch (warmErr) {
+          // Warmup is best-effort — a failure must NOT break the chart.
+          const wmsg = warmErr instanceof ApiError ? warmErr.message : (warmErr as Error).message;
+          console.info(`[WARMUP] unavailable (indicators warm as bars accumulate): ${wmsg}`);
+          setWarmupCandles([]);
+        }
       }
     } catch (err) {
       if (seq !== requestSeq.current) return;
@@ -936,6 +1035,7 @@ export default function App() {
       <main className="chart-area">
         <TradingChart
           candles={candles}
+          warmupCandles={warmupCandles}
           gaps={gaps}
           resolution={timeframe}
           liveCandle={realtime.candle}

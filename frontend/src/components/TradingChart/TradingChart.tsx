@@ -232,6 +232,15 @@ function CountdownMarker({
 
 interface Props {
   candles: readonly Candle[];
+  /**
+   * Warmup candles — real candles preceding the visible horizon, fetched so
+   * Pine indicators (EMA/SMA/fractals/custom scripts) have sufficient context
+   * for their lookback on the first visible bar. Fed to Pine BUT kept OUT of
+   * the chart display, gap detection, and Load More cursors.
+   *
+   * During REPLAY these are ignored (replay uses its own cursor slice).
+   */
+  warmupCandles?: readonly Candle[];
   /** Detected market-data gaps (broker outages) — rendered as shaded regions. */
   gaps?: CandleGap[];
   /** Timeframe id (MINUTE_1 | MINUTE_3) — used for stream bucket alignment. */
@@ -763,6 +772,7 @@ function ViewportBridge({
  */
 export function TradingChart({
   candles,
+  warmupCandles = [],
   gaps,
   resolution = "",
   liveCandle = null,
@@ -1288,20 +1298,38 @@ export function TradingChart({
   // wiring landing above the replay state declarations).
   const bridgeBars = useMemo<readonly Bar[]>(() => {
     if (session) {
-      // Replay: use the cursor slice exactly as before.
+      // Replay: use the cursor slice exactly as before. Warmup is ignored —
+      // replay's anti-look-ahead contract forbids any bars outside the cursor
+      // slice (warmup would be future data relative to the replay cutoff).
       return visibleBars;
     }
+    // Live: prepend warmup candles (real-only, strictly older than visible)
+    // so Pine/EMA/SMA have sufficient lookback from the first visible bar.
+    // warmupCandles are NOT in `candles` (the display state) — they exist only
+    // in this bridge array for calculation.
+    //
+    // Ordering guard: after a "Load More History" the displayed candles can
+    // extend INTO the previously-warmed range. Warmup bars that are no longer
+    // strictly older than candles[0] are dropped here so the merged series
+    // stays strictly ascending (mergeBridgeBars dedupes by ts but never sorts).
+    const oldestVisible = candles.length > 0 ? candles[0].ts : Number.POSITIVE_INFINITY;
+    const warmupBars =
+      warmupCandles.length > 0 && candles.length > 0
+        ? warmupCandles
+            .filter((c) => c.ts < oldestVisible)
+            .map((c) => asBar({ ...c, ts: alignToBucketStart(c.ts, bucketSec) }))
+        : [];
     // Live: merge historical + closed-live ledger + forming candle into the
     // complete, strictly-ordered, no-duplicates series the bridges need.
     return mergeBridgeBars(
       candles.length > 0
-        ? candles.map((c) => asBar({ ...c, ts: alignToBucketStart(c.ts, bucketSec) }))
+        ? [...warmupBars, ...candles.map((c) => asBar({ ...c, ts: alignToBucketStart(c.ts, bucketSec) }))]
         : liveCandles,
       closedLiveBars,
       liveCandle ?? null,
       bucketSec,
     );
-  }, [session, candles, bucketSec, liveCandles, closedLiveBars, liveCandle, visibleBars]);
+  }, [session, candles, bucketSec, liveCandles, closedLiveBars, liveCandle, visibleBars, warmupCandles]);
 
   // ── Unified-header reporting (the old bottom `.chart-footer` is gone) ──────
   // Quote candle (crosshair ?? replay cursor ?? latest) is pushed UP to App,
