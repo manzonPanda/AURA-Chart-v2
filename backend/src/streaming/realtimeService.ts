@@ -366,6 +366,9 @@ export class RealtimeService {
           const s = await this.capital!.getStreamSession();
           return { cst: s.cst, xSecurityToken: s.xSecurityToken };
         },
+        // Reuse CapitalClient.streamingHeaders() so the WS handshake carries
+        // X-CAP-API-KEY + CST + X-SECURITY-TOKEN exactly once, per connect.
+        authHeaders: (session) => this.capital!.streamingHeaders(session),
         onTick: (tick) => {
           if (this.streams.get(epic) === stream) this.handleTick(epic, tick);
         },

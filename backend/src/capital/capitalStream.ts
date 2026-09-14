@@ -9,10 +9,18 @@
  *
  * Protocol (Capital.com streaming):
  *   wss://api-streaming-capital.backend-capital.com/connect
- *   Headers: CST + X-SECURITY-TOKEN (FRESH per connect — sessions expire
- *   ~10 min, so tokens are never reused across reconnects).
- *   Subscribe:  { destination: "OHLCMarketData.subscribe",
- *                 payload: { markets: [symbol], periods: ["MINUTE"] } }
+ *   Headers: X-CAP-API-KEY + CST + X-SECURITY-TOKEN (FRESH per connect —
+ *   sessions expire ~10 min, so tokens are never reused across reconnects).
+ *   Auth headers are built via deps.authHeaders() (which reuses
+ *   CapitalClient.streamingHeaders()) so credential handling is NOT duplicated
+ *   in the stream and is never logged.
+ *   Subscribe:  { destination: "OHLCMarketData.subscribe", correlationId,
+ *                 cst, securityToken,
+ *                 payload: { epics:[symbol], resolutions:["MINUTE"], type:"classic" } }
+ *   OHLC live:  { destination: "ohlc.event", payload:{ t, h, l, o, c,
+ *                               priceType:"bid"|"ask", lastTradedVolume } } —
+ *               bid/ask arrive as SEPARATE frames for the same `t` (epoch-ms
+ *               bucket-open ts); the client pairs them into a midpoint burst.
  *   Candles:    { destination: "candles", payload: { candles: [...] } }
  *   Quotes:     { destination: "quote", payload: { bid, ask, ... } } —
  *               counted for liveness but NEVER converted into ticks (a
@@ -25,13 +33,37 @@
  * The local-time `snapshotTime` field is never parsed (would mis-store
  * local wall-clock as UTC).
  *
+ * Keepalive: a 30s application-level `ping` (documented Capital destination,
+ *               carrying correlationId + cst + securityToken) is sent while
+ *               the socket is OPEN — production GOLD streams were terminated
+ *               by Capital's edge ~60s after the last frame (close 1006)
+ *               despite once-per-minute OHLC traffic.
  * Reconnect: exponential backoff (1s base → 30s cap), fresh session per
- * attempt, idle watchdog terminates silent sockets. No token/credential is
- * ever logged — diagnostics count frames, never print payloads.
+ * attempt; the 120s idle watchdog remains as the silent-socket safety net.
+ * No token/credential is ever logged — diagnostics count frames, never
+ * print payloads.
  */
 import { WebSocket } from "ws";
 import { parseCapitalTimestampAsUtc } from "./time.js";
 import type { IngTick, StreamState } from "../streaming/types.js";
+
+/**
+ * Production Capital.com streaming entrypoint. The `/connect` path is REQUIRED
+ * by Capital.com — a bare WSS host is rejected (HTTP 404 / close code 1006),
+ * which was the original GOLD stream failure.
+ */
+export const CAPITAL_STREAMING_DEFAULT_URL =
+  "wss://api-streaming-capital.backend-capital.com/connect";
+
+/**
+ * Application-level keepalive cadence (30s). Capital's docs recommend pinging
+ * "at least once every 10 minutes" to keep the session alive, but production
+ * GOLD streams are terminated by Capital's edge ~60s after the last received
+ * frame (close code 1006) when only the once-per-minute OHLC frames flow —
+ * so AURA pings every 30s, comfortably inside that window. 0/negative
+ * disables (tests); configurable via deps.heartbeatIntervalMs.
+ */
+export const CAPITAL_HEARTBEAT_INTERVAL_MS = 30_000;
 
 /** Session tokens handed to the stream (fresh per connect; never logged). */
 export interface CapitalStreamSession {
@@ -58,6 +90,13 @@ export interface CapitalStreamDeps {
   decimals: number;
   /** Defaults to CAPITAL_STREAMING_URL, then the production endpoint. */
   streamingUrl?: string;
+  /**
+   * Connect-time auth headers builder. Reuses CapitalClient.streamingHeaders()
+   * so the WS handshake carries X-CAP-API-KEY + (fresh) CST + X-SECURITY-TOKEN
+   * without the stream duplicating credential handling. Values are secrets:
+   * returned only to the socket constructor, never logged.
+   */
+  authHeaders: (session: CapitalStreamSession) => Record<string, string>;
   /** Fresh-session provider — wired to CapitalClient in Phase 5. */
   sessionProvider: () => Promise<CapitalStreamSession>;
   /** Tick consumer — the RealtimeService aggregator seam (was start(handler)). */
@@ -67,6 +106,11 @@ export interface CapitalStreamDeps {
   backoffMaxMs?: number;
   /** Silent-socket watchdog (default 120s without any frame → reconnect). */
   idleTimeoutMs?: number;
+  /**
+   * Application-level keepalive cadence in ms (default 30s, see
+   * CAPITAL_HEARTBEAT_INTERVAL_MS). 0/negative disables (tests).
+   */
+  heartbeatIntervalMs?: number;
   /** Injectable socket factory (tests); defaults to a real `ws` socket. */
   wsFactory?: (url: string, headers: Record<string, string>) => WebSocketLike;
   /** Optional stream-state observer (RealtimeService's onState seam). */
@@ -159,8 +203,27 @@ export interface ParseFrameOptions {
 
 export type ParsedFrame =
   | { kind: "tick-burst"; tsMs: number; cumVolume: number; ticks: IngTick[] }
+  | {
+      kind: "ohlc-side";
+      side: "bid" | "ask";
+      tsMs: number;
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      volume: number;
+    }
   | { kind: "pong" }
   | { kind: "ignored"; reason: string };
+
+/** One bid or ask OHLC quadrant from a Capital `ohlc.event` frame. */
+interface OhlcValues {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
 
 /**
  * One candle record → a synthetic [open, high, low, close] POINT-tick burst.
@@ -244,6 +307,42 @@ export function parseStreamFrame(raw: string, opts: ParseFrameOptions): ParsedFr
       ? (envelope.payload as Record<string, unknown>)
       : {};
 
+  // OHLC event (Capital live streaming): one side (bid/ask) of a 1-minute
+  // bucket emitted as flat o/h/l/c + `t` (epoch-ms bucket-OPEN timestamp) +
+  // `lastTradedVolume`. bid and ask arrive as SEPARATE frames for the same `t`;
+  // the stateful client pairs them (see CapitalStreamClient.handleOhlcSide).
+  if (destination === "ohlc.event") {
+    const pt = payload.priceType;
+    const side = typeof pt === "string" ? pt.toLowerCase() : "";
+    if (side !== "bid" && side !== "ask") {
+      return { kind: "ignored", reason: "ohlc-event-unknown-side" };
+    }
+    const t = num(payload.t);
+    const o = num(payload.o);
+    const h = num(payload.h);
+    const l = num(payload.l);
+    const c = num(payload.c);
+    if (
+      t === undefined ||
+      o === undefined ||
+      h === undefined ||
+      l === undefined ||
+      c === undefined
+    ) {
+      return { kind: "ignored", reason: "ohlc-event-incomplete" };
+    }
+    return {
+      kind: "ohlc-side",
+      side,
+      tsMs: t,
+      open: o,
+      high: h,
+      low: l,
+      close: c,
+      volume: num(payload.lastTradedVolume) ?? 0,
+    };
+  }
+
   // OHLC frames: a candles array (tolerant of the destination name).
   const candlesRaw = Array.isArray(payload.candles)
     ? payload.candles
@@ -292,6 +391,8 @@ export class CapitalStreamClient {
   private reconnectAttempt = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
+  /** Application-level keepalive interval (Capital `ping` destination). */
+  private heartbeatTimer: NodeJS.Timeout | null = null;
   /** Latest session tokens — redactables only, never logged. */
   private lastSession: CapitalStreamSession | null = null;
   /** Latest mid price seen (getStats seam). */
@@ -306,8 +407,23 @@ export class CapitalStreamClient {
   private prevBurstTsMs: number | null = null;
   private prevCumVolume = 0;
 
+  /** Latest reported state (safe diagnostic label; never a credential). */
+  private currentState: StreamState = "DISCONNECTED";
+  /** Monotonic subscribe correlationId (stable per client lifetime). */
+  private nextCorrelationId = 1;
+  /**
+   * Live-stream bid/ask pairing buffer. Capital emits each side of a bucket as
+   * a SEPARATE ohlc.event for the same epoch-ms `t`; we hold the partial side
+   * until its counterpart arrives, then emit ONE midpoint burst. Capped so a
+   * one-sided drop cannot grow unbounded; a lone side is never tick material,
+   * so an incomplete candle is never persisted (closed MINUTE_1 candles are
+   * written downstream only).
+   */
+  private ohlcBuffer: Map<number, { bid?: OhlcValues; ask?: OhlcValues }> =
+    new Map();
+
   /** Frame diagnostics — counters only (never payloads/tokens). */
-  readonly stats = { frames: 0, ticks: 0, ignored: 0, reconnects: 0 };
+  readonly stats = { frames: 0, ticks: 0, ignored: 0, reconnects: 0, heartbeats: 0 };
 
   constructor(private readonly deps: CapitalStreamDeps) {}
 
@@ -371,6 +487,7 @@ export class CapitalStreamClient {
   }
 
   private reportState(state: StreamState): void {
+    this.currentState = state;
     this.deps.onState?.(state);
   }
 
@@ -388,11 +505,11 @@ export class CapitalStreamClient {
     const url =
       this.deps.streamingUrl ??
       process.env.CAPITAL_STREAMING_URL ??
-      "wss://api-streaming-capital.backend-capital.com/connect";
-    const headers: Record<string, string> = {
-      CST: session.cst,
-      "X-SECURITY-TOKEN": session.xSecurityToken,
-    };
+      CAPITAL_STREAMING_DEFAULT_URL;
+    // Reuse CapitalClient.streamingHeaders() via deps.authHeaders so the WS
+    // handshake carries X-CAP-API-KEY + CST + X-SECURITY-TOKEN without the
+    // stream duplicating credential handling. Headers are never logged.
+    const headers = this.deps.authHeaders(session);
     let ws: WebSocketLike;
     try {
       ws = this.deps.wsFactory
@@ -406,12 +523,20 @@ export class CapitalStreamClient {
     ws.on("open", () => {
       this.reconnectAttempt = 0;
       this.armIdleWatchdog();
+      this.startHeartbeat(ws); // Capital app-level keepalive while OPEN
       this.reportState("LIVE");
       try {
         ws.send(
           JSON.stringify({
             destination: "OHLCMarketData.subscribe",
-            payload: { markets: [this.deps.symbol], periods: ["MINUTE"] },
+            correlationId: String(this.nextCorrelationId++),
+            cst: session.cst,
+            securityToken: session.xSecurityToken,
+            payload: {
+              epics: [this.deps.symbol],
+              resolutions: ["MINUTE"],
+              type: "classic",
+            },
           }),
         );
       } catch {
@@ -437,41 +562,136 @@ export class CapitalStreamClient {
         // Bucket-cumulative volume → per-frame delta, attributed to the
         // burst's closing tick (aggregator sums per-tick volume; open/high/
         // low replay ticks carry 0 so max/min replay never double-counts).
-        const freshBucket = this.prevBurstTsMs !== parsed.tsMs;
-        const delta = freshBucket
-          ? parsed.cumVolume
-          : Math.max(0, parsed.cumVolume - this.prevCumVolume);
-        this.prevBurstTsMs = parsed.tsMs;
-        this.prevCumVolume = parsed.cumVolume;
-        const ticks = parsed.ticks;
-        if (ticks.length > 0) {
-          ticks[ticks.length - 1].volume = delta;
-          this.lastPrice = ticks[ticks.length - 1].price;
-          this.lastTickAt = Date.now();
-        }
-        this.stats.ticks += ticks.length;
-        for (const t of ticks) this.deps.onTick(t);
+        this.emitBurst(parsed.tsMs, parsed.cumVolume, parsed.ticks);
+      } else if (parsed.kind === "ohlc-side") {
+        this.handleOhlcSide(parsed);
       } else if (parsed.kind === "pong") {
-        try {
-          ws.send(JSON.stringify({ destination: "ping", payload: {} }));
-        } catch {
-          /* close handler drives reconnect */
-        }
+        // Server keepalive → answer with a VALID documented Capital ping
+        // (correlationId + cst + securityToken). Any frame — including this
+        // one — already re-armed the idle watchdog above.
+        this.sendApplicationPing(ws);
       } else {
         this.stats.ignored += 1;
       }
     });
-    ws.on("error", () => {
-      /* close handler drives reconnect */
+    ws.on("error", (...args: unknown[]) => {
+      // Safe diagnostics: message/code/state + epic only. Session tokens are
+      // scrubbed via redact() so a server reason never leaks credentials.
+      const e = (args[0] ?? {}) as { message?: string; code?: string };
+      console.warn(
+        `[STREAM:${this.deps.symbol}] ws error: code=${e.code ?? "n/a"} ` +
+          `msg=${this.redact(e.message ?? "error").slice(0, 200)} state=${this.currentState}`,
+      );
     });
-    ws.on("close", () => {
+    ws.on("close", (...args: unknown[]) => {
+      const code = args[0];
+      const reason = args[1];
+      const codeNum = typeof code === "number" ? code : 1006;
+      const raw: string =
+        typeof reason === "string"
+          ? reason
+          : Buffer.isBuffer(reason)
+            ? reason.toString("utf8")
+            : "";
+      console.warn(
+        `[STREAM:${this.deps.symbol}] ws closed: code=${codeNum} ` +
+          `reason=${this.redact(raw).slice(0, 160)} state=${this.currentState}`,
+      );
       this.clearIdle();
+      this.clearHeartbeat(); // no orphaned keepalive survives a closed socket
       if (this.ws === ws) this.ws = null;
       if (this.running && !this.stopped) {
         this.reportState("RECONNECTING");
         this.scheduleReconnect();
       }
     });
+  }
+
+  /**
+   * Forward a 4-tick OHLC burst: bucket-cumulative volume → per-tick delta
+   * attributed to the burst's closing tick (open/high/low carry 0) — identical
+   * accounting to the original inline block, shared by candles + ohlc pairs.
+   */
+  private emitBurst(tsMs: number, cumVolume: number, ticks: IngTick[]): void {
+    const freshBucket = this.prevBurstTsMs !== tsMs;
+    const delta = freshBucket
+      ? cumVolume
+      : Math.max(0, cumVolume - this.prevCumVolume);
+    this.prevBurstTsMs = tsMs;
+    this.prevCumVolume = cumVolume;
+    if (ticks.length > 0) {
+      ticks[ticks.length - 1].volume = delta;
+      this.lastPrice = ticks[ticks.length - 1].price;
+      this.lastTickAt = Date.now();
+    }
+    this.stats.ticks += ticks.length;
+    for (const t of ticks) this.deps.onTick(t);
+  }
+
+  /**
+   * Pair Capital's bid/ask ohlc.event frames (same epoch-ms bucket) into ONE
+   * midpoint burst. A lone side is held in `ohlcBuffer` until its counterpart
+   * arrives — a partial bucket never yields ticks, so an incomplete candle is
+   * never persisted (closed MINUTE_1 candles are written downstream only).
+   */
+  private handleOhlcSide(
+    side: Extract<ParsedFrame, { kind: "ohlc-side" }>,
+  ): void {
+    let bucket = this.ohlcBuffer.get(side.tsMs);
+    if (!bucket) bucket = {};
+    bucket[side.side] = {
+      open: side.open,
+      high: side.high,
+      low: side.low,
+      close: side.close,
+      volume: side.volume,
+    };
+    // Bound the buffer: drop the oldest unpaired bucket on one-sided drops.
+    if (this.ohlcBuffer.size > 4) {
+      let oldest = side.tsMs;
+      for (const k of this.ohlcBuffer.keys()) {
+        if (k < oldest) oldest = k;
+      }
+      this.ohlcBuffer.delete(oldest);
+    }
+    this.ohlcBuffer.set(side.tsMs, bucket);
+
+    const bid = bucket.bid;
+    const ask = bucket.ask;
+    if (!bid || !ask) return;
+
+    const dec = this.deps.decimals;
+    const midTick = (b: number, a: number): IngTick => ({
+      tsMs: side.tsMs,
+      price: capitalMid(b, a, dec),
+      volume: 0,
+      bid: b,
+      offer: a,
+      arriveMs: Date.now(),
+      priceRaw: (b + a) / 2,
+      priceField: "MID",
+    });
+    const ticks: IngTick[] = [
+      midTick(bid.open, ask.open),
+      midTick(bid.high, ask.high),
+      midTick(bid.low, ask.low),
+      midTick(bid.close, ask.close),
+    ];
+    // bid & ask frames carry identical bucket-cumulative volume; take the max
+    // so a lagging side can't zero-out a real bucket's volume.
+    const cumVolume = Math.max(bid.volume, ask.volume);
+    this.ohlcBuffer.delete(side.tsMs);
+    this.emitBurst(side.tsMs, cumVolume, ticks);
+  }
+
+  /** Scrub session tokens (CST / X-SECURITY-TOKEN) out of a diagnostic string. */
+  private redact(text: string): string {
+    if (!text) return "";
+    let out = text;
+    for (const secret of this.redactables()) {
+      if (secret) out = out.split(secret).join("<REDACTED>");
+    }
+    return out;
   }
 
   /** Exponential backoff, capped; fresh session on every retry. */
@@ -487,6 +707,55 @@ export class CapitalStreamClient {
       this.reconnectTimer = null;
       void this.openStream();
     }, delay);
+  }
+
+  /**
+   * Send Capital's documented application-level ping on the CURRENT session's
+   * credentials: { destination:"ping", correlationId, cst, securityToken }.
+   * Returns false when there is no session or the send throws (the close
+   * handler drives reconnect). Never logs the payload (tokens are secrets).
+   */
+  private sendApplicationPing(ws: WebSocketLike): boolean {
+    const session = this.lastSession;
+    if (!session) return false;
+    try {
+      ws.send(
+        JSON.stringify({
+          destination: "ping",
+          correlationId: String(this.nextCorrelationId++),
+          cst: session.cst,
+          securityToken: session.xSecurityToken,
+        }),
+      );
+      this.stats.heartbeats += 1;
+      return true;
+    } catch {
+      return false; // close handler drives reconnect
+    }
+  }
+
+  /**
+   * Periodic keepalive while OPEN: Capital's edge terminates quiet sockets
+   * ~60s after the last frame (close 1006), so ping every 30s. Exactly one
+   * timer per socket — startHeartbeat clears any previous timer first, and
+   * each firing re-checks that ITS socket is still the live, OPEN one.
+   */
+  private startHeartbeat(ws: WebSocketLike): void {
+    this.clearHeartbeat();
+    const interval = this.deps.heartbeatIntervalMs ?? CAPITAL_HEARTBEAT_INTERVAL_MS;
+    if (interval <= 0) return; // 0/negative disables (tests)
+    this.heartbeatTimer = setInterval(() => {
+      // Ping ONLY the live socket this timer was armed for, only while OPEN.
+      if (this.ws !== ws || ws.readyState !== OPEN) return;
+      this.sendApplicationPing(ws);
+    }, interval);
+  }
+
+  private clearHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
   }
 
   /** Silent-socket watchdog: no frames for idleTimeoutMs → hard terminate. */
@@ -515,6 +784,7 @@ export class CapitalStreamClient {
 
   private clearTimers(): void {
     this.clearIdle();
+    this.clearHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
