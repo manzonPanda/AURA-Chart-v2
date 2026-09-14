@@ -140,8 +140,9 @@ export interface QuoteResult {
  * ISOLATION CONTRACTS (deliberate, tested):
  *   - NEVER touches `unit.aggregators` — the authoritative OHLC state and the
  *     ONLY persistence source stays exclusively OHLC-frame-driven;
- *   - never creates a bucket at/before the authoritative forming candle
- *     (quotes can neither backdate, duplicate, nor pre-open a candle);
+ *   - never creates a bucket older than the authoritative forming candle
+ *     (quotes can neither backdate, duplicate, nor pre-open a candle); a
+ *     same-bucket quote merges into the existing display overlay instead;
  *   - never creates a bucket newer than the quote's own (sanitized) timestamp
  *     allows — future timestamps are clamped upstream (capitalStream);
  *   - a quote whose mid and extremes change nothing relays nothing
@@ -152,9 +153,15 @@ export function processInstrumentQuote(unit: InstrumentUnit, quote: IngTick): Qu
   for (const [timeframe, bucketSec] of Object.entries(TIMEFRAME_BUCKET_SEC)) {
     const bucket = bucketOf(quote.tsMs, bucketSec);
     const authoritativeTime = unit.aggregators.getCandleFor(bucketSec)?.time ?? 0;
-    if (bucket <= authoritativeTime) {
-      // Stale or authoritative-equal bucket: the quote carries no display
-      // truth the authoritative candle doesn't already own. Never backdate.
+    if (bucket < authoritativeTime) {
+      // STRICT stale bucket only — older than the authoritative forming candle.
+      // A quote whose bucket EQUALS the authoritative forming candle (the normal
+      // case for MINUTE_3: the 1M OHLC pair opens the 3M forming candle ~2 min
+      // before the bucket ends, so nearly every quote maps to the same 3M
+      // bucket) must still extend the live display — open stays the OHLC
+      // truth's open (syncDisplayFromAggregator re-asserts it after every
+      // authoritative tick), high/low/close merge per the live-OHLC contract.
+      // Quotes for an OLDER bucket cannot backdate or re-open a rolled bucket.
       results.push({ timeframe, bucketSec, display: undefined });
       continue;
     }

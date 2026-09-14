@@ -122,10 +122,18 @@ test("10. quote timestamps never create duplicate/new/backdated candles", () => 
   const stale = m1(processInstrumentQuote(unit, quoteMid(T(0, 400), 4330.0)));
   assert.equal(stale?.display, undefined, "older-bucket quote is ignored");
 
-  // A quote stamped for the SAME bucket as the authoritative forming candle is
-  // ignored too — the OHLC truth already owns that bucket's display.
+  // A quote stamped for the SAME bucket as the authoritative forming candle
+  // MERGES into the display overlay: open stays the OHLC truth's open, the
+  // mid extends high/low/close (the 3M freeze fix — same-bucket quotes are
+  // the normal case for MINUTE_3).
   const same = m1(processInstrumentQuote(unit, quoteMid(T(60, 400), 4399.0)));
-  assert.equal(same?.display, undefined, "authoritative-bucket quote is ignored");
+  assert.ok(same?.display, "authoritative-bucket quote merges into the display");
+  assert.equal(same?.display?.time, B(60), "same bucket — no new candle");
+  assert.equal(same?.display?.open, 4335.0, "open stays the authoritative OHLC open");
+  assert.equal(same?.display?.high, 4399.0, "high extends to the genuine mid");
+  assert.equal(same?.display?.low, 4335.0, "low keeps the OHLC low");
+  assert.equal(same?.display?.close, 4399.0, "close tracks the latest genuine mid");
+  assert.equal(unit.aggregators.getCandleFor(60)?.high, 4335.0, "aggregator high untouched by same-bucket quote");
 
   // Only a strictly NEWER bucket opens the display candle; one tick, one candle.
   const next = m1(processInstrumentQuote(unit, quoteMid(T(120, 100), 4340.0)));
@@ -213,9 +221,111 @@ test("3m. the quote overlay also drives the MINUTE_3 grid (never persisted)", ()
   // Isolation holds for the 3m grid too: the 3m aggregator (in-memory overlay,
   // never persisted) was untouched by any quote.
   assert.equal(unit.aggregators.getCandleFor(180)?.high, 4335.0);
-  // And quotes can never create a 3m bucket at/below the authoritative 3m one.
-  const stale3m = processInstrumentQuote(unit, quoteMid(T(180, 200), 4300.0)).find(
+  // The display is already on the NEWER 08:06 bucket, so a quote stamped for
+  // the authoritative 08:03 bucket cannot rewind it (out-of-order guard).
+  const rewind3m = processInstrumentQuote(unit, quoteMid(T(180, 200), 4300.0)).find(
     (x) => x.timeframe === "MINUTE_3",
   );
-  assert.equal(stale3m?.display, undefined, "authoritative-bucket 3m quote ignored");
+  assert.equal(rewind3m?.display, undefined, "quote cannot rewind a newer display bucket");
+  assert.equal(unit.liveDisplay.get("MINUTE_3")?.time, B(360), "display stays on 08:06");
+  // And a quote for an OLDER 3m bucket is still rejected outright.
+  const stale3m = processInstrumentQuote(unit, quoteMid(T(0, 200), 4300.0)).find(
+    (x) => x.timeframe === "MINUTE_3",
+  );
+  assert.equal(stale3m?.display, undefined, "older-bucket 3m quote ignored");
+});
+
+test("3m regression. same-bucket quotes keep the forming 3M display moving to rollover (production freeze fix)", () => {
+  const unit = createInstrumentUnit(GOLD, "Spot Gold / Capital.com", 2);
+  const m3 = (results: QuoteResult[]) => results.find((r) => r.timeframe === "MINUTE_3");
+
+  // ── Minute 1 of 3M bucket 08:06 (08:06:00–08:09:00): quotes lead. ──────────
+  // Production: the 1M pair stamped 08:03 keeps the 3M authoritative on bucket
+  // 08:03, so 08:06 quotes pass the gate and open the display candle.
+  processInstrumentTick(unit, ohlcTick(T(180), 4330.0)); // 3M authoritative = 08:03
+  syncDisplayFromAggregator(unit);
+  const lead = m3(processInstrumentQuote(unit, quoteMid(T(360, 100), 4336.0)));
+  assert.ok(lead?.display, "pre-OHLC window: quote opens the 3M 08:06 display");
+  assert.equal(lead?.display?.time, B(360));
+
+  // ── Minute 2 (08:07 wall): the 1M OHLC pair for 08:06 arrives ~60s late. ───
+  // The 3M aggregator OPENS the authoritative forming candle for 08:06 —
+  // exactly the production moment the freeze used to begin (the old
+  // `bucket <= authoritativeTime` gate then dropped every quote for ~2 min).
+  // Production pair replay: 4 genuine OHLC mids, all stamped 08:06.
+  processInstrumentTick(unit, ohlcTick(T(360), 4335.0)); // open
+  processInstrumentTick(unit, ohlcTick(T(360), 4345.0)); // high
+  processInstrumentTick(unit, ohlcTick(T(360), 4330.0)); // low
+  processInstrumentTick(unit, ohlcTick(T(360), 4341.0)); // close
+  syncDisplayFromAggregator(unit);
+  const ticksAfterPair = unit.ticksReceived;
+  const synced = unit.liveDisplay.get("MINUTE_3");
+  assert.deepEqual(
+    [synced?.time, synced?.open, synced?.high, synced?.low, synced?.close],
+    [B(360), 4335.0, 4345.0, 4330.0, 4341.0],
+    "sync puts the authoritative OHLC snapshot on the display",
+  );
+
+  // ── Final ~2 minutes (08:07:30 / 08:08:30 / 08:08:40): every quote maps to
+  // the SAME 3M bucket 08:06 and MUST move the display (frozen before fix). ──
+  const q1 = m3(processInstrumentQuote(unit, quoteMid(T(390, 100), 4399.5)));
+  assert.deepEqual(
+    [q1?.display?.open, q1?.display?.high, q1?.display?.low, q1?.display?.close],
+    [4335.0, 4399.5, 4330.0, 4399.5],
+    "rise → high + close move up; open = the authoritative OHLC open",
+  );
+  const q2 = m3(processInstrumentQuote(unit, quoteMid(T(450, 100), 4270.0)));
+  assert.deepEqual(
+    [q2?.display?.open, q2?.display?.high, q2?.display?.low, q2?.display?.close],
+    [4335.0, 4399.5, 4270.0, 4270.0],
+    "fall → low + close move down; open still immutable",
+  );
+  const q3 = m3(processInstrumentQuote(unit, quoteMid(T(510, 100), 4340.0)));
+  assert.deepEqual(
+    [q3?.display?.open, q3?.display?.high, q3?.display?.low, q3?.display?.close],
+    [4335.0, 4399.5, 4270.0, 4340.0],
+    "close tracks the LATEST genuine mid; extremes stay monotonic",
+  );
+
+  // ── Isolation: no quote reached the persistence/aggregator path. ───────────
+  assert.equal(unit.ticksReceived, ticksAfterPair, "no quote became a tick");
+  const agg = unit.aggregators.getCandleFor(180);
+  assert.deepEqual(
+    [agg?.time, agg?.open, agg?.high, agg?.low, agg?.close],
+    [B(360), 4335.0, 4345.0, 4330.0, 4341.0],
+    "aggregator holds ONE forming 3M candle with PURE OHLC values (no quote contamination)",
+  );
+
+  // ── Older buckets are still rejected. ─────────────────────────────────────
+  assert.equal(
+    m3(processInstrumentQuote(unit, quoteMid(T(200, 0), 4300.0)))?.display,
+    undefined,
+    "quote for the rolled 3M bucket 08:03 is ignored",
+  );
+  assert.equal(
+    m1(processInstrumentQuote(unit, quoteMid(T(0, 100), 4300.0)))?.display,
+    undefined,
+    "quote for a rolled 1M bucket is ignored",
+  );
+
+  // ── Rollover: the 08:09 pair closes the 3M candle with PURE OHLC truth. ────
+  // Production pair replay: 4 genuine OHLC mids stamped 08:09.
+  processInstrumentTick(unit, ohlcTick(T(540), 4342.0)); // open
+  processInstrumentTick(unit, ohlcTick(T(540), 4348.0)); // high
+  processInstrumentTick(unit, ohlcTick(T(540), 4338.0)); // low
+  processInstrumentTick(unit, ohlcTick(T(540), 4344.0)); // close
+  const closed3m = unit.aggregators.getCandleFor(180);
+  // The just-closed 08:06 3M candle is the aggregator's OWN history — quote
+  // extremes (4399.5 / 4270.0) are nowhere in it. (The 3M timeframe is an
+  // in-memory overlay and is never persisted; MINUTE_1 persistence is covered
+  // by test 11-12 above.)
+  const closed = unit.aggregators.getClosedCandleFor(180);
+  assert.ok(closed, "the 08:09 pair closed the 3M 08:06 candle");
+  assert.equal(closed?.time, B(360));
+  assert.deepEqual(
+    [closed?.open, closed?.high, closed?.low, closed?.close],
+    [4335.0, 4345.0, 4330.0, 4341.0],
+    "closed 3M candle = pure OHLC (quote extremes excluded)",
+  );
+  assert.equal(closed3m?.time, B(540), "aggregator rolled to the next 3M bucket");
 });
