@@ -112,14 +112,32 @@ test("5. #ping and ping-destination frames map to pong", () => {
   );
 });
 
-// ── Quote/quote-only frames never tick material ───────────────────────────────
+// ── Quote frames: LIVE DISPLAY source (never persistence tick material) ───────
 
-test("6. quote-only payloads are ignored (liveness only, no ticks)", () => {
+test("6. quote payloads parse as quote frames — display-only, never tick material", () => {
   const q = parseStreamFrame(
     JSON.stringify({ destination: "marketData.subscribe", payload: { bid: "4460.0", ask: "4460.2" } }),
     { symbol: "GOLD", decimals: GOLD },
   );
-  assert.equal(q.kind, "ignored");
+  assert.equal(q.kind, "quote");
+  if (q.kind !== "quote") return;
+  assert.equal(q.bid, 4460.0);
+  assert.equal(q.ask, 4460.2);
+  // Quote frames are NEVER tick-burst/ohlc-side material (the persistence
+  // aggregator path) — the CLIENT routes them to onQuote only (see tests 27+).
+  const notTicks = parseStreamFrame(
+    JSON.stringify({ destination: "marketData.subscribe", payload: { bid: 4460.0, ask: 4460.2, offer: 4460.3 } }),
+    { symbol: "GOLD", decimals: GOLD },
+  );
+  assert.notEqual(notTicks.kind, "tick-burst");
+  assert.notEqual(notTicks.kind, "ohlc-side");
+  // A quote-shaped frame WITHOUT prices (subscription ack / keepalive-like)
+  // stays liveness-only — never a fabricated midpoint.
+  const ack = parseStreamFrame(
+    JSON.stringify({ destination: "marketData.subscribe", payload: { subscriptionStatus: "active" } }),
+    { symbol: "GOLD", decimals: GOLD },
+  );
+  assert.equal(ack.kind, "ignored");
 });
 
 // ── Mocked WebSocket seam (deterministic, no network) ─────────────────────────
@@ -373,7 +391,7 @@ test("15. WS close diagnostics redact CST & X-SECURITY-TOKEN", async () => {
 
 // ── 16. reconnect does not leak/duplicate subscriptions ─────────────────────────
 
-test("16. reconnect sends exactly ONE subscribe per socket (no dup/leak)", async () => {
+test("16. reconnect sends exactly TWO subscribes per socket (OHLC + quote), no dup/leak", async () => {
   const mocks: MockSocket[] = [];
   const dummy = createMockSocket();
   const stream = new CapitalStreamClient(
@@ -392,14 +410,16 @@ test("16. reconnect sends exactly ONE subscribe per socket (no dup/leak)", async
   assert.equal(mocks.length, 1, "initial connect creates one socket");
   mocks[0].emitOpen();
   await settle(5);
-  assert.equal(mocks[0].sent.length, 1, "first socket gets exactly one subscribe");
+  assert.equal(mocks[0].sent.length, 2, "first socket gets OHLC + quote subscribes");
   mocks[0].emitClose(1006, "abrupt");
   await settle(40);
   assert.equal(mocks.length, 2, "reconnect creates a fresh socket");
   mocks[1].emitOpen();
   await settle(5);
-  assert.equal(mocks[1].sent.length, 1, "reconnected socket gets exactly one subscribe");
-  assert.equal(mocks[0].sent.length, 1, "old socket was never re-subscribed");
+  assert.equal(mocks[1].sent.length, 2, "reconnected socket re-subscribes BOTH streams");
+  const dests = mocks[1].sent.map((s) => ((JSON.parse(s) as { destination: string }).destination));
+  assert.deepEqual(dests, ["OHLCMarketData.subscribe", "marketData.subscribe"]);
+  assert.equal(mocks[0].sent.length, 2, "old socket was never re-subscribed");
   stream.disconnect();
 });
 
@@ -608,5 +628,297 @@ test("25. no heartbeat while CONNECTING (pre-OPEN)", async () => {
   mock.emitOpen();
   await settle(60);
   assert.ok(sentPings(mock).length >= 3, "pings flow once OPEN");
+  stream.disconnect();
+});
+
+// ── 26-35. marketData quote stream — LIVE DISPLAY (never persistence) ──────────
+//
+// The quote subscription multiplexes on the EXISTING authenticated socket
+// (Capital enforces ONE streaming session per account — a second socket is
+// rejected with error.too-many.requests, verified against production). Quote
+// mids are emitted ONLY via deps.onQuote (the display seam); deps.onTick —
+// the persistence aggregator path — must never receive them.
+
+function baseQuote(over: Record<string, unknown> = {}, dest = "quote") {
+  return {
+    destination: dest,
+    payload: { epic: "GOLD", bid: 4460.0, ask: 4460.2, ...over },
+  };
+}
+
+test("26. marketData.subscribe rides the SAME authenticated socket, after the OHLC subscribe", async () => {
+  const mock = createMockSocket();
+  let sockets = 0;
+  const stream = new CapitalStreamClient(
+    clientDeps(mock, {
+      wsFactory: (_url, _headers) => {
+        sockets += 1;
+        return mock.ws;
+      },
+    }),
+  );
+  stream.connect();
+  await settle();
+  mock.emitOpen();
+  await settle(5);
+  assert.equal(sockets, 1, "exactly ONE socket — no second session");
+  assert.equal(mock.sent.length, 2, "OHLC + quote subscribes on the one socket");
+  const [ohlc, quote] = mock.sent.map(
+    (s) => JSON.parse(s) as { destination: string; cst?: string; securityToken?: string; payload: Record<string, unknown> },
+  );
+  assert.equal(ohlc.destination, "OHLCMarketData.subscribe");
+  assert.deepEqual(ohlc.payload, { epics: ["GOLD"], resolutions: ["MINUTE"], type: "classic" });
+  assert.equal(quote.destination, "marketData.subscribe");
+  assert.deepEqual(quote.payload, { epics: ["GOLD"] });
+  // Same session credentials on both subscriptions → one authenticated session.
+  assert.equal(quote.cst, "SECRET-CST");
+  assert.equal(quote.cst, ohlc.cst);
+  assert.equal(quote.securityToken, "SECRET-XST");
+  assert.equal(quote.securityToken, ohlc.securityToken);
+  stream.disconnect();
+});
+
+test("27. a combined bid/ask quote emits ONE genuine midpoint to onQuote (never onTick)", async () => {
+  const mock = createMockSocket();
+  const quotes: IngTick[] = [];
+  const ticks: IngTick[] = [];
+  const stream = new CapitalStreamClient(
+    clientDeps(mock, { onQuote: (q) => quotes.push(q), onTick: (t) => ticks.push(t) }),
+  );
+  stream.connect();
+  await settle();
+  mock.emitOpen();
+  await settle(5);
+  mock.emitMessage(JSON.stringify(baseQuote()));
+  await settle(5);
+  assert.equal(quotes.length, 1);
+  assert.equal(quotes[0].price, capitalMid(4460.0, 4460.2, GOLD), "= round((4460.0+4460.2)/2, 2)");
+  assert.equal(quotes[0].price, 4460.1);
+  assert.equal(quotes[0].bid, 4460.0);
+  assert.equal(quotes[0].offer, 4460.2);
+  assert.equal(quotes[0].priceField, "MID");
+  assert.equal(stream.stats.quoteMids, 1);
+  assert.equal(ticks.length, 0, "quotes NEVER reach the persistence/onTick path");
+  stream.disconnect();
+});
+
+test("28. side-specific quote frames pair into a midpoint; a lone side never emits", async () => {
+  const mock = createMockSocket();
+  const quotes: IngTick[] = [];
+  const ticks: IngTick[] = [];
+  const stream = new CapitalStreamClient(
+    clientDeps(mock, { onQuote: (q) => quotes.push(q), onTick: (t) => ticks.push(t) }),
+  );
+  stream.connect();
+  await settle();
+  mock.emitOpen();
+  await settle(5);
+  mock.emitMessage(JSON.stringify({ destination: "quote", payload: { epic: "GOLD", bid: 4460.0 } }));
+  await settle(5);
+  assert.equal(quotes.length, 0, "a lone bid side must not emit (no ask side yet)");
+  mock.emitMessage(JSON.stringify({ destination: "quote", payload: { epic: "GOLD", ask: 4460.2 } }));
+  await settle(5);
+  assert.equal(quotes.length, 1, "the paired ask completes the midpoint");
+  assert.equal(quotes[0].price, 4460.1);
+  assert.equal(ticks.length, 0, "side-specific quotes also never reach onTick");
+  stream.disconnect();
+});
+
+test("29. quote timestamps: t / snapshotTimeUTC honored; future ts falls back to arrival", async () => {
+  const mock = createMockSocket();
+  const quotes: IngTick[] = [];
+  const stream = new CapitalStreamClient(clientDeps(mock, { onQuote: (q) => quotes.push(q) }));
+  stream.connect();
+  await settle();
+  mock.emitOpen();
+  await settle(5);
+  // 1) epoch-ms `t` — a recent instant passes the client's 10-minute sanity
+  //    window (an ancient t is treated as unusable → arrival time, so the
+  //    bucket can never be backdated).
+  const recentT = Date.now() - 30_000;
+  mock.emitMessage(JSON.stringify(baseQuote({ bid: 4460.0, ask: 4460.2, t: recentT })));
+  await settle(5);
+  assert.equal(quotes[0].tsMs, recentT, "recent epoch-ms t honored");
+  // 2) tz-less snapshotTimeUTC parsed via the shared UTC rule
+  const recentIso = new Date(Date.now() - 45_000).toISOString().slice(0, 19);
+  mock.emitMessage(
+    JSON.stringify(baseQuote({ bid: 4461.0, ask: 4461.2, snapshotTimeUTC: recentIso })),
+  );
+  await settle(5);
+  assert.equal(
+    quotes[1].tsMs,
+    Date.parse(`${recentIso}Z`),
+    "tz-less snapshotTimeUTC parsed as UTC wall clock",
+  );
+  // 3) a FUTURE t must never bucket a candle ahead of real time → arrival time
+  const before = Date.now();
+  mock.emitMessage(JSON.stringify(baseQuote({ bid: 4462.0, ask: 4462.2, t: Date.now() + 5_000 })));
+  await settle(5);
+  assert.ok(quotes[2].tsMs >= before && quotes[2].tsMs <= Date.now() + 50, "future ts clamped to arrival");
+  // 4) an ANCIENT t (12 minutes is past the 10-minute sanity window) → arrival
+  const ancient = Date.now() - 12 * 60_000;
+  mock.emitMessage(JSON.stringify(baseQuote({ bid: 4463.0, ask: 4463.2, t: ancient })));
+  await settle(5);
+  assert.ok(quotes[3].tsMs > ancient, "ancient quote ts falls back to arrival (no stale bucket)");
+  stream.disconnect();
+});
+
+test("30. unchanged (bid,ask) quotes are deduped — no redundant midpoint", async () => {
+  const mock = createMockSocket();
+  const quotes: IngTick[] = [];
+  const stream = new CapitalStreamClient(clientDeps(mock, { onQuote: (q) => quotes.push(q) }));
+  stream.connect();
+  await settle();
+  mock.emitOpen();
+  await settle(5);
+  const frame = JSON.stringify(baseQuote());
+  mock.emitMessage(frame);
+  await settle(5);
+  assert.equal(quotes.length, 1);
+  mock.emitMessage(frame);
+  await settle(5);
+  mock.emitMessage(frame);
+  await settle(5);
+  assert.equal(quotes.length, 1, "identical quotes produce no extra updates");
+  assert.equal(stream.stats.quoteDeduped, 2);
+  // a genuine change emits again
+  mock.emitMessage(JSON.stringify(baseQuote({ bid: 4461.0, ask: 4461.2 })));
+  await settle(5);
+  assert.equal(quotes.length, 2);
+  assert.equal(quotes[1].price, capitalMid(4461.0, 4461.2, GOLD));
+  stream.disconnect();
+});
+
+test("31. quote rejection disables ONLY the quote path — OHLC stream and socket intact", async () => {
+  const mock = createMockSocket();
+  const quotes: IngTick[] = [];
+  const ticks: IngTick[] = [];
+  const stream = new CapitalStreamClient(
+    clientDeps(mock, { onQuote: (q) => quotes.push(q), onTick: (t) => ticks.push(t) }),
+  );
+  stream.connect();
+  await settle();
+  mock.emitOpen();
+  await settle(5);
+  // Server rejects the quote subscription (observed production errorCode).
+  mock.emitMessage(
+    JSON.stringify({ destination: "marketData.subscribe", payload: { errorCode: "error.too-many.requests" } }),
+  );
+  await settle(5);
+  assert.equal(stream.stats.quoteErrors, 1);
+  assert.equal(stream.getStats().quoteState, "rejected");
+  // Quote data arriving after the rejection → ignored (no display mids).
+  mock.emitMessage(JSON.stringify(baseQuote()));
+  await settle(5);
+  assert.equal(quotes.length, 0, "no quote mids after rejection");
+  // The OHLC stream is completely untouched: pairing still emits the 4-tick
+  // persistence burst, the socket was never closed, no reconnect was triggered.
+  mock.emitMessage(JSON.stringify(baseOhlc("bid")));
+  await settle(5);
+  mock.emitMessage(JSON.stringify(baseOhlc("ask", ASK)));
+  await settle(5);
+  assert.equal(ticks.length, 4, "OHLC pairing still emits the persistence burst");
+  assert.equal(mock.sent.length, 2, "no extra sends → no reconnect was triggered");
+  stream.disconnect();
+});
+
+test("32. quote probe timeout (no frames) disables the display path; OHLC untouched", async () => {
+  const mock = createMockSocket();
+  const quotes: IngTick[] = [];
+  const ticks: IngTick[] = [];
+  const stream = new CapitalStreamClient(
+    clientDeps(mock, {
+      onQuote: (q) => quotes.push(q),
+      onTick: (t) => ticks.push(t),
+      quoteProbeTimeoutMs: 25,
+    }),
+  );
+  stream.connect();
+  await settle();
+  mock.emitOpen();
+  await settle(5);
+  assert.equal(stream.getStats().quoteState, "pending");
+  await settle(60); // ≫ 25ms probe
+  assert.equal(stream.getStats().quoteState, "rejected", "probe timeout → rejected for THIS connection");
+  assert.equal(quotes.length, 0);
+  // Late quote data stays disabled until the NEXT connection resets the state.
+  mock.emitMessage(JSON.stringify(baseQuote()));
+  await settle(5);
+  assert.equal(quotes.length, 0, "post-timeout quote data is ignored");
+  // OHLC still flows.
+  mock.emitMessage(JSON.stringify(baseOhlc("bid")));
+  await settle(5);
+  mock.emitMessage(JSON.stringify(baseOhlc("ask", ASK)));
+  await settle(5);
+  assert.equal(ticks.length, 4);
+  stream.disconnect();
+});
+
+test("33. protocol/keepalive frames never become quote updates", async () => {
+  const mock = createMockSocket();
+  const quotes: IngTick[] = [];
+  const stream = new CapitalStreamClient(clientDeps(mock, { onQuote: (q) => quotes.push(q) }));
+  stream.connect();
+  await settle();
+  mock.emitOpen();
+  await settle(5);
+  mock.emitMessage("#ping");
+  await settle(5);
+  mock.emitMessage(JSON.stringify({ destination: "ping", payload: {} }));
+  await settle(5);
+  mock.emitMessage(JSON.stringify({ destination: "marketData.subscribe", payload: { subscriptionStatus: "active" } }));
+  await settle(5);
+  assert.equal(quotes.length, 0, "keepalive/ack frames carry no price → no mids");
+  assert.equal(stream.getStats().quoteState, "pending", "no genuine data frame yet");
+  stream.disconnect();
+});
+
+test("34. quote frames do not alter the heartbeat cadence", async () => {
+  const mock = createMockSocket();
+  const stream = new CapitalStreamClient(clientDeps(mock, { heartbeatIntervalMs: 15 }));
+  stream.connect();
+  await settle();
+  mock.emitOpen();
+  await settle(5);
+  mock.emitMessage(JSON.stringify(baseQuote()));
+  await settle(5);
+  await settle(60); // ≥ 4 heartbeat intervals with quotes flowing
+  const pings = sentPings(mock);
+  assert.ok(pings.length >= 3, "heartbeats still fire at the configured cadence");
+  stream.disconnect();
+});
+
+test("35. reconnect resets quote state and re-subscribes BOTH streams on the fresh socket", async () => {
+  const mocks: MockSocket[] = [];
+  const stream = new CapitalStreamClient(
+    clientDeps(createMockSocket(), {
+      backoffBaseMs: 0,
+      backoffMaxMs: 1,
+      wsFactory: (_url, _headers) => {
+        const m = createMockSocket();
+        mocks.push(m);
+        return m.ws;
+      },
+    }),
+  );
+  stream.connect();
+  await settle(30);
+  mocks[0].emitOpen();
+  await settle(5);
+  assert.equal(stream.getStats().quoteState, "pending");
+  // Reject the quote stream on THIS connection → rejected.
+  mocks[0].emitMessage(JSON.stringify({ destination: "marketData.subscribe", payload: { errorCode: "error.too-many.requests" } }));
+  await settle(5);
+  assert.equal(stream.getStats().quoteState, "rejected");
+  mocks[0].emitClose(1006, "drop");
+  await settle(40);
+  assert.equal(mocks.length, 2, "reconnect created a fresh socket");
+  mocks[1].emitOpen();
+  await settle(5);
+  assert.equal(mocks[1].sent.length, 2, "re-subscribe BOTH streams (OHLC + quote)");
+  assert.equal(stream.getStats().quoteState, "pending", "quote state resets per connection");
+  mocks[1].emitMessage(JSON.stringify(baseQuote()));
+  await settle(5);
+  assert.equal(stream.getStats().quoteState, "active", "first quote frame on the new connection activates");
   stream.disconnect();
 });

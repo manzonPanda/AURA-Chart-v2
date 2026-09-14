@@ -9,7 +9,9 @@ import {
   clientWantsCandle,
   createInstrumentUnit,
   persistenceInstrumentFor,
+  processInstrumentQuote,
   processInstrumentTick,
+  syncDisplayFromAggregator,
   type InstrumentUnit,
 } from "./instrumentPipeline.js";
 import type { ClosedCandle, IngTick, StreamState } from "./types.js";
@@ -69,6 +71,13 @@ interface StreamClientLike {
     lastTickAt: number;
     updatesReceived: number;
     noPriceUpdates: number;
+    /** marketData quote-stream diagnostics (live display path). */
+    quoteFrames?: number;
+    quoteMids?: number;
+    quoteDeduped?: number;
+    quoteUnpaired?: number;
+    quoteErrors?: number;
+    quoteState?: string;
   };
 }
 
@@ -295,8 +304,18 @@ export class RealtimeService {
     // Seed the freshly-connected client with the CURRENT forming candle for its
     // timeframe so the historical↔live handoff is seamless (the client can
     // merge it into the last historical bucket even before the next tick).
-    const candle = this.units.get(epic)!.aggregators.getCandleFor(bucketSec);
+    const seedUnit = this.units.get(epic)!;
+    const candle = seedUnit.aggregators.getCandleFor(bucketSec);
     if (candle) this.send(client, { type: "candle", epic, timeframe: resolution, ...candle });
+    // Quote-driven LIVE DISPLAY overlay — when it is already on a NEWER bucket
+    // than the authoritative forming candle (quotes form the live minute while
+    // Capital's OHLC delivery lags one bucket), send it too so the client
+    // continues from the live market instead of a stale bucket. Same frame
+    // shape/handling as every other candle frame (merge / rollover per ts).
+    const display = seedUnit.liveDisplay.get(resolution);
+    if (display && (!candle || display.time > candle.time)) {
+      this.send(client, { type: "candle", epic, timeframe: resolution, ...display });
+    }
         // Auxiliary seed frames (e.g. the EMA-alert snapshot) — a seeder must
     // never break the connect path (ClientSeeders already isolates throwers).
     for (const frame of this.clientSeeders.frames()) {
@@ -371,6 +390,9 @@ export class RealtimeService {
         authHeaders: (session) => this.capital!.streamingHeaders(session),
         onTick: (tick) => {
           if (this.streams.get(epic) === stream) this.handleTick(epic, tick);
+        },
+        onQuote: (quote) => {
+          if (this.streams.get(epic) === stream) this.handleQuoteTick(epic, quote);
         },
         onState: (state) => {
           if (this.streams.get(epic) !== stream) return;
@@ -469,7 +491,8 @@ export class RealtimeService {
             `firstTickDeltaMs=${closed.firstTickMs - closed.time * 1000}\n` +
             `lastTickDeltaMs=${closed.lastTickMs - closed.time * 1000}\n` +
             `rawO=${closed.rawOpen ?? "-"} rawH=${closed.rawHigh ?? "-"} rawL=${closed.rawLow ?? "-"} rawC=${closed.rawClose ?? "-"}\n` +
-            `lsUpdates=${ls?.updatesReceived ?? "-"} lsNoPrice=${ls?.noPriceUpdates ?? "-"} ticksTotal=${unit.ticksReceived} clients=${this.clients.size}`,
+            `lsUpdates=${ls?.updatesReceived ?? "-"} lsNoPrice=${ls?.noPriceUpdates ?? "-"} ticksTotal=${unit.ticksReceived} clients=${this.clients.size}\n` +
+            `quoteFrames=${ls?.quoteFrames ?? "-"} quoteMids=${ls?.quoteMids ?? "-"} quoteDeduped=${ls?.quoteDeduped ?? "-"} quoteUnpaired=${ls?.quoteUnpaired ?? "-"} quoteErrors=${ls?.quoteErrors ?? "-"} quoteState=${ls?.quoteState ?? "-"}`,
         );
         // COMPLETED candle → Supabase upsert — ONLY for the canonical persisted
         // timeframe (MINUTE_1) and ALWAYS under THIS instrument's EPIC as the
@@ -502,6 +525,37 @@ export class RealtimeService {
       for (const client of this.clients) {
         if (!clientWantsCandle(client, epic, bucketSec)) continue;
         this.send(client, { type: "candle", epic, timeframe, ...candle });
+      }
+    }
+
+    // OHLC-TRUTH SYNC: after authoritative ticks, replace any quote-derived
+    // display overlay for the same/older bucket with the aggregator's candle —
+    // authoritative OHLC always wins over temporary display state. Display
+    // overlays on a NEWER bucket (quote-formed next minute while Capital's
+    // OHLC delivery lags) are left alone.
+    syncDisplayFromAggregator(unit);
+  }
+
+  /**
+   * Quote-derived LIVE DISPLAY update — the smooth intrabar path.
+   *
+   * Capital marketData quote mids extend the per-timeframe liveDisplay overlay
+   * (open immutable, high=max, low=min, close=latest genuine mid) and the
+   * updated forming candle is fanned out through the EXISTING realtime relay,
+   * so the frontend's `series.update()` moves the same active candle
+   * continuously. ISOLATION (tested): quote mids NEVER touch
+   * `unit.aggregators` — no rollover, no closed candle, no persistence can
+   * originate here; PostgreSQL keeps receiving exclusively OHLC-derived
+   * candles from the MINUTE OHLC stream.
+   */
+  private handleQuoteTick(epic: string, quote: IngTick): void {
+    const unit = this.units.get(epic);
+    if (!unit) return;
+    for (const result of processInstrumentQuote(unit, quote)) {
+      if (!result.display) continue;
+      for (const client of this.clients) {
+        if (!clientWantsCandle(client, epic, result.bucketSec)) continue;
+        this.send(client, { type: "candle", epic, timeframe: result.timeframe, ...result.display });
       }
     }
   }

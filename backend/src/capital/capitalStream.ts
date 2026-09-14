@@ -22,10 +22,18 @@
  *               bid/ask arrive as SEPARATE frames for the same `t` (epoch-ms
  *               bucket-open ts); the client pairs them into a midpoint burst.
  *   Candles:    { destination: "candles", payload: { candles: [...] } }
- *   Quotes:     { destination: "quote", payload: { bid, ask, ... } } —
- *               counted for liveness but NEVER converted into ticks (a
- *               mid-price OHLC rewrite would corrupt the aggregator's
- *               open/high/low truth; only real OHLC frames emit ticks).
+ *   Quotes:     { destination: "quote"|"marketData", payload: { bid, offer } } —
+ *               subscribed via a SECOND destination on the SAME socket
+ *               ("marketData.subscribe", sent right after the OHLC subscribe —
+ *               Capital enforces one streaming session per account, so the
+ *               quote stream MUST multiplex on the existing socket). Quote
+ *               frames drive the LIVE DISPLAY forming candle (bid/ask midpoint,
+ *               paired + deduped); they are NEVER routed into the persistence
+ *               aggregator — the MINUTE OHLC stream remains the only candle
+ *               truth for PostgreSQL. A quote subscription rejection/timeout
+ *               disables ONLY the display path (log + continue OHLC-only).
+ *   Keepalive:  bare "#ping" text frames / {destination:"ping"} — answered with
+ *               the documented application-level ping (unchanged).
  *
  * Price basis (approved): midpoint of bid/ask per field,
  *   mid = round(((bid + ask) / 2) * 10^decimals) / 10^decimals
@@ -101,6 +109,21 @@ export interface CapitalStreamDeps {
   sessionProvider: () => Promise<CapitalStreamSession>;
   /** Tick consumer — the RealtimeService aggregator seam (was start(handler)). */
   onTick: CapitalTickHandler;
+  /**
+   * QUOTE consumer — the LIVE DISPLAY seam. Called with one bid/ask midpoint
+   * IngTick per genuine Capital quote price change (marketData stream, paired
+   * + deduped). NEVER invoked for OHLC frames, and its ticks must NEVER be
+   * routed into the persistence aggregator — quotes drive the forming-candle
+   * display overlay only (RealtimeService.handleQuoteTick).
+   */
+  onQuote?: (quote: IngTick) => void;
+  /**
+   * How long to wait for the first quote frame after subscribing before the
+   * quote stream is declared unavailable (default 15s; 0/negative disables —
+   * tests). A timeout or a server rejection disables ONLY the quote display
+   * path: the OHLC stream, heartbeat, reconnect and persistence are untouched.
+   */
+  quoteProbeTimeoutMs?: number;
   /** Reconnect backoff tuning (defaults: 1s base, 30s cap). */
   backoffBaseMs?: number;
   backoffMaxMs?: number;
@@ -129,6 +152,42 @@ function num(v: unknown): number | undefined {
 export function capitalMid(bid: number, ask: number, decimals: number): number {
   const q = 10 ** decimals;
   return Math.round(((bid + ask) / 2) * q) / q;
+}
+
+/**
+ * Extract the quote's bid/ask from a Capital quote payload — string-or-number
+ * tolerant, plus the documented `offer`/`ofr` aliases for the ask side. The
+ * exact production frame shape is verified at runtime; parsing stays tolerant
+ * of every documented variation (bid / ask / offer / ofr, bidPrice/askPrice).
+ */
+export function quoteBidAsk(payload: Record<string, unknown>): { bid?: number; ask?: number } {
+  const bid = num(payload.bid) ?? num(payload.bidPrice);
+  const ask = num(payload.ask) ?? num(payload.offer) ?? num(payload.ofr) ?? num(payload.askPrice);
+  return {
+    ...(bid !== undefined ? { bid } : {}),
+    ...(ask !== undefined ? { ask } : {}),
+  };
+}
+
+/**
+ * Quote market timestamp (epoch ms), tolerating the documented variations:
+ *   `t` (epoch ms, like ohlc.event) → `snapshotTimeUTC` (tz-less ISO → UTC via
+ *   the shared Capital rule) → `timestamp`/`time` (ms, or s → ×1000).
+ * Returns undefined when the frame carries no usable timestamp (the caller
+ * then falls back to arrival time — which can never bucket into the future).
+ */
+export function quoteTimestampMs(payload: Record<string, unknown>): number | undefined {
+  const t = num(payload.t);
+  if (t !== undefined && t > 1e12) return t;
+  const iso = payload.snapshotTimeUTC ?? payload.snapshotTime;
+  if (typeof iso === "string") {
+    const ms = parseCapitalTimestampAsUtc(iso);
+    if (Number.isFinite(ms)) return ms;
+  }
+  const raw = num(payload.timestamp) ?? num(payload.time);
+  if (raw !== undefined && raw > 1e12) return raw;
+  if (raw !== undefined && raw > 1e9 && raw < 1e12) return raw * 1000;
+  return undefined;
 }
 
 /**
@@ -213,6 +272,15 @@ export type ParsedFrame =
       close: number;
       volume: number;
     }
+  | {
+      /** One Capital quote frame (marketData stream) — the LIVE DISPLAY source. */
+      kind: "quote";
+      bid?: number;
+      ask?: number;
+      /** Market timestamp (epoch ms) when the frame carries one; else undefined. */
+      tsMs?: number;
+    }
+  | { kind: "quote-rejected"; code: string }
   | { kind: "pong" }
   | { kind: "ignored"; reason: string };
 
@@ -358,14 +426,32 @@ export function parseStreamFrame(raw: string, opts: ParseFrameOptions): ParsedFr
     return tickFromCandle(forming as Record<string, unknown>, opts.symbol, opts.decimals);
   }
 
-  // Quote frames (bid/ask snapshots): liveness only — never tick material.
+  // Quote frames (bid/ask snapshots): the LIVE DISPLAY source. They are parsed
+  // into a `quote` frame and paired client-side into a bid/ask midpoint that
+  // feeds ONLY the forming-candle display overlay — never the persistence
+  // aggregator (quote mids must never become the persisted OHLC source). A
+  // quote-shaped frame WITHOUT prices (subscription acks, keepalives) stays
+  // liveness-only, and a subscription rejection surfaces as `quote-rejected`
+  // so the client can disable the display path without touching the socket.
   if (
     destination.toLowerCase().includes("quote") ||
     destination.includes("marketData") ||
     num(payload.bid) !== undefined ||
     num(payload.ask) !== undefined
   ) {
-    return { kind: "ignored", reason: "quote-frame" };
+    const errorCode = typeof payload.errorCode === "string" ? payload.errorCode : undefined;
+    if (errorCode) return { kind: "quote-rejected", code: errorCode };
+    const { bid, ask } = quoteBidAsk(payload);
+    if (bid === undefined && ask === undefined) {
+      return { kind: "ignored", reason: "quote-frame" };
+    }
+    const tsMs = quoteTimestampMs(payload);
+    return {
+      kind: "quote",
+      ...(bid !== undefined ? { bid } : {}),
+      ...(ask !== undefined ? { ask } : {}),
+      ...(tsMs !== undefined ? { tsMs } : {}),
+    };
   }
 
   return {
@@ -422,8 +508,43 @@ export class CapitalStreamClient {
   private ohlcBuffer: Map<number, { bid?: OhlcValues; ask?: OhlcValues }> =
     new Map();
 
+  /**
+   * Quote-stream (marketData) lifecycle for the LIVE DISPLAY path — per
+   * CONNECTION. "pending" from subscribe until the first genuine quote frame
+   * (→ "active") or a rejection/timeout (→ "rejected": display disabled,
+   * OHLC-only continues). Reset on every (re)connect so the subscription is
+   * re-established automatically with the existing OHLC subscription.
+   */
+  private quoteState: "pending" | "active" | "rejected" = "pending";
+  /** One-shot probe: no quote frame within quoteProbeTimeoutMs → rejected. */
+  private quoteProbeTimer: NodeJS.Timeout | null = null;
+  /** Most recent valid quote sides (pairing buffer for side-specific frames). */
+  private lastBid: number | undefined;
+  private lastAsk: number | undefined;
+  private lastBidAt = 0;
+  private lastAskAt = 0;
+  /** Last (bid, ask) pair a midpoint was emitted for — duplicate suppression. */
+  private lastEmittedBid: number | undefined;
+  private lastEmittedAsk: number | undefined;
+
   /** Frame diagnostics — counters only (never payloads/tokens). */
-  readonly stats = { frames: 0, ticks: 0, ignored: 0, reconnects: 0, heartbeats: 0 };
+  readonly stats = {
+    frames: 0,
+    ticks: 0,
+    ignored: 0,
+    reconnects: 0,
+    heartbeats: 0,
+    /** Quote frames received on the marketData stream (any shape). */
+    quoteFrames: 0,
+    /** Genuine bid/ask midpoints emitted to the display seam (price changes). */
+    quoteMids: 0,
+    /** Quote frames skipped because neither side changed (no new price info). */
+    quoteDeduped: 0,
+    /** Quote frames with only one side and no usable/stale counterpart. */
+    quoteUnpaired: 0,
+    /** Quote subscription rejections / errors seen. */
+    quoteErrors: 0,
+  };
 
   constructor(private readonly deps: CapitalStreamDeps) {}
 
@@ -476,6 +597,12 @@ export class CapitalStreamClient {
     lastTickAt: number;
     updatesReceived: number;
     noPriceUpdates: number;
+    quoteFrames: number;
+    quoteMids: number;
+    quoteDeduped: number;
+    quoteUnpaired: number;
+    quoteErrors: number;
+    quoteState: string;
   } {
     return {
       ticks: this.stats.ticks,
@@ -483,6 +610,12 @@ export class CapitalStreamClient {
       lastTickAt: this.lastTickAt,
       updatesReceived: this.stats.frames,
       noPriceUpdates: this.stats.ignored,
+      quoteFrames: this.stats.quoteFrames,
+      quoteMids: this.stats.quoteMids,
+      quoteDeduped: this.stats.quoteDeduped,
+      quoteUnpaired: this.stats.quoteUnpaired,
+      quoteErrors: this.stats.quoteErrors,
+      quoteState: this.quoteState,
     };
   }
 
@@ -542,6 +675,32 @@ export class CapitalStreamClient {
       } catch {
         /* close handler drives reconnect */
       }
+      // LIVE DISPLAY subscription: the marketData quote stream multiplexes on
+      // THIS SAME authenticated socket (Capital allows ONE streaming session
+      // per account — a second socket is always rejected with
+      // "error.too-many.requests"). Same session credentials, sent right after
+      // the OHLC subscribe. Re-armed on EVERY (re)connect. A failure to SEND
+      // (or a server rejection / timeout, handled in the message path)
+      // disables ONLY the quote display path — never the OHLC stream.
+      this.quoteState = "pending";
+      try {
+        ws.send(
+          JSON.stringify({
+            destination: "marketData.subscribe",
+            correlationId: String(this.nextCorrelationId++),
+            cst: session.cst,
+            securityToken: session.xSecurityToken,
+            payload: { epics: [this.deps.symbol] },
+          }),
+        );
+        this.armQuoteProbe();
+      } catch {
+        this.quoteState = "rejected"; // display path off; OHLC continues
+        this.clearQuoteProbe();
+        console.warn(
+          `[STREAM:${this.deps.symbol}] quote subscribe send failed — continuing OHLC-only`,
+        );
+      }
     });
     ws.on("message", (data: unknown) => {
       this.stats.frames += 1;
@@ -565,6 +724,10 @@ export class CapitalStreamClient {
         this.emitBurst(parsed.tsMs, parsed.cumVolume, parsed.ticks);
       } else if (parsed.kind === "ohlc-side") {
         this.handleOhlcSide(parsed);
+      } else if (parsed.kind === "quote") {
+        this.handleQuote(parsed);
+      } else if (parsed.kind === "quote-rejected") {
+        this.handleQuoteRejected(parsed.code);
       } else if (parsed.kind === "pong") {
         // Server keepalive → answer with a VALID documented Capital ping
         // (correlationId + cst + securityToken). Any frame — including this
@@ -599,6 +762,7 @@ export class CapitalStreamClient {
       );
       this.clearIdle();
       this.clearHeartbeat(); // no orphaned keepalive survives a closed socket
+      this.clearQuoteProbe(); // no quote probe survives a closed socket
       if (this.ws === ws) this.ws = null;
       if (this.running && !this.stopped) {
         this.reportState("RECONNECTING");
@@ -682,6 +846,120 @@ export class CapitalStreamClient {
     const cumVolume = Math.max(bid.volume, ask.volume);
     this.ohlcBuffer.delete(side.tsMs);
     this.emitBurst(side.tsMs, cumVolume, ticks);
+  }
+
+  /**
+   * Quote-frame lifecycle: on the FIRST genuine quote frame the stream becomes
+   * "active" (probe cleared); quote data updates the latest-side buffer and —
+   * when a usable bid/ask pair exists and at least one side changed — emits a
+   * midpoint IngTick to the LIVE DISPLAY seam (deps.onQuote). NEVER routed to
+   * deps.onTick, so quote mids can never reach the persistence aggregator.
+   */
+  private handleQuote(parsed: Extract<ParsedFrame, { kind: "quote" }>): void {
+    this.stats.quoteFrames += 1;
+    if (this.quoteState === "pending") {
+      this.quoteState = "active";
+      this.clearQuoteProbe();
+      console.log(
+        `[STREAM:${this.deps.symbol}] quote stream ACTIVE (marketData) — live intrabar updates enabled`,
+      );
+    }
+    if (this.quoteState !== "active") return; // rejected → display path disabled
+
+    const now = Date.now();
+    if (parsed.bid !== undefined) {
+      this.lastBid = parsed.bid;
+      this.lastBidAt = now;
+    }
+    if (parsed.ask !== undefined) {
+      this.lastAsk = parsed.ask;
+      this.lastAskAt = now;
+    }
+
+    const bid = this.lastBid;
+    const ask = this.lastAsk;
+    // Side-specific frames: a midpoint needs BOTH sides, recent enough to be
+    // the same market state (a stale counterpart would fabricate a mid that
+    // was never quoted together).
+    const QUOTE_STALE_MS = 30_000;
+    if (bid === undefined || ask === undefined) {
+      this.stats.quoteUnpaired += 1;
+      return;
+    }
+    if (now - this.lastBidAt > QUOTE_STALE_MS || now - this.lastAskAt > QUOTE_STALE_MS) {
+      this.stats.quoteUnpaired += 1;
+      return;
+    }
+    // Duplicate suppression: neither side changed → no new price information.
+    if (bid === this.lastEmittedBid && ask === this.lastEmittedAsk) {
+      this.stats.quoteDeduped += 1;
+      return;
+    }
+
+    // Timestamp sanity: a usable market ts must not be in the future (→ could
+    // bucket a candle ahead of real time) nor ancient (→ stale bucket). Out of
+    // range → arrival time, which can never create a future/duplicate bucket.
+    const tsMs =
+      parsed.tsMs !== undefined && parsed.tsMs <= now && now - parsed.tsMs <= 600_000
+        ? parsed.tsMs
+        : now;
+
+    this.lastEmittedBid = bid;
+    this.lastEmittedAsk = ask;
+    this.stats.quoteMids += 1;
+    this.deps.onQuote?.({
+      tsMs,
+      price: capitalMid(bid, ask, this.deps.decimals),
+      volume: 0,
+      bid,
+      offer: ask,
+      arriveMs: now,
+      priceRaw: (bid + ask) / 2,
+      priceField: "MID",
+    });
+  }
+
+  /**
+   * Quote subscription rejected by the server (e.g. "error.too-many.requests")
+   * or the stream errored. FAILURE-SAFE: disable ONLY the quote display path —
+   * log once, keep the socket, keep the OHLC stream / heartbeat / reconnect /
+   * persistence exactly as they were. Never triggers a reconnect.
+   */
+  private handleQuoteRejected(code: string): void {
+    this.stats.quoteErrors += 1;
+    if (this.quoteState === "rejected") return;
+    this.quoteState = "rejected";
+    this.clearQuoteProbe();
+    console.warn(
+      `[STREAM:${this.deps.symbol}] quote stream rejected (code=${code}) — continuing OHLC-only`,
+    );
+  }
+
+  /**
+   * Probe: if no genuine quote frame arrives within quoteProbeTimeoutMs of the
+   * subscribe, the quote stream is declared unavailable for THIS connection —
+   * display path off, everything else untouched. Cleared by the first quote.
+   */
+  private armQuoteProbe(): void {
+    this.clearQuoteProbe();
+    const timeout = this.deps.quoteProbeTimeoutMs ?? 15_000;
+    if (timeout <= 0) return; // 0/negative disables (tests)
+    this.quoteProbeTimer = setTimeout(() => {
+      this.quoteProbeTimer = null;
+      if (this.quoteState === "pending") {
+        this.quoteState = "rejected";
+        console.warn(
+          `[STREAM:${this.deps.symbol}] quote stream unavailable (no frames within ${Math.round(timeout / 1000)}s) — continuing OHLC-only`,
+        );
+      }
+    }, timeout);
+  }
+
+  private clearQuoteProbe(): void {
+    if (this.quoteProbeTimer) {
+      clearTimeout(this.quoteProbeTimer);
+      this.quoteProbeTimer = null;
+    }
   }
 
   /** Scrub session tokens (CST / X-SECURITY-TOKEN) out of a diagnostic string. */
@@ -785,6 +1063,7 @@ export class CapitalStreamClient {
   private clearTimers(): void {
     this.clearIdle();
     this.clearHeartbeat();
+    this.clearQuoteProbe();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

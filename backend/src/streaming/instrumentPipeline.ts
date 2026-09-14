@@ -16,7 +16,7 @@
  * is NOT achieved by mixing; it is achieved by per-instance aggregation.
  */
 import { CandleAggregatorSet } from "./aggregator.js";
-import { TIMEFRAME_BUCKET_SEC, isPersistedTimeframe } from "./timeframes.js";
+import { TIMEFRAME_BUCKET_SEC, bucketOf, isPersistedTimeframe } from "./timeframes.js";
 import type { ClosedCandle, IngTick, RealtimeCandle } from "./types.js";
 
 /** All per-instrument state that must NEVER be shared across EPICs. */
@@ -36,6 +36,14 @@ export interface InstrumentUnit {
   lastBucketSec: Map<string, number>;
   /** One-shot first-anchor diagnostic per timeframe. */
   loggedFirstAnchor: Set<string>;
+  /**
+   * Quote-driven LIVE-DISPLAY forming candle per timeframe — the smooth
+   * intrabar overlay built from Capital marketData quote mids. STRICTLY
+   * display state: NEVER persisted, never read by persistClosedCandle, and
+   * re-synced to the authoritative aggregator candle on every OHLC tick
+   * (syncDisplayFromAggregator — authoritative OHLC truth always wins).
+   */
+  liveDisplay: Map<string, RealtimeCandle>;
 }
 
 export function createInstrumentUnit(epic: string, label: string, decimals: number): InstrumentUnit {
@@ -51,6 +59,7 @@ export function createInstrumentUnit(epic: string, label: string, decimals: numb
     lastTickAt: 0,
     lastBucketSec: new Map(),
     loggedFirstAnchor: new Set(),
+    liveDisplay: new Map(),
   };
 }
 
@@ -107,6 +116,101 @@ export function processInstrumentTick(unit: InstrumentUnit, tick: IngTick): Buck
     results.push({ timeframe, bucketSec, forming, closed, firstAnchor });
   }
   return results;
+}
+
+/** One timeframe's post-QUOTE result (live display candle, undefined = no change). */
+export interface QuoteResult {
+  timeframe: string;
+  bucketSec: number;
+  /**
+   * The quote-updated LIVE DISPLAY candle for this timeframe. Undefined when
+   * the quote produced no display change (stale bucket, duplicate mid, no new
+   * extreme) — no WS frame is relayed for it.
+   */
+  display: RealtimeCandle | undefined;
+}
+
+/**
+ * Feed one QUOTE-derived mid (Capital marketData stream) into ONE instrument
+ * unit's LIVE DISPLAY overlay. This is the smooth intrabar path:
+ *
+ *   quote mid → same-bucket merge (open immutable, high=max, low=min,
+ *               close=latest genuine mid) → WS relay → series.update()
+ *
+ * ISOLATION CONTRACTS (deliberate, tested):
+ *   - NEVER touches `unit.aggregators` — the authoritative OHLC state and the
+ *     ONLY persistence source stays exclusively OHLC-frame-driven;
+ *   - never creates a bucket at/before the authoritative forming candle
+ *     (quotes can neither backdate, duplicate, nor pre-open a candle);
+ *   - never creates a bucket newer than the quote's own (sanitized) timestamp
+ *     allows — future timestamps are clamped upstream (capitalStream);
+ *   - a quote whose mid and extremes change nothing relays nothing
+ *     (duplicate/unchanged quotes never produce a redundant frame).
+ */
+export function processInstrumentQuote(unit: InstrumentUnit, quote: IngTick): QuoteResult[] {
+  const results: QuoteResult[] = [];
+  for (const [timeframe, bucketSec] of Object.entries(TIMEFRAME_BUCKET_SEC)) {
+    const bucket = bucketOf(quote.tsMs, bucketSec);
+    const authoritativeTime = unit.aggregators.getCandleFor(bucketSec)?.time ?? 0;
+    if (bucket <= authoritativeTime) {
+      // Stale or authoritative-equal bucket: the quote carries no display
+      // truth the authoritative candle doesn't already own. Never backdate.
+      results.push({ timeframe, bucketSec, display: undefined });
+      continue;
+    }
+    const prev = unit.liveDisplay.get(timeframe);
+    if (prev && prev.time > bucket) {
+      // Display already on a NEWER bucket — this quote is out of order.
+      results.push({ timeframe, bucketSec, display: undefined });
+      continue;
+    }
+    if (prev && prev.time === bucket) {
+      const high = Math.max(prev.high, quote.price);
+      const low = Math.min(prev.low, quote.price);
+      if (prev.close === quote.price && prev.high === high && prev.low === low) {
+        results.push({ timeframe, bucketSec, display: undefined });
+        continue;
+      }
+      unit.liveDisplay.set(timeframe, {
+        time: prev.time,
+        open: prev.open, // immutable — the bucket's first genuine quote mid
+        high,
+        low,
+        close: quote.price,
+      });
+    } else {
+      // First quote of a NEW bucket: the live display leads the authoritative
+      // candle (whose pair arrives at the bucket's END) until truth replaces it.
+      unit.liveDisplay.set(timeframe, {
+        time: bucket,
+        open: quote.price,
+        high: quote.price,
+        low: quote.price,
+        close: quote.price,
+      });
+    }
+    results.push({ timeframe, bucketSec, display: { ...(unit.liveDisplay.get(timeframe) as RealtimeCandle) } });
+  }
+  return results;
+}
+
+/**
+ * OHLC-TRUTH SYNC — run after EVERY authoritative OHLC tick. Wherever the
+ * authoritative aggregator holds a forming candle for a timeframe, the quote
+ * display overlay for that bucket is REPLACED by it (authoritative OHLC always
+ * wins over any temporary quote-derived display state — including its open).
+ * An overlay on a NEWER bucket (quotes already forming the next minute while
+ * Capital's OHLC delivery lags one bucket) is deliberately left alone.
+ */
+export function syncDisplayFromAggregator(unit: InstrumentUnit): void {
+  for (const [timeframe, bucketSec] of Object.entries(TIMEFRAME_BUCKET_SEC)) {
+    const authoritative = unit.aggregators.getCandleFor(bucketSec);
+    if (!authoritative) continue;
+    const display = unit.liveDisplay.get(timeframe);
+    if (!display || display.time <= authoritative.time) {
+      unit.liveDisplay.set(timeframe, { ...authoritative });
+    }
+  }
 }
 
 /** Structural WS-client shape (matches RealtimeService.WsClient). */
