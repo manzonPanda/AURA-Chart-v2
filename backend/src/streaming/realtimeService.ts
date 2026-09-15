@@ -306,15 +306,53 @@ export class RealtimeService {
     // merge it into the last historical bucket even before the next tick).
     const seedUnit = this.units.get(epic)!;
     const candle = seedUnit.aggregators.getCandleFor(bucketSec);
-    if (candle) this.send(client, { type: "candle", epic, timeframe: resolution, ...candle });
+    if (candle) {
+      this.send(client, {
+        type: "candle",
+        epic,
+        timeframe: resolution,
+        source: "ohlc",
+        phase: "forming",
+        ...candle,
+      });
+    }
+    // The latest authoritative CLOSED candle for this timeframe is replayed to
+    // the freshly-connected client as a `phase:"closed"` frame. The client may
+    // already hold that bucket from REST history (dedup by bucket ts) or not at
+    // all (Capital OHLC delivery is up to ~1 bucket late and the DB write may
+    // still be in flight) — either way the bucket ends up IMMUTABLE.
+    const closedForSeed = seedUnit.aggregators.getClosedCandleFor(bucketSec);
+    if (closedForSeed) {
+      this.send(client, {
+        type: "candle",
+        epic,
+        timeframe: resolution,
+        source: "ohlc",
+        phase: "closed",
+        time: closedForSeed.time,
+        open: closedForSeed.open,
+        high: closedForSeed.high,
+        low: closedForSeed.low,
+        close: closedForSeed.close,
+        ...(Number.isFinite(closedForSeed.volume) ? { volume: closedForSeed.volume } : {}),
+      });
+    }
     // Quote-driven LIVE DISPLAY overlay — when it is already on a NEWER bucket
     // than the authoritative forming candle (quotes form the live minute while
     // Capital's OHLC delivery lags one bucket), send it too so the client
-    // continues from the live market instead of a stale bucket. Same frame
-    // shape/handling as every other candle frame (merge / rollover per ts).
+    // continues from the live market instead of a stale bucket. Tagged
+    // quote/forming: the LOWEST authority, so it can never overwrite a closed
+    // OHLC bucket on the client.
     const display = seedUnit.liveDisplay.get(resolution);
     if (display && (!candle || display.time > candle.time)) {
-      this.send(client, { type: "candle", epic, timeframe: resolution, ...display });
+      this.send(client, {
+        type: "candle",
+        epic,
+        timeframe: resolution,
+        source: "quote",
+        phase: "forming",
+        ...display,
+      });
     }
         // Auxiliary seed frames (e.g. the EMA-alert snapshot) — a seeder must
     // never break the connect path (ClientSeeders already isolates throwers).
@@ -515,16 +553,25 @@ export class RealtimeService {
             }
           }
         }
+        // AUTHORITATIVE CLOSED CANDLE → browsers. The exact OHLC that was just
+        // persisted is relayed as an explicit CLOSED frame (`source:"ohlc",
+        // phase:"closed"`); the frontend commits it verbatim and marks that
+        // bucket IMMUTABLE, so no later quote/forming frame can mutate it. The
+        // frame carries ONLY the candle fields — same shape as every other
+        // candle frame (additive `source`/`phase` tags, no protocol change).
+        this.relayClosedCandle(epic, timeframe, bucketSec, closed);
         console.log(
           `[${instrumentTag} ${tag}] ROLLOVER oldBucket=${sec(closed.time)} newBucket=${sec(candle.time)}`,
         );
       }
 
       // Per-client fan-out: only clients subscribed to THIS instrument AND
-      // timeframe receive its forming candle (frames carry `epic`).
+      // timeframe receive its forming candle (frames carry `epic`). The frame
+      // is tagged OHLC + FORMING: it is the authoritative FORMING candle, which
+      // ranks BELOW a closed OHLC frame but ABOVE quote display.
       for (const client of this.clients) {
         if (!clientWantsCandle(client, epic, bucketSec)) continue;
-        this.send(client, { type: "candle", epic, timeframe, ...candle });
+        this.send(client, { type: "candle", epic, timeframe, source: "ohlc", phase: "forming", ...candle });
       }
     }
 
@@ -555,8 +602,54 @@ export class RealtimeService {
       if (!result.display) continue;
       for (const client of this.clients) {
         if (!clientWantsCandle(client, epic, result.bucketSec)) continue;
-        this.send(client, { type: "candle", epic, timeframe: result.timeframe, ...result.display });
+        this.send(client, {
+          type: "candle",
+          epic,
+          timeframe: result.timeframe,
+          source: "quote",
+          phase: "forming",
+          ...result.display,
+        });
       }
+    }
+  }
+
+  /**
+   * Relay one COMPLETED candle to every subscribed browser client as an
+   * explicit `source:"ohlc" | phase:"closed"` frame carrying the EXACT
+   * authoritative OHLC (the same object that is persisted).
+   *
+   * Frames are per-client (instrument + timeframe filtered, exactly like the
+   * forming fan-out), so GOLD 1M/3M and every other timeframe/instrument the
+   * architecture already streams get their closed candle through ONE generic
+   * path. Nothing is derived, rounded or recomputed here — "closed" means the
+   * server's own values.
+   *
+   * `phase:"closed"` is what lets the frontend accept a 3M candle that arrives
+   * one bucket late (the quote display may already be on the NEXT bucket) and
+   * mark the bucket immutable afterwards.
+   */
+  private relayClosedCandle(
+    epic: string,
+    timeframe: string,
+    bucketSec: number,
+    closed: ClosedCandle,
+  ): void {
+    for (const client of this.clients) {
+      if (!clientWantsCandle(client, epic, bucketSec)) continue;
+      this.send(client, {
+        type: "candle",
+        epic,
+        timeframe,
+        source: "ohlc",
+        phase: "closed",
+        time: closed.time,
+        open: closed.open,
+        high: closed.high,
+        low: closed.low,
+        close: closed.close,
+        ...(Number.isFinite(closed.volume) ? { volume: closed.volume } : {}),
+      });
     }
   }
 
@@ -659,6 +752,15 @@ export class RealtimeService {
       ticks: unit.ticksReceived,
       price: unit.lastPrice,
       lastTickAt: unit.lastTickAt,
+      // SERVER-CLOCK CALIBRATION (additive): the countdown pill renders
+      // `closesAt − now`, and bucket boundaries are SERVER-anchored. A browser
+      // clock that is off by seconds (or a machine sleeping/resuming) would
+      // visibly mis-count the last seconds of a candle. The client keeps
+      // `clockOffsetMs = serverNowMs − Date.now()` from every status frame and
+      // counts down against `Date.now() + clockOffsetMs`, so the displayed
+      // remaining time tracks the server's own bucket clock. Bucket CREATION is
+      // untouched — nothing here is used to form a candle.
+      serverNowMs: Date.now(),
     });
   }
 

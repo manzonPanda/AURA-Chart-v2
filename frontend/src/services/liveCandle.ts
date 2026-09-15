@@ -55,6 +55,12 @@ export interface LiveBar {
   low: number;
   close: number;
   volume?: number;
+  /**
+   * TRUE when this bar is an AUTHORITATIVE CLOSED candle (the exact persisted
+   * backend OHLC). A closed bar is IMMUTABLE: no later quote frame and no
+   * stale/forming frame may ever merge into or replace it.
+   */
+  closed?: true;
 }
 
 /** Structural subset of the backend candle frame this module consumes. */
@@ -66,6 +72,44 @@ export interface LiveCandleFrame {
   low: number;
   close: number;
   volume?: number;
+  /** Explicit authority class of the frame (absent on older backends = "ohlc"). */
+  source?: "ohlc" | "quote";
+  /** Explicit lifecycle phase (absent on older backends = "forming"). */
+  phase?: "forming" | "closed";
+}
+
+/**
+ * EXPLICIT AUTHORITY LADDER — never inferred from arrival order:
+ *
+ *   closed-ohlc  →  the persisted backend candle for a bucket that CLOSED;
+ *   forming-ohlc →  the backend aggregator's authoritative FORMING snapshot;
+ *   forming-quote → the Capital marketData mid-derived display overlay.
+ *
+ * A frame of a LOWER rank can never override a bar of a higher rank for the
+ * SAME bucket (except that a quote may keep extending a forming-ohlc bar's
+ * high/low/close — it is display continuity, not authority over its open).
+ */
+export type FrameAuthority = "closed-ohlc" | "forming-ohlc" | "forming-quote";
+
+/** Rank of a frame's authority class (higher = more authoritative). */
+export function authorityRank(authority: FrameAuthority): number {
+  switch (authority) {
+    case "closed-ohlc":
+      return 2;
+    case "forming-ohlc":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+/** Classify a frame's authority from its explicit source/phase tags. */
+export function frameAuthority(frame: {
+  source?: "ohlc" | "quote";
+  phase?: "forming" | "closed";
+}): FrameAuthority {
+  if (frame.source === "quote") return "forming-quote";
+  return frame.phase === "closed" ? "closed-ohlc" : "forming-ohlc";
 }
 
 /** Floor an epoch-ms timestamp to the start of its timeframe bucket (epoch ms). */

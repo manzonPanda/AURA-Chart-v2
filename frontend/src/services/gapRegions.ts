@@ -69,6 +69,72 @@ export function mergeGapIntervals(
 }
 
 /**
+ * Floor an epoch-ms timestamp to its timeframe bucket-start (epoch ms).
+ * Used to bucket-match a candle against a gap interval's start.
+ */
+function floorToBucketMs(tsMs: number, bucketSec: number): number {
+  const bucketMs = bucketSec > 0 ? bucketSec * 1000 : 1000;
+  return Math.floor(tsMs / bucketMs) * bucketMs;
+}
+
+/**
+ * Revalidate gap state against the CURRENT authoritative candle dataset.
+ *
+ * The REST loader can retain stale gaps after a missing candle is subsequently
+ * repaired (backfill/reconciliation): a gap that the previous page reported may
+ * now be filled by candles loaded from a newer page. This function rebuilds the
+ * gap list against the merged candles so repaired buckets disappear.
+ *
+ * Rules implemented (forensic §8):
+ *  - Rule A/E: a bucket that has an authoritative candle MUST NOT be a DATA GAP.
+ *  - Rule B: a gap is only meaningful if it is STRICTLY OLDER than the newest
+ *    authoritative closed bucket (the current forming bucket and any unsettled
+ *    recent buckets are never shaded).
+ *  - Rule C: a backfill that inserts a previously-missing candle drops its gap
+ *    (handled by the caller re-running this on every history update).
+ *  - Rule D: this only inspects real candles — temporary quote/live state never
+ *    generates a gap, so passing a stale live overlay cannot fabricate one.
+ *
+ * No candles are fabricated: a band is suppressed only, never created here.
+ */
+export function revalidateGaps(
+  gaps: readonly CandleGap[],
+  candles: readonly { ts: number }[],
+  bucketSec: number,
+): CandleGap[] {
+  if (gaps.length === 0) return [];
+  if (!Number.isFinite(bucketSec) || bucketSec <= 0) return [];
+
+  // Rule A/E buckets: every authoritative candle's bucket-start.
+  const presentBuckets = new Set<number>();
+  let latestTs = 0;
+  for (const c of candles) {
+    if (!Number.isFinite(c.ts) || c.ts <= 0) continue;
+    presentBuckets.add(floorToBucketMs(c.ts, bucketSec));
+    if (c.ts > latestTs) latestTs = c.ts;
+  }
+  if (presentBuckets.size === 0) return [];
+
+  // Rule B: keep a gap only if it is strictly older than the newest authoritative
+  // closed bucket (its start must precede the latest candle's bucket). Gaps at
+  // the frontier / forming bucket are suppressed.
+  const frontierBucket = floorToBucketMs(latestTs, bucketSec);
+
+  const kept: CandleGap[] = [];
+  for (const g of gaps) {
+    if (!Number.isFinite(g.startTime) || !Number.isFinite(g.endTime) || g.endTime <= g.startTime) {
+      continue; // invalid interval — drop (mergeGapIntervals already filters this too)
+    }
+    const gapBucket = floorToBucketMs(g.startTime, bucketSec);
+    if (presentBuckets.has(gapBucket)) continue; // Rule A: bucket now has a candle
+    if (gapBucket >= frontierBucket) continue; // Rule B: at/after the closed frontier
+    kept.push(g);
+  }
+  // Stable, ascending by startTime (matches mergeGapLists sort direction).
+  return kept.sort((a, b) => a.startTime - b.startTime);
+}
+
+/**
  * Resolve `CandleGap` records against the loaded candles into renderable
  * bands. A band needs real candles on BOTH sides to anchor between — gaps
  * touching the loaded window's edges predate collection (older pages) or
@@ -100,6 +166,13 @@ export function resolveGapBands(
   const merged = mergeGapIntervals(gaps);
   if (merged.length === 0) return [];
   const times = candles.map((c) => c.ts);
+  // Rule E (defensive): never band a bucket that is present in the authoritative
+  // candle set — a repaired/loaded candle must erase its gap even if the caller
+  // did not revalidate beforehand. Build a bucket→present set once.
+  const presentBuckets = new Set<number>();
+  for (const ts of times) {
+    if (Number.isFinite(ts)) presentBuckets.add(Math.floor(ts / bucketMs) * bucketMs);
+  }
 
   // Rightmost index with ts < t (-1 when none).
   const lastBefore = (t: number): number => {
@@ -136,6 +209,9 @@ export function resolveGapBands(
 
   const bands: GapBand[] = [];
   for (const g of merged) {
+    // Rule E: a gap interval whose bucket now carries an authoritative candle
+    // is not a gap — suppress it instead of rendering a misleading band.
+    if (presentBuckets.has(Math.floor(g.startTime / bucketMs) * bucketMs)) continue;
     const iL = lastBefore(g.startTime);
     const iR = firstAtOrAfter(g.endTime);
     if (iL < 0 || iR < 0) continue;

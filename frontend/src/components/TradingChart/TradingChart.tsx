@@ -35,7 +35,7 @@ import {
   resolutionToBucketSec,
 } from "../../services/realtime";
 import { diag, iso, logUpdateBar, maybeLogChartBlock } from "../../services/diagnostics";
-import { candleCloseCountdown, planLiveUpdate, type LiveBar } from "../../services/liveCandle";
+import { candleCloseCountdown, planLiveUpdate, type LiveBar, frameAuthority, authorityRank } from "../../services/liveCandle";
 import { defaultEmaSettings, type EmaSettings } from "../../config/emaSettings";
 import type { SmaSettings } from "../../config/smaSettings";
 import type { ImportedPineIndicator, PineRunStatus } from "../../services/pineImport";
@@ -156,12 +156,15 @@ function CountdownMarker({
   liveCandle,
   bucketSec,
   replayActive,
+  clockOffsetMs = 0,
 }: {
   liveCandle: RealtimeCandleMsg | null;
   /** Selected timeframe bucket size in seconds (60 = 1m, 180 = 3m). */
   bucketSec: number;
   /** Replay owns the chart while a session is active — no countdown. */
   replayActive: boolean;
+  /** SERVER-CLOCK CALIBRATION: `serverNowMs − Date.now()` from status frames. */
+  clockOffsetMs?: number;
 }): null {
   const api = useChartApi();
   const primRef = useRef<CandleCountdownPrimitive | null>(null);
@@ -199,8 +202,14 @@ function CountdownMarker({
 
   // Build the pill ONLY from a forming live candle; its tsMs is the aligned
   // bucket start so the anchor lands exactly on the candle's x slot.
+  // SERVER-CLOCK CALIBRATION (Issue 9): bucket boundaries are server-anchored,
+  // so the countdown counts against `Date.now() + clockOffsetMs` rather than
+  // the raw local clock — a drifting/sleeping browser clock cannot steal the
+  // last seconds of a candle. The ticker only re-renders; the value is always
+  // derived from the bucket boundary below.
+  const effectiveNow = now + (clockOffsetMs ?? 0);
   const cd = liveCandle && Number.isFinite(liveCandle.time) && !replayActive
-    ? candleCloseCountdown(liveCandle, bucketSec, now)
+    ? candleCloseCountdown(liveCandle, bucketSec, effectiveNow)
     : null;
   const marker: CountdownCandle | null =
     liveCandle && cd && Number.isFinite(liveCandle.close)
@@ -247,6 +256,15 @@ interface Props {
   resolution?: string;
   /** Latest forming candle pushed by the backend (time = bucket start, epoch s). */
   liveCandle?: RealtimeCandleMsg | null;
+  /**
+   * Authoritative CLOSED candles received over the WS stream, ascending by
+   * bucket, deduped by bucket time (a re-delivered closed bucket REPLACES its
+   * record — the authoritative value always wins). Each is `source:"ohlc" |
+   * phase:"closed"` and is committed verbatim; its bucket becomes IMMUTABLE so
+   * no later quote/forming frame can mutate it. MAY arrive one bucket behind
+   * the quote display (the 3M case) — late closed candles are still accepted.
+   */
+  closedCandles?: readonly RealtimeCandleMsg[];
   streamStatus?: RealtimeStatus;
   /** EMA overlay configuration (localStorage-persisted in App). */
   emaSettings?: EmaSettings;
@@ -287,6 +305,8 @@ interface Props {
   candleSettings?: CandleSettings;
   /** Opens the Chart Settings modal (App-owned state) from the context menu. */
   onOpenSettings?: () => void;
+  /** SERVER-CLOCK CALIBRATION: `serverNowMs − Date.now()` from the status frames. */
+  clockOffsetMs?: number;
   /** Instrument scope key (used to scope a replay session). */
   replaySymbol?: string;
   /**
@@ -431,9 +451,19 @@ function LiveBarBridge({
   liveCandle,
   bucketSec,
   replayActive = false,
+  closedCandles = [],
+  scopeKey = "",
 }: {
   liveCandle: RealtimeCandleMsg | null;
   bucketSec: number;
+  /** Authoritative CLOSED candles from the WS ledger (committed verbatim). */
+  closedCandles: readonly RealtimeCandleMsg[];
+  /**
+   * STREAM SCOPE (instrument | timeframe) — the same boundary the replay guard
+   * and the chart overlays use. The authority refs below belong to ONE stream;
+   * a scope change RESETS them (see the scope guard in the effect body).
+   */
+  scopeKey?: string;
   /** When Replay Mode is active, the live stream continues updating its internal
    *  truth but DOES NOT paint — replay owns the chart during the session. */
   replayActive?: boolean;
@@ -441,10 +471,34 @@ function LiveBarBridge({
   const api = useChartApi();
   const liveRef = useRef(liveCandle);
   liveRef.current = liveCandle;
+  /** Mirror of the authoritative closed-candle ledger (latest on every render). */
+  const closedRef = useRef(closedCandles);
+  closedRef.current = closedCandles;
   const replayActiveRef = useRef(replayActive);
   replayActiveRef.current = replayActive;
   /** Authoritative merged OHLC of the forming bucket (see liveCandle.ts). */
   const truthRef = useRef<LiveBar | null>(null);
+  /**
+   * IMMUTABILITY FRONTIER: the bucket-ts (epoch ms, aligned) of the newest
+   * authoritative CLOSED bucket committed to the chart. A later quote or stale
+   * forming frame whose bucket is ≤ this value is DROPPED — a closed bucket
+   * never mutates. This is the frontend mirror of `unit.lastClosedSec` in
+   * instrumentPipeline.ts and enforces §4/#4.
+   */
+  const lastClosedTsRef = useRef<number>(-1);
+  /**
+   * Buckets for which an authoritative closed frame has ALREADY been committed
+   * (ts → close value). A re-delivered closed frame REPLACES its record if the
+   * close differs (server re-statement wins) and is skipped only when the
+   * value is unchanged — so a reconnect re-seed can repair a bucket without
+   * duplicate repaints.
+   */
+  const closedAppliedRef = useRef<Map<number, number>>(new Map());
+  /**
+   * Last stream scope (instrument | timeframe) the authority refs above belong
+   * to. A scope change RESETS them — see the scope guard in the effect body.
+   */
+  const scopeRef = useRef<string>("");
 
   // Animation state — kept in a ref (never re-renders). `ts`/`open` are fixed
   // for the whole bucket; `close` is the currently-displayed body tip that we
@@ -514,11 +568,95 @@ function LiveBarBridge({
       diag.updateBarCalls += 1;
     };
 
+    /**
+     * Commit ONE authoritative CLOSED candle (`source:"ohlc", phase:"closed"`)
+     * to the chart VERBATIM — the persisted Capital OHLC is the bucket's final
+     * word; nothing derived from quote mids may survive it.
+     *
+     * Late acceptance (§7): a closed frame for a bucket OLDER than the current
+     * forming bucket (the 3M authority race — Capital OHLC delivery lags ~1
+     * bucket) is still accepted here; "stale" only ever applies to
+     * forming/quote frames, never to closed-ohlc frames.
+     */
+    const commitClosedBar = (bar: LiveBar): void => {
+      if (replayActiveRef.current) return; // replay owns the chart
+      const bars = controller.getBars();
+      const last = bars.length > 0 ? bars[bars.length - 1] : null;
+      if (!last || bar.ts >= last.ts) {
+        // Last bar (or nothing painted yet): in-place replace / append.
+        if (bars.length === 0) {
+          // LIGHTWEIGHT CHARTS FIX: series.update() drops the FIRST bar of an
+          // empty series — seed with a one-row setData (same as the rollover
+          // path below).
+          controller.setData([asBar(bar)]);
+          diag.dataSeeded += 1;
+        } else {
+          paintBar(bar);
+        }
+      } else {
+        // The bucket already sits BEHIND a newer forming bar — `updateBar`
+        // cannot reach past the last bar, so rebuild the series with the
+        // authoritative OHLC substituted in. Rare (one closed frame per
+        // bucket); the bus-"data" viewport guard keeps the user's position.
+        const idx = bars.findIndex((b) => b.ts === bar.ts);
+        if (idx < 0) return; // bucket never painted — history setData will carry it
+        const rebuilt = bars.map((b, i) => (i === idx ? asBar(bar) : b));
+        controller.setData(rebuilt);
+      }
+      // The closed OHLC is now the truth for its bucket; if the forming truth
+      // was still on that bucket it BECOMES the closed bar (its bucket is done).
+      if (!truthRef.current || truthRef.current.ts <= bar.ts) {
+        truthRef.current = { ...bar, closed: true };
+      }
+      lastClosedTsRef.current = Math.max(lastClosedTsRef.current, bar.ts);
+      closedAppliedRef.current.set(bar.ts, bar.close);
+    };
+
+    /**
+     * Authority pass: commit every CLOSED ledger entry that has not been
+     * applied yet (a re-delivered closed bucket is applied only when its close
+     * actually changed — the authoritative value always wins).
+     */
+    const applyClosedCandles = (candles: readonly RealtimeCandleMsg[]): void => {
+      for (const c of candles) {
+        if (!c || !Number.isFinite(c.time) || !Number.isFinite(c.open) || !Number.isFinite(c.close)) continue;
+        const ts = alignToBucketStart(c.time * 1000, bucketSec);
+        const applied = closedAppliedRef.current.get(ts);
+        if (applied === c.close) continue; // already committed with this exact value
+        commitClosedBar({
+          ts,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+          ...(Number.isFinite(c.volume) ? { volume: c.volume } : {}),
+        });
+        console.info(
+          `[CHART] CLOSED committed (authoritative) bucket=${iso(ts)} O=${c.open} H=${c.high} L=${c.low} C=${c.close}`,
+        );
+      }
+    };
+
     const applyFrame = (msg: RealtimeCandleMsg | null): void => {
       if (!msg) return;
       // Replay Mode owns the chart — the live stream keeps merging into
       // `truthRef` but must NEVER paint into the replay timeline.
       if (replayActiveRef.current) return;
+      // EXPLICIT AUTHORITY LADDER (liveCandle.ts): closed-ohlc > forming-ohlc >
+      // forming-quote. A forming/quote frame for a bucket that has ALREADY
+      // received its authoritative closed candle is DROPPED — a closed bucket
+      // is immutable and no quote (e.g. a Capital marketData mid arriving after
+      // the OHLC close) may ever re-open or mutate it.
+      const authority = frameAuthority(msg);
+      const frameBucketTs = alignToBucketStart(msg.time * 1000, bucketSec);
+      if (authorityRank(authority) < authorityRank("closed-ohlc") && frameBucketTs <= lastClosedTsRef.current) {
+        diag.updateBarSkipped += 1;
+        console.info(
+          `[CHART] frame DROPPED (bucket immutable — authoritative closed candle present): ` +
+            `${authority} ${iso(frameBucketTs)} C=${msg.close}`,
+        );
+        return;
+      }
       // rAF is PAUSED while the tab is hidden — never plan an animation there.
       const hidden = document.visibilityState === "hidden";
       const plan = planLiveUpdate(truthRef.current, msg, bucketSec, { hidden });
@@ -596,21 +734,44 @@ function LiveBarBridge({
       }
     };
 
+    // ── STREAM SCOPE GUARD ──────────────────────────────────────────────────
+    // The immutability frontier, the closed ledger and the forming truth each
+    // belong to ONE stream (instrument | timeframe). Epoch-bucket grids OVERLAP
+    // across streams, so a leftover frontier would silently DROP the new
+    // stream's frames — e.g. a 1m frontier at 10:07 would discard a 3m forming
+    // bucket starting 10:06 for up to a full 3m (exactly the freeze class this
+    // change removes). Reset the authority state the moment the scope changes;
+    // authority must never leak from one stream into another.
+    const scope = scopeKey ?? "";
+    if (scopeRef.current !== scope) {
+      scopeRef.current = scope;
+      truthRef.current = null;
+      lastClosedTsRef.current = -1;
+      closedAppliedRef.current.clear();
+    }
+
+    // Authority pass FIRST: committed closed candles rank above any forming
+    // frame — applyFrame below refuses to touch buckets ≤ lastClosedTsRef.
+    applyClosedCandles(closedCandles);
     applyFrame(liveCandle);
     // Re-apply the newest live candle AFTER every full-history setData
     // (initial load, timeframe switch, Refresh). Child effects run before the
     // parent's setData effect, so this must go through the bus "data" event,
     // which CandleKit emits at the end of setData. During Replay the "data"
     // event is for the REPLAY slices — the live candle must not leak in.
+    // The closed-ledger pass re-runs here too (§5): every setData/history
+    // replacement REAPPLIES closed-live candles so a closed bucket that exists
+    // only in the live layer can never be wiped by a REST-frozen setData.
     const offData = controller.bus.on("data", () => {
       if (replayActiveRef.current) return;
+      applyClosedCandles(closedRef.current);
       applyFrame(liveRef.current);
     });
 
     // Tab-focus reconciliation: repaint the bucket truth immediately when the
     // tab becomes visible again so a close frozen mid-glide while hidden can
     // never survive past the focus event.
-        const onVisibility = (): void => {
+    const onVisibility = (): void => {
       if (document.visibilityState !== "visible") return;
       // Replay owns the chart while active — repainting the live forming
       // candle here would corrupt the replay timeline with present-day truth.
@@ -631,7 +792,7 @@ function LiveBarBridge({
       document.removeEventListener("visibilitychange", onVisibility);
       cancelGlide();
     };
-  }, [liveCandle, bucketSec, api]);
+  }, [liveCandle, closedCandles, bucketSec, scopeKey, api]);
 
   return null;
 }
@@ -776,6 +937,8 @@ export function TradingChart({
   gaps,
   resolution = "",
   liveCandle = null,
+  closedCandles = [],
+  clockOffsetMs = 0,
   streamStatus = "DISCONNECTED",
   emaSettings = defaultEmaSettings(),
   smaSettings,
@@ -805,8 +968,8 @@ export function TradingChart({
   // at least one bar so Lightweight Charts can render / accept series.update().
   // We accumulate live candles in a state array and merge into each bucket.
   // NEVER call setData per tick — only on NEW buckets or history sync.
-  // Intrabucket ticks are handled by LiveBarBridge's incremental updateBar.
-      const [liveCandles, setLiveCandles] = useState<Bar[]>([]);
+    // Intrabucket ticks are handled by LiveBarBridge's incremental updateBar.
+  const [liveCandles, setLiveCandles] = useState<Bar[]>([]);
 
   // ── Closed-live-bucket ledger ────────────────────────────────────────────────
   // App's `candles` history is frozen at load — live bucket rollovers are only
@@ -931,15 +1094,76 @@ export function TradingChart({
     prevFormingBarRef.current = liveCandle;
   }, [liveCandle, candles.length, bucketSec]);
 
+  // ── Authoritative closed-live LEDGER (authoritative wins) ────────────────────
+  // Merges the two closed-bucket sources into ONE ascending, deduped ledger:
+  //   1. `closedCandles` — the WS `source:"ohlc" phase:"closed"` frames (the
+  //      EXACT persisted Capital OHLC). AUTHORITATIVE: it replaces any
+  //      provisional entry for the same bucket.
+  //   2. `closedLiveBars` — provisional rollover captures (the last forming
+  //      frame's OHLC at the boundary). Kept only for buckets the authoritative
+  //      frame has not reached yet (Capital OHLC delivery lags the quote stream
+  //      by up to ~1 bucket), so the series never has a hole in the meantime.
+  // Do NOT derive final values from quote mids: once the authoritative frame
+  // for a bucket exists, its OHLC is final and immutable.
+  const closedLiveLedger = useMemo<Bar[]>(() => {
+    const authBars = closedCandles
+      .filter((c) => Number.isFinite(c.time) && Number.isFinite(c.close))
+      .map((c) => {
+        const ts = alignToBucketStart(c.time * 1000, bucketSec);
+        return asBar({
+          ts,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+          ...(Number.isFinite(c.volume) ? { volume: c.volume } : {}),
+        });
+      });
+    const authTs = new Set(authBars.map((b) => b.ts));
+    const provisional = closedLiveBars.filter((b) => !authTs.has(b.ts));
+    return [...authBars, ...provisional].sort((a, b) => a.ts - b.ts);
+  }, [closedCandles, closedLiveBars, bucketSec]);
 
-
+  // The forming candle passed to merges must NEVER touch a closed bucket:
+  // drop it when its bucket is ≤ the newest authoritative closed bucket (§6).
+  const formingForMerges = useMemo<RealtimeCandleMsg | null>(() => {
+    if (!liveCandle || !Number.isFinite(liveCandle.time)) return null;
+    const bucketTs = alignToBucketStart(liveCandle.time * 1000, bucketSec);
+    const newestClosed = closedLiveLedger.length > 0 ? closedLiveLedger[closedLiveLedger.length - 1].ts : -1;
+    return bucketTs > newestClosed ? liveCandle : null;
+  }, [liveCandle, closedLiveLedger, bucketSec]);
 
   const data = useMemo<Bar[]>(() => {
     if (candles.length > 0) {
-      return candles.map((c) => asBar({ ...c, ts: alignToBucketStart(c.ts, bucketSec) }));
+      // §5: REST history + closed-live ledger + forming candle. Every
+      // setData/history replacement REAPPLIES the ledger, so a bucket that has
+      // already closed live can never vanish while PostgreSQL is still waiting
+      // for its (up to ~1 bucket late) Capital OHLC delivery — no refresh needed.
+      //
+      // Precedence/dedup inside the merge:
+      //   - a bucket present in BOTH history and ledger carries the SAME
+      //     persisted Capital OHLC (the relayed closed frame IS the persisted
+      //     object), so dedup order is immaterial; the ledger contributes the
+      //     buckets the frozen REST page does not have yet;
+      //   - the ledger itself already resolves authoritative-closed over
+      //     provisional rollover capture, and `formingForMerges` withholds the
+      //     forming candle once its bucket is closed — an older authoritative
+      //     candle is never mutated by a newer/quote-derived value.
+      //
+      // ASCENDING GUARANTEE: `mergeBridgeBars` dedupes by ts but never sorts, so
+      // a ledger bucket sitting in a hole older than the newest history bucket
+      // would otherwise land LAST. Lightweight Charts requires ascending data,
+      // so the result is sorted here (a no-op in the normal already-ordered
+      // case). The merge returns a fresh array, so this mutates no state.
+      return mergeBridgeBars(
+        candles.map((c) => asBar({ ...c, ts: alignToBucketStart(c.ts, bucketSec) })),
+        closedLiveLedger,
+        formingForMerges,
+        bucketSec,
+      ).sort((a, b) => a.ts - b.ts);
     }
     return liveCandles;
-    }, [candles, bucketSec, liveCandles]);
+  }, [candles, bucketSec, liveCandles, closedLiveLedger, formingForMerges]);
 
   // ── Closed-live-bucket ledger reset ───────────────────────────────────────────
   // The ledger is scoped to the current instrument + timeframe. When the
@@ -1321,15 +1545,19 @@ export function TradingChart({
         : [];
     // Live: merge historical + closed-live ledger + forming candle into the
     // complete, strictly-ordered, no-duplicates series the bridges need.
+    // The ledger is the AUTHORITATIVE one (WS closed frames win; provisional
+    // rollover captures only fill buckets the closed frame has not reached) and
+    // the forming candle is withheld once its bucket is closed — a quote-derived
+    // forming value can never overwrite a persisted closed OHLC.
     return mergeBridgeBars(
       candles.length > 0
         ? [...warmupBars, ...candles.map((c) => asBar({ ...c, ts: alignToBucketStart(c.ts, bucketSec) }))]
         : liveCandles,
-      closedLiveBars,
-      liveCandle ?? null,
+      closedLiveLedger,
+      formingForMerges,
       bucketSec,
     );
-  }, [session, candles, bucketSec, liveCandles, closedLiveBars, liveCandle, visibleBars, warmupCandles]);
+  }, [session, candles, bucketSec, liveCandles, closedLiveLedger, formingForMerges, visibleBars, warmupCandles]);
 
   // ── Unified-header reporting (the old bottom `.chart-footer` is gone) ──────
   // Quote candle (crosshair ?? replay cursor ?? latest) is pushed UP to App,
@@ -1367,7 +1595,13 @@ export function TradingChart({
           chartOptions={manilaChartOptions}
           onReady={setChartApi}
         >
-          <LiveBarBridge liveCandle={liveCandle} bucketSec={bucketSec} replayActive={replayActive} />
+          <LiveBarBridge
+            liveCandle={liveCandle}
+            closedCandles={closedCandles}
+            bucketSec={bucketSec}
+            scopeKey={`${replaySymbol ?? ""}|${bucketSec}`}
+            replayActive={replayActive}
+          />
           <ViewportBridge
             candles={candles}
             bucketSec={bucketSec}
@@ -1400,6 +1634,7 @@ export function TradingChart({
           <CountdownMarker
             liveCandle={liveCandle}
             bucketSec={bucketSec}
+            clockOffsetMs={clockOffsetMs}
             replayActive={session !== null}
           />
           {/* EMA 9 / EMA 20 overlays — plain LWC line series on the price

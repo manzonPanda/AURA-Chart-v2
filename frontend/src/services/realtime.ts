@@ -3,17 +3,25 @@ import { diag, logWsCandleFrame } from "./diagnostics";
 import { type EmaAlertStateMsg } from "./emaAlertApi.js";
 import {
   buildRealtimeWsUrl,
+  clockOffsetFromStatus,
   initialStream,
   isFrameForInstrument,
+  mergeClosedFrame,
   type RealtimeCandleMsg,
-  type RealtimeStatus,
   type RealtimeStatusMsg,
   type RealtimeStream,
 } from "./realtimeCore.js";
 
 // Stream types + pure primitives live in realtimeCore.ts (framework-free —
 // unit-testable without importing React); re-exported here for BC.
-export type { RealtimeStatus, RealtimeStatusMsg, RealtimeCandleMsg, RealtimeStream };
+export type {
+  CandlePhase,
+  CandleSource,
+  RealtimeStatus,
+  RealtimeStatusMsg,
+  RealtimeCandleMsg,
+  RealtimeStream,
+} from "./realtimeCore.js";
 export { buildRealtimeWsUrl, initialStream, isFrameForInstrument };
 
 // Re-export the per-timeframe alert state types from the API module — the WS
@@ -104,21 +112,44 @@ export function useRealtimeStream(
               ticks: sm.ticks ?? prev.ticks,
               lastPrice: sm.price ?? prev.lastPrice,
               lastTickAt: sm.lastTickAt ?? prev.lastTickAt,
+              // SERVER-CLOCK CALIBRATION: bucket boundaries are server-anchored,
+              // so the countdown counts against `Date.now() + clockOffsetMs`.
+              // An uncalibrated/older frame keeps the previous offset instead of
+              // resetting a good calibration to 0.
+              clockOffsetMs: clockOffsetFromStatus(sm.serverNowMs, Date.now()) ?? prev.clockOffsetMs,
             }));
           } else if (msg.type === "candle" && "time" in msg) {
             diag.wsCandleFrames += 1;
             const c = msg as RealtimeCandleMsg;
             logWsCandleFrame(c.timeframe, c.time, c.close);
-            // Update the forming candle + last price, but DO NOT touch
-            // lastTickAt here: only backend status frames carry the real IG
-            // tick timestamp. Overwriting it with Date.now() would mask real
-            // tick latency and make the UI falsely show "LIVE" when ticks are
-            // actually stale.
-            setStream((prev) => ({
-              ...prev,
-              candle: c,
-              lastPrice: c.close,
-            }));
+            // EXPLICIT AUTHORITY ROUTING (never inferred from arrival order):
+            //   source:"ohlc" phase:"closed"  → the authoritative CLOSED candle.
+            //     It goes to the closed-live ledger and CANNOT touch the forming
+            //     candle, so a closed bucket is never "re-opened" by a frame.
+            //   anything else (ohlc/quote, forming) → the live DISPLAY snapshot.
+            const source = c.source ?? "ohlc";
+            const phase = c.phase ?? "forming";
+            if (source === "ohlc" && phase === "closed") {
+              console.info(
+                `[WS] closed candle tf=${c.timeframe} bucket=${new Date(c.time * 1000).toISOString()} C=${c.close}`,
+              );
+              setStream((prev) => ({
+                ...prev,
+                closed: mergeClosedFrame(prev.closed, c),
+                lastPrice: c.close ?? prev.lastPrice,
+              }));
+              return;
+            }
+            // Forming display frame: replace the live forming snapshot, but never
+            // REWIND it — a forming frame for an older bucket than the one the
+            // display already shows is dropped (the authoritative CLOSED frame
+            // for that older bucket still lands through the branch above).
+            setStream((prev) => {
+              if (prev.candle && Number.isFinite(prev.candle.time) && c.time < prev.candle.time) {
+                return prev;
+              }
+              return { ...prev, candle: c, lastPrice: c.close ?? prev.lastPrice };
+            });
           } else if (msg.type === "emaAlert" && "state" in msg) {
             // Server-side EMA alert state (pending confirmations, confirmed
             // reversals). Display-only — detection never runs in the browser.

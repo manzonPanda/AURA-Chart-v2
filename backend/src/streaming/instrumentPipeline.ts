@@ -34,6 +34,20 @@ export interface InstrumentUnit {
   lastTickAt: number;
   /** Previous bucket start per timeframe — rollover detection source. */
   lastBucketSec: Map<string, number>;
+  /**
+   * Bucket start (epoch SECONDS) of the LATEST authoritatively CLOSED candle
+   * per timeframe — the quote-immutability ledger.
+   *
+   * Once an authoritative candle closes, that bucket is FINAL: a late quote
+   * whose bucket is at-or-before it must never mutate it again (Capital's
+   * marketData quotes and its OHLC frames are independent deliveries, so a
+   * quote can legitimately arrive AFTER the OHLC candle it belongs to).
+   * ADDITIONAL to — never a replacement for — the `bucket < authoritativeTime`
+   * gate from 6dd0927: that gate rejects buckets older than the authoritative
+   * FORMING candle (it fixed the 3M freeze); this ledger rejects buckets that
+   * are already closed. 0 = nothing closed yet.
+   */
+  lastClosedSec: Map<string, number>;
   /** One-shot first-anchor diagnostic per timeframe. */
   loggedFirstAnchor: Set<string>;
   /**
@@ -58,6 +72,7 @@ export function createInstrumentUnit(epic: string, label: string, decimals: numb
     lastPrice: null,
     lastTickAt: 0,
     lastBucketSec: new Map(),
+    lastClosedSec: new Map(),
     loggedFirstAnchor: new Set(),
     liveDisplay: new Map(),
   };
@@ -108,6 +123,9 @@ export function processInstrumentTick(unit: InstrumentUnit, tick: IngTick): Buck
     if (forming && forming.time > (unit.lastBucketSec.get(timeframe) ?? 0)) {
       // A bucket just CLOSED — the aggregator holds it as its last-closed record.
       closed = unit.aggregators.getClosedCandleFor(bucketSec);
+      // IMMUTABILITY LEDGER: this bucket is now final — quotes at-or-before it
+      // are dropped for chart display from here on (see processInstrumentQuote).
+      if (closed) unit.lastClosedSec.set(timeframe, closed.time);
       unit.lastBucketSec.set(timeframe, forming.time);
     } else if (forming && forming.time < (unit.lastBucketSec.get(timeframe) ?? 0)) {
       unit.lastBucketSec.set(timeframe, forming.time); // stream reset / stale tick safety
@@ -152,6 +170,18 @@ export function processInstrumentQuote(unit: InstrumentUnit, quote: IngTick): Qu
   const results: QuoteResult[] = [];
   for (const [timeframe, bucketSec] of Object.entries(TIMEFRAME_BUCKET_SEC)) {
     const bucket = bucketOf(quote.tsMs, bucketSec);
+    // IMMUTABILITY GATE (additional protection — the 6dd0927 `bucket <
+    // authoritativeTime` gate below stays intact): a bucket that has already
+    // received its AUTHORITATIVE CLOSED candle is immutable. A late quote for
+    // it is dropped for chart display, because the persisted Capital OHLC is
+    // the only truth for a closed candle. The NEXT forming bucket is always
+    // `lastClosedSec + bucketSec` → strictly greater, so it still receives
+    // quotes (the 3M smooth-display path is preserved).
+    const lastClosedSec = unit.lastClosedSec.get(timeframe) ?? 0;
+    if (bucket <= lastClosedSec) {
+      results.push({ timeframe, bucketSec, display: undefined });
+      continue;
+    }
     const authoritativeTime = unit.aggregators.getCandleFor(bucketSec)?.time ?? 0;
     if (bucket < authoritativeTime) {
       // STRICT stale bucket only — older than the authoritative forming candle.

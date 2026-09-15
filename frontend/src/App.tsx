@@ -76,7 +76,7 @@ import {
 } from "./services/pineImport";
 import { useRealtimeStream, resolutionToBucketSec } from "./services/realtime";
 import { iso } from "./services/diagnostics";
-import { mergeGapLists } from "./services/gapRegions";
+import { mergeGapLists, revalidateGaps } from "./services/gapRegions";
 import type { Candle, CandleGap } from "./types/candle";
 import { EmaAlertControl } from "./components/EmaAlert/EmaAlertControl";
 import { OHLCReadout } from "./components/TradingChart/OHLCReadout";
@@ -718,7 +718,10 @@ export default function App() {
       moreHistorySeq.current++;
       setHistoryEpic(finalizedEpic);
       setCandles(loaded);
-      setGaps(loadedGaps);
+      // Revalidate gaps against the freshly loaded dataset — a backfill/reconcile
+      // that filled a previously-missing bucket must erase its gap here (Rule C)
+      // and gaps at/after the newest closed bucket are suppressed (Rule B).
+      setGaps(revalidateGaps(loadedGaps, loaded, resolutionToBucketSec(timeframe)));
       setHistoryMissing(false);
       setHistoryStatus({ loading: false, exhausted: !lastHasMore, error: null });
       if (pages > 1) {
@@ -820,7 +823,12 @@ export default function App() {
         setCandles(merged);
         // Older pages carry their own derived gaps — merge (dedupe by exact
         // interval) so shading accumulates across the whole loaded window.
-        setGaps((prev) => mergeGapLists(prev, data.gaps));
+        // Then REVALIDATE against the freshly merged dataset so a backfill that
+        // filled a previously-missing bucket erases its gap (Rule C) and
+        // frontier/duplicate gaps are suppressed (Rule A/B).
+        setGaps((prev) =>
+          revalidateGaps(mergeGapLists(prev, data.gaps), merged, resolutionToBucketSec(timeframe)),
+        );
         console.info(`[HISTORY] +${added} older candles (oldest now ${iso(merged[0].ts)})`);
       }
     } catch (err) {
@@ -1039,6 +1047,8 @@ export default function App() {
           gaps={gaps}
           resolution={timeframe}
           liveCandle={realtime.candle}
+          closedCandles={realtime.closed}
+          clockOffsetMs={realtime.clockOffsetMs}
           streamStatus={realtime.status}
           emaSettings={emaSettings}
           smaSettings={smaSettings}
