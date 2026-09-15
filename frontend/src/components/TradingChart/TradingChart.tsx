@@ -35,7 +35,7 @@ import {
   resolutionToBucketSec,
 } from "../../services/realtime";
 import { diag, iso, logUpdateBar, maybeLogChartBlock } from "../../services/diagnostics";
-import { candleCloseCountdown, planLiveUpdate, type LiveBar, frameAuthority, authorityRank } from "../../services/liveCandle";
+import { candleCloseCountdown, planLiveUpdate, pruneClosedLiveBars, type LiveBar, frameAuthority, authorityRank } from "../../services/liveCandle";
 import { defaultEmaSettings, type EmaSettings } from "../../config/emaSettings";
 import type { SmaSettings } from "../../config/smaSettings";
 import type { ImportedPineIndicator, PineRunStatus } from "../../services/pineImport";
@@ -254,6 +254,13 @@ interface Props {
   gaps?: CandleGap[];
   /** Timeframe id (MINUTE_1 | MINUTE_3) — used for stream bucket alignment. */
   resolution?: string;
+  /**
+   * Selected instrument's epic — the closed-live ledger's SCOPE key (FIX 2).
+   * The ledger must survive same-scope history reloads (every history load
+   * mints a new `candles` array identity) but reset on an instrument or
+   * timeframe switch; the epic is the missing half of that boundary.
+   */
+  instrumentEpic?: string;
   /** Latest forming candle pushed by the backend (time = bucket start, epoch s). */
   liveCandle?: RealtimeCandleMsg | null;
   /**
@@ -936,6 +943,7 @@ export function TradingChart({
   warmupCandles = [],
   gaps,
   resolution = "",
+  instrumentEpic,
   liveCandle = null,
   closedCandles = [],
   clockOffsetMs = 0,
@@ -1124,21 +1132,24 @@ export function TradingChart({
     return [...authBars, ...provisional].sort((a, b) => a.ts - b.ts);
   }, [closedCandles, closedLiveBars, bucketSec]);
 
-  // The forming candle passed to merges must NEVER touch a closed bucket:
-  // drop it when its bucket is ≤ the newest authoritative closed bucket (§6).
-  const formingForMerges = useMemo<RealtimeCandleMsg | null>(() => {
-    if (!liveCandle || !Number.isFinite(liveCandle.time)) return null;
-    const bucketTs = alignToBucketStart(liveCandle.time * 1000, bucketSec);
-    const newestClosed = closedLiveLedger.length > 0 ? closedLiveLedger[closedLiveLedger.length - 1].ts : -1;
-    return bucketTs > newestClosed ? liveCandle : null;
-  }, [liveCandle, closedLiveLedger, bucketSec]);
+  // FIX 1: the forming candle is NOT passed to merges (bridge bars and `data`
+  // carry history + closed-live ledger only). It is painted exclusively by
+  // LiveBarBridge (updateBar / bus-"data" re-apply), so a quote-tick identity
+  // change can never trigger a full setData on the main series. The old
+  // `formingForMerges` memo (withholding the forming candle only once its
+  // bucket closed) is gone — the forming candle never merges at all.
 
   const data = useMemo<Bar[]>(() => {
     if (candles.length > 0) {
-      // §5: REST history + closed-live ledger + forming candle. Every
-      // setData/history replacement REAPPLIES the ledger, so a bucket that has
-      // already closed live can never vanish while PostgreSQL is still waiting
-      // for its (up to ~1 bucket late) Capital OHLC delivery — no refresh needed.
+      // section 5: REST history + closed-live ledger. Every setData/history replacement
+      // REAPPLIES the ledger, so a bucket that has already closed live can never
+      // vanish while PostgreSQL is still waiting for its (up to ~1 bucket late)
+      // Capital OHLC delivery — no refresh needed.
+      //
+      // Note: the FORMING candle is intentionally NOT part of `data` here — see
+      // the FIX (flicker) block below. History + closed-live ledger only; the
+      // live forming bar is painted exclusively by LiveBarBridge via updateBar +
+      // the bus-"data" re-apply, so it never participates in a full setData.
       //
       // Precedence/dedup inside the merge:
       //   - a bucket present in BOTH history and ledger carries the SAME
@@ -1155,25 +1166,61 @@ export function TradingChart({
       // would otherwise land LAST. Lightweight Charts requires ascending data,
       // so the result is sorted here (a no-op in the normal already-ordered
       // case). The merge returns a fresh array, so this mutates no state.
+      //
+      // FIX (flicker): the FORMING candle is deliberately NOT passed here.
+      // `formingForMerges` changes on every live quote frame; including it in
+      // this memo would give `data` a new identity per quote and re-fire
+      // ChartView's `controller.setData()` per tick — a full series replacement
+      // that snaps the forming candle's close forward, then the glide restarts
+      // from the lagging animated value (forward-snap/backward-jerk sawtooth).
+      // The forming candle stays painted exclusively by LiveBarBridge via
+      // `controller.updateBar()` + the bus-"data" re-apply, so its absence from
+      // `data` is intentional: history + closed-live ledger only.
       return mergeBridgeBars(
         candles.map((c) => asBar({ ...c, ts: alignToBucketStart(c.ts, bucketSec) })),
         closedLiveLedger,
-        formingForMerges,
+        null, // forming candle painted live, never via setData
         bucketSec,
       ).sort((a, b) => a.ts - b.ts);
     }
     return liveCandles;
-  }, [candles, bucketSec, liveCandles, closedLiveLedger, formingForMerges]);
+  }, [candles, bucketSec, liveCandles, closedLiveLedger]);
 
-  // ── Closed-live-bucket ledger reset ───────────────────────────────────────────
-  // The ledger is scoped to the current instrument + timeframe. When the
-  // instrument changes (candles cleared by App) or the timeframe changes
-  // (bucketSec changes), reset the refs AND the ledger state so stale
-  // candles from another context can never leak into the new stream.
+  // ── Closed-live-bucket ledger SCOPE (FIX 2: persistence across reloads) ──────
+  // The ledger is scoped to the INSTRUMENT + TIMEFRAME — NOT to the history
+  // array's identity. Every history load (refresh, horizon reload, Load More)
+  // mints a new `candles` array, and resetting the ledger on that identity
+  // made live-closed buckets VANISH from the series whenever the backend had
+  // not persisted them yet (its Capital OHLC delivery lags up to ~1 bucket):
+  // the chart showed a hole at buckets that had genuinely closed live.
+  //
+  // So the ledger resets only on a true SCOPE switch (epic or bucketSec change
+  // — the same clean-switch boundary the WS stream uses), and is then PRUNED
+  // (not wiped) against freshly loaded history: buckets the new dataset now
+  // carries are dropped (the persisted truth wins), buckets it still lacks are
+  // kept (they only exist in the live ledger until persistence catches up).
+  const ledgerScopeRef = useRef<string | null>(null);
+  const ledgerScopeKey = `${instrumentEpic ?? ""}|${bucketSec}`;
   useEffect(() => {
+    // First mount: adopt the current scope without clearing (the state starts
+    // empty; clearing here would be a no-op churn anyway).
+    if (ledgerScopeRef.current === null) {
+      ledgerScopeRef.current = ledgerScopeKey;
+      return;
+    }
+    if (ledgerScopeRef.current === ledgerScopeKey) return;
+    ledgerScopeRef.current = ledgerScopeKey;
     setClosedLiveBars([]);
     prevFormingTsRef.current = null;
     prevFormingBarRef.current = null;
+  }, [ledgerScopeKey]);
+
+  // Same-scope prune: drop ledger buckets the reloaded history now carries.
+  // Pure helper (liveCandle.pruneClosedLiveBars) — must bail out by returning
+  // the SAME reference when nothing is dropped, so a history identity change
+  // never re-renders the ledger for nothing.
+  useEffect(() => {
+    setClosedLiveBars((prevList) => pruneClosedLiveBars(prevList, candles, bucketSec));
   }, [candles, bucketSec]);
 
   // OHLC strip: crosshair-hovered candle takes priority, else the latest forming candle.
@@ -1306,8 +1353,12 @@ export function TradingChart({
   // logicals, or extrapolated drawing edges (session boxes) would land 8 bars
   // too far right.
   const whitespaceSlots = useMemo(
-    () => (session ? [] : buildWhitespacePlan(candles, gaps ?? [], bucketSec).slots),
-    [session, candles, gaps, bucketSec],
+    // FIX 2B: the plan is built from `data` (history + closed-live ledger),
+    // not the raw `candles` prop — a bucket the live ledger already carries is
+    // a REAL registered bar on the axis, so it must not also emit a whitespace
+    // slot (hasCandleAt suppression) or a phantom gap band (Rule E below).
+    () => (session ? [] : buildWhitespacePlan(data, gaps ?? [], bucketSec).slots),
+    [session, data, gaps, bucketSec],
   );
 
   // Measure the right price scale's ACTUAL rendered width once the chart is
@@ -1543,21 +1594,23 @@ export function TradingChart({
             .filter((c) => c.ts < oldestVisible)
             .map((c) => asBar({ ...c, ts: alignToBucketStart(c.ts, bucketSec) }))
         : [];
-    // Live: merge historical + closed-live ledger + forming candle into the
-    // complete, strictly-ordered, no-duplicates series the bridges need.
-    // The ledger is the AUTHORITATIVE one (WS closed frames win; provisional
-    // rollover captures only fill buckets the closed frame has not reached) and
-    // the forming candle is withheld once its bucket is closed — a quote-derived
-    // forming value can never overwrite a persisted closed OHLC.
+      // Live: merge historical + closed-live ledger → the strictly-ordered,
+      // no-duplicates series the bridges need. The forming candle is painted
+      // LIVE by LiveBarBridge (updateBar / bus-"data" re-apply) and is NOT part
+      // of this dataset, so the bridge series never carries a flickering live bar.
+      // The ledger is the AUTHORITATIVE one (WS closed frames win; provisional
+      // rollover captures only fill buckets the closed frame has not reached) and
+      // the forming candle is withheld once its bucket is closed — a quote-derived
+      // forming value can never overwrite a persisted closed OHLC.
     return mergeBridgeBars(
       candles.length > 0
         ? [...warmupBars, ...candles.map((c) => asBar({ ...c, ts: alignToBucketStart(c.ts, bucketSec) }))]
         : liveCandles,
       closedLiveLedger,
-      formingForMerges,
+      null, // forming candle painted live, never part of bridge bars
       bucketSec,
     );
-  }, [session, candles, bucketSec, liveCandles, closedLiveLedger, formingForMerges, visibleBars, warmupCandles]);
+  }, [session, candles, bucketSec, liveCandles, closedLiveLedger, visibleBars, warmupCandles]);
 
   // ── Unified-header reporting (the old bottom `.chart-footer` is gone) ──────
   // Quote candle (crosshair ?? replay cursor ?? latest) is pushed UP to App,
@@ -1673,7 +1726,11 @@ export function TradingChart({
           />
           {/* DATA GAP shading — presentation-only band primitive attached to the
               main series; hidden while a replay session owns the chart. */}
-          <GapShading candles={candles} gaps={gaps} bucketSec={bucketSec} enabled={!session} />
+          {/* FIX 2B: bands resolve against `data` (history + closed-live
+              ledger) so a gap interval whose bucket the live ledger already
+              carries is suppressed — the reloaded history may still lack that
+              bucket (persistence lag), but the bar IS on the chart. */}
+          <GapShading candles={data} gaps={gaps} bucketSec={bucketSec} enabled={!session} />
           {/* TIME-SCALE WHITESPACE — invisible LWC series registering the
               missing-gap timestamps as real empty time slots (IG-style).
               Cleared during a replay session, restored on exit. */}

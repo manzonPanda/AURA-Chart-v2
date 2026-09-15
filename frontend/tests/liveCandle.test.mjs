@@ -46,6 +46,7 @@ test("same-bucket merge: open immutable, high=max, low=min, close=latest, volume
   assert.equal(merged.low, 98.5);
   assert.equal(merged.close, 101.7, "close = latest valid price");
   assert.equal(merged.volume, 60, "server volume is cumulative, not additive");
+  assert.equal(merged.closeAuth, "forming-quote", "closeAuth tracks the incoming frame's authority (no source → forming-quote)");
 });
 
 test("planLiveUpdate seeds truth from the frame's real OHLC (no fabricated all-equal bar)", () => {
@@ -54,7 +55,9 @@ test("planLiveUpdate seeds truth from the frame's real OHLC (no fabricated all-e
   assert.equal(plan.skipped, false);
   assert.deepEqual(
     { ...plan.truth, ts: undefined },
-    { open: 100, high: 101.5, low: 99.2, close: 101.1, volume: 42, ts: undefined },
+    // closeAuth: the FIX 1B regression guard tracks the surviving close's
+    // authority (a source-less frame defaults to authoritative OHLC class).
+    { open: 100, high: 101.5, low: 99.2, close: 101.1, volume: 42, ts: undefined, closeAuth: "forming-ohlc" },
   );
 });
 

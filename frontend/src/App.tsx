@@ -1046,6 +1046,7 @@ export default function App() {
           warmupCandles={warmupCandles}
           gaps={gaps}
           resolution={timeframe}
+          instrumentEpic={epic || undefined}
           liveCandle={realtime.candle}
           closedCandles={realtime.closed}
           clockOffsetMs={realtime.clockOffsetMs}

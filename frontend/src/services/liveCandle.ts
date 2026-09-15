@@ -61,6 +61,14 @@ export interface LiveBar {
    * stale/forming frame may ever merge into or replace it.
    */
   closed?: true;
+  /**
+   * Authority class that last wrote `close` — tracked so mergeSameBucket can
+   * enforce the 3M same-bucket regression guard: a lagging `forming-ohlc`
+   * frame must NOT regress a newer `forming-quote` close within the same
+   * bucket. Defaults to "forming-quote" when absent (backward compat with
+   * bars created before this field existed).
+   */
+  closeAuth?: FrameAuthority;
 }
 
 /** Structural subset of the backend candle frame this module consumes. */
@@ -154,14 +162,74 @@ function toBar(frame: LiveCandleFrame, bucketSec: number): LiveBar | null {
  *   low   = min(existing, incoming);
  *   close = latest valid price (frames are TCP-ordered server snapshots);
  *   volume = the server's cumulative per-bucket volume (NOT additive).
+ *
+ * 3M SAME-BUCKET REGRESSION GUARD (§FIX 1B):
+ *   The authority ladder is closed-ohlc > forming-ohlc > forming-quote, BUT
+ *   a lagging `forming-ohlc` frame (older OHLC close) must NOT regress a
+ *   newer `forming-quote` close within the same bucket. This happens on the
+ *   3m timeframe: Capital's OHLC stream lags the quote stream, so an ohlc/
+ *   forming close from an earlier aggregation cycle can arrive AFTER a newer
+ *   quote/forming close and snap the forming candle backwards.
+ *
+ *   Resolution: the close is only adopted by a HIGHER-authority forming frame
+ *   when it moves the close UP (confirms a higher price). A higher-authority
+ *   forming frame with a BELOW-current close is treated as a lagging snapshot
+ *   and the existing close is preserved. A closed-ohlc always supersedes
+ *   (immutable). Same/lower rank frames are last-write-wins (display
+ *   continuity — a quote may extend a forming-ohlc close in either
+ *   direction). The surviving close's authority is tracked so the guard fires
+ *   identically across chained calls (the caller does not need to replay the
+ *   full authority history).
  */
 export function mergeSameBucket(prev: LiveBar, incoming: LiveBar): LiveBar {
+  const prevAuth: FrameAuthority =
+    prev.closed === true ? "closed-ohlc" : (prev.closeAuth ?? "forming-quote");
+  const inAuth: FrameAuthority =
+    incoming.closed === true ? "closed-ohlc" : (incoming.closeAuth ?? "forming-quote");
+
+  // IMMUTABLE-CLOSED GUARD (authority ladder top): a CLOSED bar is final — no
+  // later forming/quote frame may merge into or replace it (§ the LiveBar
+  // contract). The closed frame's own re-delivery is the only writer.
+  if (prevAuth === "closed-ohlc" && inAuth !== "closed-ohlc") {
+    return prev;
+  }
+
+  const prevRank = authorityRank(prevAuth);
+  const inRank = authorityRank(inAuth);
+
+  let close: number;
+  if (inAuth === "closed-ohlc") {
+    // Closed-ohlc always supersedes a forming truth — the persisted OHLC is
+    // the bucket's immutable final word.
+    close = incoming.close;
+  } else if (inRank > prevRank && incoming.close < prev.close) {
+    // Higher-authority FORMING frame (forming-ohlc over forming-quote) whose
+    // close is BELOW the current truth — a lagging 3M snapshot. Hold the
+    // existing close so the forming candle does not snap backwards.
+    close = prev.close;
+  } else {
+    // Same/lower rank, or close moving up: adopt the incoming close.
+    // (A forming-quote extending a forming-ohlc close is display continuity.)
+    close = incoming.close;
+  }
+
+  // The surviving close's authority: if we held prev.close under the regression
+  // guard, retain its authority; otherwise the incoming's authority wins.
+  const closeAuth: FrameAuthority =
+    close === prev.close && inRank > prevRank && inAuth !== "closed-ohlc"
+      ? prevAuth
+      : inAuth;
+
   return {
     ts: prev.ts,
     open: prev.open,
     high: Math.max(prev.high, incoming.high),
     low: Math.min(prev.low, incoming.low),
-    close: incoming.close,
+    close,
+    closeAuth,
+    // A closed frame's authority survives the merge — the merged truth stays
+    // closed (immutable) for every later merge decision in the chain.
+    ...(inAuth === "closed-ohlc" ? { closed: true as const } : {}),
     ...(incoming.volume !== undefined || prev.volume !== undefined
       ? { volume: incoming.volume ?? prev.volume }
       : {}),
@@ -176,6 +244,36 @@ export function classifyFrame(prev: LiveBar | null, frameBucketMs: number): Fram
   if (frameBucketMs < prev.ts) return "stale";
   if (frameBucketMs > prev.ts) return "new-bucket";
   return "same-bucket";
+}
+
+/**
+ * FIX 2 (history-reload persistence) — prune the closed-live ledger against a
+ * freshly loaded history WITHOUT wiping it. Same scope (instrument+timeframe):
+ *   - a ledger bucket the new history now carries is dropped (the persisted
+ *     truth wins), because `mergeBridgeBars` lets historical bars win same-ts;
+ *   - a ledger bucket the history still lacks is KEPT — Capital's OHLC
+ *     persistence can lag ~1 bucket, and the bar genuinely closed live.
+ *
+ * The old effect reset the ledger whenever the `candles` identity changed, so
+ * every history load erased live-closed buckets and punched holes into the
+ * chart. Returns the SAME reference when nothing changes so callers can bail
+ * out of a re-render.
+ *
+ * Pure + framework-free — unit-tested in closedLedgerPersistence.test.mjs.
+ */
+export function pruneClosedLiveBars(
+  ledger: readonly LiveBar[],
+  candles: readonly { ts: number }[],
+  bucketSec: number,
+): LiveBar[] {
+  if (ledger.length === 0 || candles.length === 0) return ledger as LiveBar[];
+  const bucketMs = bucketSec > 0 ? bucketSec * 1000 : 1000;
+  const histBuckets = new Set<number>();
+  for (const c of candles) {
+    if (Number.isFinite(c.ts)) histBuckets.add(Math.floor(c.ts / bucketMs) * bucketMs);
+  }
+  const kept = ledger.filter((b) => !histBuckets.has(b.ts));
+  return kept.length === ledger.length ? (ledger as LiveBar[]) : kept;
 }
 
 /** The ordered `updateBar` work a frame implies. */
@@ -220,6 +318,14 @@ export function planLiveUpdate(
   const incoming = toBar(frame, bucketSec);
   if (!incoming) {
     return { commits: [], rollover: false, skipped: true, truth: prev, animate: false };
+  }
+
+  // Tag the incoming bar with its authority class (§FIX 1B regression guard)
+  // and closed-flag (§§1/2 authority ladder: a closed bucket is immutable).
+  // mergeSameBucket reads these to decide whether the close may adopt.
+  incoming.closeAuth = frameAuthority(frame);
+  if (frame.phase === "closed") {
+    incoming.closed = true;
   }
 
   const kind = classifyFrame(prev, incoming.ts);
