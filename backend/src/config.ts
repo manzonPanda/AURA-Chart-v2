@@ -4,14 +4,26 @@ export interface Config {
   port: number;
   host: string;
   /**
-   * Legacy Supabase archive access (READ path + fallback only). The archive is
-   * NEVER migrated and NEVER written by active market-data collection — Oracle
-   * PostgreSQL is the canonical store. Kept configured so legacy archive rows
-   * stay queryable through /api/candles/db when PostgreSQL is unavailable.
+   * Legacy Supabase naming retained ONLY for: (1) the secret redactor, which
+   * still scrubs the Supabase service-role key should it surface in a stack
+   * trace/env dump (the env var remains present on the VM), and (2) the
+   * offline `npm run db:*` audit scripts which exercise the Supabase-backed
+   * CandleStore directly against a Supabase project. The live runtime NEVER
+   * constructs a Supabase client — Oracle PostgreSQL (see `persistence` below)
+   * is the sole runtime persistence path.
    */
   supabase: {
     url: string;
     serviceKey: string;
+    table: string;
+  };
+  /**
+   * Neutral runtime persistence settings — decoupled from the legacy Supabase
+   * naming so the runtime config no longer implies a Supabase dependency. `table`
+   * is sourced from CANDLES_TABLE (default `ohlc_candles`) and is what
+   * PgCandleStore writes to / reads from on the Oracle PostgreSQL target.
+   */
+  persistence: {
     table: string;
   };
   /** Web Push (VAPID) — server-side alert delivery. Never logged. */
@@ -74,11 +86,21 @@ export function loadConfig(): Config {
     host: process.env.HOST || "0.0.0.0",
     // Server-side ONLY (service-role key never reaches the browser or logs).
     // When unset, candle persistence + /api/candles/db degrade gracefully; the
-    // realtime Capital stream is unaffected.
+    // realtime Capital stream is unaffected. Retained for the secret redactor
+    // (scrubs this key from any env-dump/stack-trace) and the offline `db:*`
+    // audit scripts — NOT used by the live runtime, which streams to PostgreSQL
+    // via `persistence.table` / CANDLES_TABLE below.
     supabase: {
       url: (process.env.SUPABASE_URL || "").trim(),
       serviceKey: (process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim(),
       table: (process.env.SUPABASE_CANDLES_TABLE || "ohlc_candles").trim(),
+    },
+    // ── Runtime persistence (Oracle PostgreSQL / PgCandleStore) ────────────────
+    // Neutral table-name source for the canonical runtime store. The live path
+    // reads ONLY this value — never config.supabase.table — so the runtime
+    // config no longer implies a Supabase dependency.
+    persistence: {
+      table: (process.env.CANDLES_TABLE || "ohlc_candles").trim(),
     },
     // Web Push (VAPID) — generate once via: npx web-push generate-vapid-keys
     // The private key NEVER reaches the browser or the logs.

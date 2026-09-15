@@ -7,8 +7,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { isCapitalConfigured, loadConfig } from "./config.js";
 import { CapitalClient } from "./capital/client.js";
-import { CandleStore, CandleBackend, PgCandleStore, SupabaseCandleStore } from "./db/candleStore.js";
-import { createSupabaseAdmin } from "./db/supabaseClient.js";
+import { CandleBackend, PgCandleStore } from "./db/candleStore.js";
 import { getPgPool, pgEnvSummary, pgSecrets } from "./db/pgPool.js";
 import { EmaAlertEngine } from "./emaAlert/emaAlertEngine.js";
 import { PushService } from "./emaAlert/pushService.js";
@@ -30,32 +29,38 @@ import { RESOLUTION_BUCKET_SEC, createRealtime, redactEpic } from "./realtime.js
 const config = loadConfig();
 
 /**
- * Completed-candle persistence. Preference order for v1:
- *   1. Local Oracle PostgreSQL (`aura` DB, localhost:5432) — the new canonical
- *      market-data store, read from /etc/aura/postgres.env (never logged).
- *   2. Supabase (service-role) — kept as a read-only fallback shim only; live
- *      writes now go to PostgreSQL. Supabase data is NOT migrated or copied.
+ * Completed-candle persistence. Runtime source:
  *
- * Null when NEITHER is configured — backend runs with live candles delivered
- * over WS only (no persistence), exactly as before.
+ *   Local Oracle PostgreSQL (`aura` DB, localhost:5432) — the canonical
+ *   market-data store, read from /etc/aura/postgres.env (`AURA_DB_URL`,
+ *   0600 root:root, never logged) via getPgPool(). The connection string is
+ *   never exposed to the frontend or logs.
+ *
+ * The legacy Supabase runtime fallback has been REMOVED — PostgreSQL is the
+ * only runtime persistence path. (The Supabase client implementation and the
+ * `config.supabase` config block remain in the source tree ONLY for the offline
+ * `npm run db:*` audit scripts and the secret redactor; neither is invoked while
+ * the backend streams live market data — `supabaseAdmin` is no longer created.)
+ *
+ * Null when PostgreSQL is unconfigured — backend runs with live candles
+ * delivered over WS only (no persistence), exactly as before.
  * Persistence is strictly downstream of the realtime path and can never affect
  * the Capital stream or the chart.
  */
 const pgPool = getPgPool();
-const supabaseAdmin = pgPool ? null : createSupabaseAdmin(config.supabase);
 let candleStore: CandleBackend | null = null;
 if (pgPool) {
-  candleStore = new PgCandleStore(pgPool, config.supabase.table);
+  candleStore = new PgCandleStore(pgPool, config.persistence.table);
   console.log(
     `  [DB] PostgreSQL candle persistence ENABLED -> localhost:${pgEnvSummary().port}/${pgEnvSummary().database}` +
-      ` as ${pgEnvSummary().user} (table=${config.supabase.table}; MINUTE_1 canonical,` +
-      ` MINUTE_3 derived on read; no Supabase data copied).`,
+      ` as ${pgEnvSummary().user} (table=${config.persistence.table}; MINUTE_1 canonical,` +
+      ` MINUTE_3 derived on read).`,
   );
-} else if (supabaseAdmin) {
-  candleStore = new SupabaseCandleStore(supabaseAdmin, config.supabase.table);
-  console.log("  [DB] Supabase candle persistence ENABLED (completed 1m candles only will be upserted; 3m is derived live + aggregated on read).");
 } else {
-  console.log("  [DB] No persistence configured — completed candles will NOT be persisted (set /etc/aura/postgres.env or SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY).");
+  console.log(
+    "  [DB] No persistence configured — completed candles will NOT be persisted " +
+      "(set /etc/aura/postgres.env (AURA_DB_URL) or CANDLES_TABLE).",
+  );
 }
 
 /**
@@ -95,9 +100,9 @@ const defaultEpic = GOLD_INSTRUMENT.epic;
  * NO synthetic candles are ever derived from quotes.
  *
  * GATED, not unconditional: Capital credentials + a CAPITAL collection set + a
- * store that owns `insertBackfilledBatch` (PgCandleStore only — the Supabase
- * shim has no such method, so reconciliation can never grow a second
- * persistence path) + RECONCILE_ENABLED (default on).
+ * store that owns `insertBackfilledBatch` (PgCandleStore only — the legacy
+ * SupabaseCandleStore retained for offline audit scripts does not implement it,
+ * so reconciliation can never grow a second persistence path) + RECONCILE_ENABLED (default on).
  *
  * This is fully independent of the live stream: it starts/stops on its own
  * schedule, holds no provider socket state, and touches NO heartbeat, quote,
@@ -148,8 +153,8 @@ app.route(
     GOLD_INSTRUMENT.epic,
   ),
 );
-// Chart history from OUR persistence (Oracle PostgreSQL; Supabase read-only
-// fallback). Instrument-aware: ?epic= validated against the UI/HISTORICAL
+// Chart history from OUR persistence (Oracle PostgreSQL). Instrument-aware:
+// ?epic= validated against the UI/HISTORICAL
 // catalog (archive epics remain readable); omitted → GOLD.
 app.route("/api", createCandlesDbRouter(candleStore, uiInstruments(config), GOLD_INSTRUMENT.epic));
 

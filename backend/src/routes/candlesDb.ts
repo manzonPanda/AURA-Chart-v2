@@ -172,7 +172,7 @@ export function createCandlesDbRouter(
       return c.json(
         {
           error:
-            "Candle persistence is not configured — set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY in backend/.env.",
+            "Candle persistence is not configured — set AURA_DB_URL (via /etc/aura/postgres.env on the VM) to enable PostgreSQL persistence.",
           code: "DB_NOT_CONFIGURED",
         },
         503,
