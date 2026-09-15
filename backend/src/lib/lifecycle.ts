@@ -27,6 +27,8 @@ export interface LifecycleHooks {
   redactor?: SecretRedactor;
   /** Stop the realtime service: disconnect Lightstreamer + clear all timers. */
   stopRealtime?: () => void;
+  /** Stop the automatic Capital REST reconciler's schedule (clearInterval). */
+  stopReconciler?: () => void;
   /** Close the WebSocket relay (disconnects all browser sockets). */
   closeWebSocketServer?: () => void;
   /** Stop accepting new HTTP connections; `onClosed` fires when fully drained. */
@@ -67,14 +69,22 @@ export function installLifecycle(hooks: LifecycleHooks = {}): LifecycleControlle
       console.error("[SHUTDOWN] stopRealtime failed:", redact(err));
     }
 
-    // 2) Close browser WebSocket sockets (ws close code 1001).
+    // 2) Stop the automatic reconciler's schedule (clearInterval only — no
+    //    provider socket, no in-flight write is cancelled).
+    try {
+      hooks.stopReconciler?.();
+    } catch (err) {
+      console.error("[SHUTDOWN] stopReconciler failed:", redact(err));
+    }
+
+    // 3) Close browser WebSocket sockets (ws close code 1001).
     try {
       hooks.closeWebSocketServer?.();
     } catch (err) {
       console.error("[SHUTDOWN] closeWebSocketServer failed:", redact(err));
     }
 
-    // 3) Stop accepting new HTTP connections, drop idle keep-alives, drain
+    // 4) Stop accepting new HTTP connections, drop idle keep-alives, drain
     //    active requests. The failsafe guarantees the process ALWAYS exits.
     const failsafe = setTimeout(() => {
       console.error(`[SHUTDOWN] graceful close did not finish within ${timeoutMs}ms — forcing exit.`);

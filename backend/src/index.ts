@@ -22,6 +22,7 @@ import {
   uiInstruments,
 } from "./market/instruments.js";
 import { createCandlesDbRouter } from "./routes/candlesDb.js";
+import { CapitalReconciler, supportsReconciliation } from "./backfill/reconcile.js";
 import { createEmaAlertRouter } from "./routes/emaAlert.js";
 import { createInstrumentsRouter } from "./routes/instruments.js";
 import { RESOLUTION_BUCKET_SEC, createRealtime, redactEpic } from "./realtime.js";
@@ -80,6 +81,39 @@ const capitalClient = isCapitalConfigured(config) ? new CapitalClient(config.cap
 const instruments = configuredInstruments(config);
 const realtime = createRealtime(instruments, candleStore, capitalClient);
 const defaultEpic = GOLD_INSTRUMENT.epic;
+
+/**
+ * Automatic Capital REST reconciliation of GENUINE missing candles.
+ *
+ * WHY: Capital's MINUTE OHLC WebSocket stream uses DISTINCT delivery, so a
+ * minute whose OHLC never changed can produce ZERO frames while the
+ * high-frequency quote stream keeps flowing — the aggregator has nothing to
+ * close and PostgreSQL keeps no row. Those holes are repaired from the
+ * AUTHORITATIVE source (Capital REST historical prices) through the EXISTING
+ * backfill engine — INSERT-only (`ON CONFLICT DO NOTHING`), market-open buckets
+ * only, never the forming/newest buckets, source='capital', status='backfilled'.
+ * NO synthetic candles are ever derived from quotes.
+ *
+ * GATED, not unconditional: Capital credentials + a CAPITAL collection set + a
+ * store that owns `insertBackfilledBatch` (PgCandleStore only — the Supabase
+ * shim has no such method, so reconciliation can never grow a second
+ * persistence path) + RECONCILE_ENABLED (default on).
+ *
+ * This is fully independent of the live stream: it starts/stops on its own
+ * schedule, holds no provider socket state, and touches NO heartbeat, quote,
+ * aggregator, persistence or frontend code.
+ */
+const reconciler =
+  capitalClient && instruments.length > 0 && supportsReconciliation(candleStore) && config.reconcile?.enabled !== false
+    ? new CapitalReconciler({
+        store: candleStore,
+        fetcher: capitalClient,
+        targets: instruments.flatMap((i) =>
+          i.calendar ? [{ symbol: i.epic, decimals: i.decimals, calendar: i.calendar }] : [],
+        ),
+        settings: config.reconcile,
+      })
+    : null;
 
 const app = new Hono();
 
@@ -163,8 +197,12 @@ realtime.onClientSeed(() => ({ type: "emaAlert", state: emaAlertEngine.statusSna
 app.route("/api", createEmaAlertRouter(emaAlertEngine));
 
 // Streaming status. Truthful: mirrors the actual Capital stream state, not
-// whether a browser socket happens to be open.
-app.get("/api/stream/status", (c) => c.json(realtime.snapshot()));
+// whether a browser socket happens to be open. `reconciliation` is ADDITIVE —
+// automatic-missing-candle-repair observability (runs, missing, inserted, last
+// errors). No consumer of the existing fields is affected.
+app.get("/api/stream/status", (c) =>
+  c.json({ ...realtime.snapshot(), reconciliation: reconciler?.statusSnapshot() ?? null }),
+);
 
 app.onError((err, c) => {
   // Log upstream details server-side but NEVER include secrets/tokens.
@@ -202,6 +240,9 @@ const redactor = new SecretRedactor(() => [
 const lifecycle = installLifecycle({
   redactor,
   stopRealtime: () => realtime.stop(),
+  // Automatic reconciliation holds no provider socket: clearInterval only. An
+  // in-flight run drains on its own and can never block shutdown.
+  stopReconciler: () => reconciler?.stop(),
   closeWebSocketServer: () => wss.close(),
   closeHttpServer: (onClosed) => {
     // serve() returns a plain node:http Server here (no http2 options used).
@@ -278,4 +319,21 @@ if (capitalClient && instruments.length > 0) {
 // to every COMPLETED candle. Fully self-contained — a warm-up failure must
 // never prevent the chart/stream from running.
 void emaAlertEngine.start();
+
+// Automatic Capital REST reconciliation of genuine missing candles (see the
+// `reconciler` construction above). Same lifecycle as the realtime service:
+// started once here, stopped by installLifecycle on SIGTERM/SIGINT. It runs on
+// its OWN interval, completely independent of the live stream AND of any browser
+// client (the same client-independent guarantee as collection), and a REST/DB
+// failure inside a run can never disturb collection, quotes or the chart. When
+// Capital is unconfigured or the store cannot insert backfilled batches,
+// `reconciler` is null and the backend behaves exactly as before.
+if (reconciler) {
+  reconciler.start();
+} else {
+  console.log(
+    "  [capital-reconcile] DISABLED — requires Capital credentials, a CAPITAL collection set, " +
+      "the PostgreSQL store, and RECONCILE_ENABLED (set RECONCILE_ENABLED=false to silence).",
+  );
+}
 

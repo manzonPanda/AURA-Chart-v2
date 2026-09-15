@@ -37,6 +37,23 @@ export interface Config {
   };
   /** First-run seed for the EMA alert master switch (before any UI change). */
   emaAlertEnabledOnBoot: boolean;
+  /**
+   * Automatic Capital REST reconciliation of GENUINE missing candles (the
+   * DISTINCT OHLC-stream hole repair). Values are clamped again at construction
+   * (`resolveReconcileSettings`), so a bad env value can never weaken the
+   * forming-bucket / safety-lag guards. PostgreSQL-only by construction — it
+   * needs `insertBackfilledBatch`, which the Supabase shim does not have.
+   */
+  reconcile: {
+    /** RECONCILE_ENABLED=off/false/0 disables the scheduler entirely. */
+    enabled: boolean;
+    /** RECONCILE_INTERVAL_MINUTES — minutes between runs (default 15). */
+    intervalMinutes: number;
+    /** RECONCILE_LOOKBACK_MINUTES — scan depth (default 180; ≤999 = one page). */
+    lookbackMinutes: number;
+    /** RECONCILE_SAFETY_LAG_MINUTES — newest completed buckets skipped (default 3). */
+    safetyLagMinutes: number;
+  };
 }
 
 /**
@@ -88,6 +105,17 @@ export function loadConfig(): Config {
     emaAlertEnabledOnBoot: ["on", "true", "1"].includes(
       (process.env.EMA_ALERT_ENABLED || "").trim().toLowerCase(),
     ),
+    // Automatic reconciliation — ENABLED by default (opt-out, not opt-in): the
+    // whole point is that genuine holes are repaired without an operator. Non-
+    // numeric values fall back to the defaults inside resolveReconcileSettings.
+    reconcile: {
+      enabled: !["off", "false", "0"].includes(
+        (process.env.RECONCILE_ENABLED || "").trim().toLowerCase(),
+      ),
+      intervalMinutes: Number(process.env.RECONCILE_INTERVAL_MINUTES || 15),
+      lookbackMinutes: Number(process.env.RECONCILE_LOOKBACK_MINUTES || 180),
+      safetyLagMinutes: Number(process.env.RECONCILE_SAFETY_LAG_MINUTES || 3),
+    },
   };
 }
 

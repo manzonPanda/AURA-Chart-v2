@@ -66,8 +66,32 @@ export const IG_GERMANY_40: MarketCalendar = {
 // IG "Spot Gold (SGD1 Contract)" — CS.D.CFIGOLD.CFI.IP. IG's gold CFD follows
 // the CME Globex precious-metals schedule quoted in UK wall-clock time:
 // Sunday open 23:00, Friday close 22:00, with a DAILY 1-hour break
-// 22:00–23:00. US and UK DST shift together, so these wall-clock windows hold
-// year-round (no dead-zone months).
+// 22:00–23:00 UK. A weekday therefore trades TWO London windows per day —
+// 00:00–22:00 and 23:00–24:00 — and the second one is what carries the
+// post-break session across the UTC date boundary (in BST, London 23:00–24:00 =
+// 22:00–23:00 UTC; in GMT it is 23:00–24:00 UTC).
+//
+// CORRECTED 2026-09-15 (forensic finding, read-only investigation): the weekday
+// rule previously carried ONLY the 00:00–22:00 window, so every post-break
+// bucket (London 23:00–24:00, i.e. 22:00–23:00 UTC during BST) was classified
+// CLOSED even though PostgreSQL holds real completed exchange candles there.
+// Those buckets were therefore never shaded as DATA GAPS — the "candle
+// disappeared and no gap box appeared" report. Sunday already carried the
+// evening window; Mon–Thu now carry it too. FRIDAY deliberately does NOT: the
+// Globex week closes at the 22:00 break, and Friday's evening hour is empty in
+// the persisted history (empirically verified over the full collected range).
+//
+// DST: windows stay expressed in London WALL-CLOCK minutes and are resolved per
+// instant through Intl (Europe/London), so they follow BST/GMT automatically —
+// no UTC hour is ever hardcoded.
+//
+// KNOWN BOUNDED LIMITATION (~2 weeks/year): the underlying CME session is
+// anchored to US Eastern time, so during the two short yearly windows when US
+// and UK DST diverge (mid-March→late-March, late-October→early-November) the
+// real break sits one London hour earlier than 22:00–23:00. On those few days
+// the evening rule can be off by one hour, yielding a small number of extra gap
+// flags. This is calendar DATA only and can be refined here later with no
+// detector change.
 //
 // VERIFICATION STATUS (Phase 0, 2026-09-04):
 //   - EPIC + name + currency + precision confirmed against the LIVE account
@@ -81,8 +105,19 @@ export const IG_GERMANY_40: MarketCalendar = {
 //     "missing" bucket (conservative noise, never data corruption), and this
 //     seed is pure DATA — refine it here (no detector changes) as IG's hours
 //     are confirmed across weekends/breaks.
+/**
+ * Mon–Thu trading day: the FULL Globex day — London 00:00–22:00 plus the
+ * post-break London 23:00–24:00 (which lands on the previous UTC date during
+ * BST: 23:00–24:00 London = 22:00–23:00 UTC). Both windows are wall-clock
+ * minutes resolved per instant, so DST is handled automatically.
+ */
+const GOLD_FULL_DAY_WINDOWS: readonly MarketWindow[] = [
+  { openMin: 0, closeMin: 22 * 60 }, //       00:00–22:00 UK (until the daily break)
+  { openMin: 23 * 60, closeMin: 24 * 60 }, // 23:00–24:00 UK (after the daily break)
+];
+/** Friday: 00:00–22:00 UK only — the Globex week closes at the 22:00 break. */
 const GOLD_DAY_WINDOWS: readonly MarketWindow[] = [
-  { openMin: 0, closeMin: 22 * 60 }, // 00:00–22:00 UK (until the daily break)
+  { openMin: 0, closeMin: 22 * 60 }, // 00:00–22:00 UK (until the weekly close)
 ];
 const GOLD_SUNDAY_WINDOWS: readonly MarketWindow[] = [
   { openMin: 23 * 60, closeMin: 24 * 60 }, // 23:00–24:00 UK (Globex week open)
@@ -108,11 +143,11 @@ export const IG_SPOT_GOLD: MarketCalendar = {
   label: "IG Spot Gold (SGD) CFD",
   timezone: "Europe/London",
   windowsByWeekday: {
-    1: GOLD_DAY_WINDOWS,
-    2: GOLD_DAY_WINDOWS,
-    3: GOLD_DAY_WINDOWS,
-    4: GOLD_DAY_WINDOWS,
-    5: GOLD_DAY_WINDOWS,
+    1: GOLD_FULL_DAY_WINDOWS,
+    2: GOLD_FULL_DAY_WINDOWS,
+    3: GOLD_FULL_DAY_WINDOWS,
+    4: GOLD_FULL_DAY_WINDOWS,
+    5: GOLD_DAY_WINDOWS, // Friday: no post-break window — the week closes 22:00 UK
     6: [],
     7: GOLD_SUNDAY_WINDOWS,
   },
@@ -145,6 +180,11 @@ export const IG_SPOT_GOLD: MarketCalendar = {
 // ("ig-spot-silver") even though it shares Gold's windows/holidays today.
 // This keeps the door open for instrument-specific session behaviour later
 // (e.g. a silver-specific holiday) WITHOUT touching the gap detector.
+// Deliberately UNCHANGED by the 2026-09-15 Gold correction: Silver is a retired
+// IG-provider ARCHIVE instrument (never collected, never streamed), and this
+// module only ever claims windows that were explicitly verified. If Silver is
+// ever re-activated, apply the same London 23:00–24:00 weekday window (identical
+// Globex schedule) and add its own regression tests.
 const SILVER_DAY_WINDOWS: readonly MarketWindow[] = GOLD_DAY_WINDOWS; // 00:00–22:00 UK
 const SILVER_SUNDAY_WINDOWS: readonly MarketWindow[] = GOLD_SUNDAY_WINDOWS; // 23:00–24:00 UK
 
