@@ -75,6 +75,14 @@ import { GapRegionsPrimitive } from "./GapRegionsPrimitive";
 import { WhitespaceBridge } from "./WhitespaceBridge";
 import { buildWhitespacePlan } from "../../services/whitespaceRows";
 import { mergeBridgeBars } from "../../services/pineSeries";
+import {
+  bridgeClosedLiveLedger,
+  closedLedgerStorageKey,
+  defaultBridgeStorage,
+  loadClosedLiveLedger,
+  nextRolloverCandidate,
+  saveClosedLiveLedger,
+} from "../../services/closedLedgerBridge";
 
 /**
  * DATA GAP shading — attaches the gap primitive to the chart's main series
@@ -356,6 +364,13 @@ function asBar(c: { ts: number; open: number; high: number; low: number; close: 
     ...(c.volume !== undefined && Number.isFinite(c.volume) ? { volume: c.volume } : {}),
   };
 }
+
+/**
+ * A closed-live ledger bar plus the refresh-bridge stamp (FIX A,
+ * closedLedgerBridge.ts): `savedAt` anchors the 15-minute bridge age cap and
+ * is stripped again by `asBar`/serialization — it never reaches the chart.
+ */
+type ClosedLiveBar = Bar & { savedAt?: number };
 
 /**
  * Stable empty series passed to ChartView while Replay is active. With a
@@ -993,7 +1008,7 @@ export function TradingChart({
   //   - scoped to the current instrument + timeframe (reset on switch / refresh);
   //   - only populated in LIVE mode (cleared and unused during replay);
   //   - never fed to ChartView / history / pagination / viewport.
-  const [closedLiveBars, setClosedLiveBars] = useState<Bar[]>([]);
+  const [closedLiveBars, setClosedLiveBars] = useState<ClosedLiveBar[]>([]);
   // Track the previous forming candle's bucket time to detect rollovers WITHOUT
   // stale React closures — refs always hold the latest value inside effects.
   const prevFormingTsRef = useRef<number | null>(null);
@@ -1067,8 +1082,18 @@ export function TradingChart({
   useEffect(() => {
     if (candles.length === 0) {
       // Live-only mode: liveCandles accumulates the full series; no ledger needed.
-      prevFormingTsRef.current = liveCandle ? liveCandle.time : null;
-      prevFormingBarRef.current = liveCandle ?? null;
+      // FIX B (forensic 2026-09-16): the rollover candidate must survive the
+      // quote storm that follows a refresh. The WS seed's AUTHORITATIVE
+      // `forming-ohlc` frame (the just-closed 3M bucket, mid-delivery) lands
+      // first; the high-frequency quote stream moves to the NEXT bucket within
+      // ~100 ms. Letting a quote frame overwrite the refs here made the
+      // 08:21→08:24 rollover undetectable once history loaded — the just-closed
+      // bucket was recaptured by NOBODY and vanished after the history
+      // setData. Quote frames only ever adopt the candidate when no
+      // authoritative candidate exists (pure-quote streams keep working).
+      const next = nextRolloverCandidate(prevFormingTsRef.current, prevFormingBarRef.current, liveCandle);
+      prevFormingTsRef.current = next.ts;
+      prevFormingBarRef.current = next.bar;
       return;
     }
     if (!liveCandle) return;
@@ -1081,13 +1106,15 @@ export function TradingChart({
       if (prev) {
         const bucketMs = bucketSec * 1000;
         const prevBucketTs = Math.floor((prev.time * 1000) / bucketMs) * bucketMs;
-        const closedBar: Bar = {
+        const closedBar: ClosedLiveBar = {
           ts: prevBucketTs,
           open: prev.open,
           high: prev.high,
           low: prev.low,
           close: prev.close,
           ...(Number.isFinite(prev.volume) ? { volume: prev.volume } : {}),
+          // FIX A: first-bridged stamp — anchors the refresh-bridge age cap.
+          savedAt: Date.now(),
         };
         setClosedLiveBars((prevList) => {
           // Dedup by bucket ts — never record the same rollover twice.
@@ -1114,22 +1141,12 @@ export function TradingChart({
   // Do NOT derive final values from quote mids: once the authoritative frame
   // for a bucket exists, its OHLC is final and immutable.
   const closedLiveLedger = useMemo<Bar[]>(() => {
-    const authBars = closedCandles
-      .filter((c) => Number.isFinite(c.time) && Number.isFinite(c.close))
-      .map((c) => {
-        const ts = alignToBucketStart(c.time * 1000, bucketSec);
-        return asBar({
-          ts,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-          ...(Number.isFinite(c.volume) ? { volume: c.volume } : {}),
-        });
-      });
-    const authTs = new Set(authBars.map((b) => b.ts));
-    const provisional = closedLiveBars.filter((b) => !authTs.has(b.ts));
-    return [...authBars, ...provisional].sort((a, b) => a.ts - b.ts);
+    // FIX A: the merge body is extracted verbatim to
+    // `closedLedgerBridge.bridgeClosedLiveLedger` (pure + Node-testable) —
+    // authority rules UNCHANGED: authoritative `phase:"closed"` frames win
+    // same-bucket over provisional/restored entries; the rest stay provisional.
+    // `savedAt` is stripped here so it never reaches the chart series.
+    return bridgeClosedLiveLedger(closedCandles, closedLiveBars, bucketSec).map(asBar);
   }, [closedCandles, closedLiveBars, bucketSec]);
 
   // FIX 1: the forming candle is NOT passed to merges (bridge bars and `data`
@@ -1202,15 +1219,36 @@ export function TradingChart({
   const ledgerScopeRef = useRef<string | null>(null);
   const ledgerScopeKey = `${instrumentEpic ?? ""}|${bucketSec}`;
   useEffect(() => {
-    // First mount: adopt the current scope without clearing (the state starts
-    // empty; clearing here would be a no-op churn anyway).
-    if (ledgerScopeRef.current === null) {
+    // FIX A (refresh bridge): the epic is "" until the instrument catalog
+    // resolves, so a page load's FIRST scope(s) are placeholders. The previous
+    // page's closed-live ledger is restored exactly ONCE — when the scope
+    // first becomes REAL — which always happens BEFORE history can arrive
+    // (loadHistory needs the same resolved epic), so a refresh during the ~60s
+    // Capital-OHLC persistence window can never wipe the just-closed bucket.
+    const prevKey = ledgerScopeRef.current;
+    if (prevKey === null) {
+      // First mount: adopt the current scope without clearing (the state starts
+      // empty; clearing here would be a no-op churn anyway).
       ledgerScopeRef.current = ledgerScopeKey;
       return;
     }
-    if (ledgerScopeRef.current === ledgerScopeKey) return;
+    if (prevKey === ledgerScopeKey) return;
+    const prevEpic = prevKey.slice(0, prevKey.lastIndexOf("|"));
     ledgerScopeRef.current = ledgerScopeKey;
-    setClosedLiveBars([]);
+    if (prevEpic !== "") {
+      // Genuine scope switch (instrument/timeframe) — the existing clean
+      // boundary: the ledger is scoped to ONE stream and is not carried across.
+      setClosedLiveBars([]);
+    } else {
+      // Boot resolution ("" → GOLD): bridge the previous page's ledger back.
+      // Restored entries are provisional and stay governed by the EXISTING
+      // rules: history prunes the buckets it carries (below), authoritative
+      // `phase:"closed"` frames replace their values in the ledger merge, and
+      // the 15-minute age cap bounds stale entries.
+      setClosedLiveBars(
+        loadClosedLiveLedger(defaultBridgeStorage(), closedLedgerStorageKey(instrumentEpic, bucketSec), Date.now()),
+      );
+    }
     prevFormingTsRef.current = null;
     prevFormingBarRef.current = null;
   }, [ledgerScopeKey]);
@@ -1222,6 +1260,21 @@ export function TradingChart({
   useEffect(() => {
     setClosedLiveBars((prevList) => pruneClosedLiveBars(prevList, candles, bucketSec));
   }, [candles, bucketSec]);
+
+  // FIX A (refresh bridge): mirror the ledger to sessionStorage on every
+  // change — scoped instrument|timeframe, best-effort. An EMPTY ledger removes
+  // the key, so storage is cleaned exactly when history has absorbed (or an
+  // authoritative frame has replaced) every bridged bucket. This is a
+  // SHORT-LIVED bridge across one page reload while PostgreSQL waits for the
+  // ~60s-late Capital authoritative OHLC — never market-data persistence.
+  useEffect(() => {
+    saveClosedLiveLedger(
+      defaultBridgeStorage(),
+      closedLedgerStorageKey(instrumentEpic, bucketSec),
+      closedLiveBars,
+      Date.now(),
+    );
+  }, [closedLiveBars, ledgerScopeKey]);
 
   // OHLC strip: crosshair-hovered candle takes priority, else the latest forming candle.
   const last: Candle | undefined = liveCandle
