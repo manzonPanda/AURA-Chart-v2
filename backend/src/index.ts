@@ -156,7 +156,14 @@ app.route(
 // Chart history from OUR persistence (Oracle PostgreSQL). Instrument-aware:
 // ?epic= validated against the UI/HISTORICAL
 // catalog (archive epics remain readable); omitted → GOLD.
-app.route("/api", createCandlesDbRouter(candleStore, uiInstruments(config), GOLD_INSTRUMENT.epic));
+// The reconciler's settled frontier feeds the DATA GAP semantics: buckets the
+// reconciler has not yet successfully scanned are "pending", never DATA GAP.
+app.route(
+  "/api",
+  createCandlesDbRouter(candleStore, uiInstruments(config), GOLD_INSTRUMENT.epic, () =>
+    reconciler?.settledScanToSec() ?? null,
+  ),
+);
 
 // ── EMA Reversal Alerts (server-side detection + Web Push) ──────────────────
 // Runtime state lives in backend/data/*.json (gitignored) — the database is

@@ -2,6 +2,7 @@ import { Hono, type Context } from "hono";
 import type { CandleBackend, PersistedCandle } from "../db/candleStore.js";
 import { instrumentMetaFor, type InstrumentMeta } from "../market/instruments.js";
 import { detectGaps, deriveGapIntervals } from "../market/gapDetector.js";
+import { RECONCILE_GRACE_FALLBACK_SEC } from "../backfill/reconcile.js";
 import { calendarForInstrument } from "../market/instruments.js";
 import type { CandleStatus } from "../streaming/types.js";
 import {
@@ -35,11 +36,56 @@ import type { Candle } from "../types/candle.js";
 /** Calendar-aware gap intervals over the loaded candle window (epoch-ms).
  *  Wire shape `{ start, end }` (epoch-MILLISECONDS) — what the frontend's
  *  `fetchCandlesDb()` maps into `CandleGap` records. [] when the instrument
- *  has no registered calendar (never guessed). */
-function gapsForEpic(epic: string, timesSec: readonly number[], bucketSec: number): { start: number; end: number }[] {
+ *  has no registered calendar (never guessed).
+ *
+ *  SETTLED-BOUNDARY SEMANTICS (2026-09-16 forensic fix): a missing bucket is a
+ *  DATA GAP only once the reconciler has had a SUCCESSFUL opportunity to scan
+ *  it — i.e. its bucket start is strictly below `settledToSec` (the last
+ *  error-free run's EXCLUSIVE scan end). Buckets at/after the boundary are
+ *  PENDING reconciliation (Capital DISTINCT OHLC delivery can leave them
+ *  absent from PostgreSQL for up to ~18m) and are dropped here, never shaded. */
+function gapsForEpic(
+  epic: string,
+  timesSec: readonly number[],
+  bucketSec: number,
+  settledToSec: number,
+): { start: number; end: number }[] {
   const calendar = calendarForInstrument(epic);
   if (!calendar) return [];
-  return deriveGapIntervals(timesSec, calendar, bucketSec).map((g) => ({ start: g.startMs, end: g.endMs }));
+  return filterSettledGaps(
+    deriveGapIntervals(timesSec, calendar, bucketSec).map((g) => ({ start: g.startMs, end: g.endMs })),
+    settledToSec,
+  );
+}
+
+/** Source of the reconciler's settled frontier — epoch SECONDS of the last
+ *  successful run's EXCLUSIVE scan end, or null when unavailable (reconciler
+ *  disabled / no successful run yet). Structurally satisfied by
+ *  `CapitalReconciler.settledScanToSec` without a hard dependency. */
+export type SettledBoundarySecSource = () => number | null;
+
+/** Resolve the effective settled boundary (epoch SECONDS) for one request:
+ *  the reconciler's frontier when available, else the documented 20-minute
+ *  reconciliation grace behind the wall clock (RECONCILE_GRACE_FALLBACK_SEC
+ *  = safetyLag 3m + interval 15m + 2m slack with default settings). */
+export function resolveSettledToSec(
+  source: SettledBoundarySecSource | undefined,
+  nowMs: number = Date.now(),
+): number {
+  const fromReconciler = source?.();
+  if (typeof fromReconciler === "number" && Number.isFinite(fromReconciler) && fromReconciler > 0) {
+    return Math.floor(fromReconciler);
+  }
+  return Math.floor(nowMs / 1000) - RECONCILE_GRACE_FALLBACK_SEC;
+}
+
+/** Keep only gap intervals whose bucket start is STRICTLY below the settled
+ *  boundary (`bucket >= settledToSec` ⇒ pending reconciliation ⇒ not a DATA
+ *  GAP). Bucket starts and the boundary are minute-aligned, so the strict
+ *  comparison is exact: the boundary itself was NOT scanned (detectGaps scans
+ *  buckets strictly below its `toSec`). */
+export function filterSettledGaps<T extends { start: number }>(gaps: readonly T[], settledToSec: number): T[] {
+  return gaps.filter((g) => Number.isFinite(g.start) && Math.floor(g.start / 1000) < settledToSec);
 }
 
 /** Load chart-history candles for a timeframe WITHOUT touching IG historical
@@ -58,6 +104,7 @@ async function loadTimeframeCandles(
   timeframe: string,
   limit: number,
   beforeSec?: number,
+  settledToSec: number = Math.floor(Date.now() / 1000) - RECONCILE_GRACE_FALLBACK_SEC,
 ): Promise<{ candles: PersistedCandle[]; hasMore: boolean; gaps: { start: number; end: number }[] }> {
   const minutes = minutesFor(timeframe);
 
@@ -69,6 +116,7 @@ async function loadTimeframeCandles(
       epic,
       raw.map((r) => r.time),
       bucketSec,
+      settledToSec,
     );
     return { candles: raw, hasMore: raw.length >= limit, gaps };
   }
@@ -117,6 +165,7 @@ async function loadTimeframeCandles(
     epic,
     candles.map((c) => c.time),
     bucketSec,
+    settledToSec,
   );
   return { candles, hasMore: raw.length >= requested1m, gaps };
 }
@@ -164,6 +213,9 @@ export function createCandlesDbRouter(
   store: CandleBackend | null,
   instruments: readonly InstrumentMeta[],
   defaultEpic: string = instruments[0]?.epic ?? "",
+  /** The Capital reconciler's settled frontier — `CapitalReconciler.settledScanToSec`.
+   *  Omitted/null ⇒ the 20-minute reconciliation grace fallback is used. */
+  settledBoundarySec?: SettledBoundarySecSource,
 ): Hono {
   const app = new Hono();
 
@@ -212,8 +264,9 @@ export function createCandlesDbRouter(
       Number.isFinite(parsedBefore) && parsedBefore > 0 ? Math.floor(parsedBefore) : undefined;
 
     try {
-            const { candles, hasMore, gaps } = await loadTimeframeCandles(store, epic, timeframe, limit, beforeSec);
-      return c.json({ epic, timeframe, count: candles.length, hasMore, candles, gaps });
+      const settledToSec = resolveSettledToSec(settledBoundarySec);
+      const { candles, hasMore, gaps } = await loadTimeframeCandles(store, epic, timeframe, limit, beforeSec, settledToSec);
+      return c.json({ epic, timeframe, count: candles.length, hasMore, candles, gaps, settledToSec });
     } catch (err) {
       return c.json(
         {
@@ -304,6 +357,12 @@ export function createCandlesDbRouter(
         calendar,
         bucketSec,
       });
+      // Settled-boundary protection (same semantics as /candles/db): buckets at
+      // or after the reconciler's last successful scan end are PENDING
+      // reconciliation — Capital DISTINCT delivery may simply not have reached
+      // PostgreSQL yet — so they are never reported as missing DATA GAPs here.
+      const settledToSec = resolveSettledToSec(settledBoundarySec);
+      const settledMissing = report.missing.filter((b) => b < settledToSec);
       const iso = (secs: number[]): string[] =>
         secs.slice(0, 500).map((s) => new Date(s * 1000).toISOString());
 
@@ -311,11 +370,13 @@ export function createCandlesDbRouter(
         epic,
         timeframe,
         bucketSec,
+        settledToSec,
         range: {
           from: new Date(fromSec * 1000).toISOString(),
           to: new Date(formingBucket * 1000).toISOString(),
           hours,
           formingBucketExcluded: new Date(formingBucket * 1000).toISOString(),
+          settledToExcluded: new Date(settledToSec * 1000).toISOString(),
         },
         market: {
           calendar: calendar.id,
@@ -325,14 +386,15 @@ export function createCandlesDbRouter(
         },
         summary: {
           expectedBuckets: report.expectedBuckets,
-          missing: report.missing.length,
+          missing: settledMissing.length,
+          pendingReconciliation: report.missing.length - settledMissing.length,
           partial: report.partial.length,
           completed: report.completed.length,
           backfilled: report.backfilled.length,
           unexpectedRows: report.unexpected.length,
-          truncated: report.missing.length > 500 || report.partial.length > 500,
+          truncated: settledMissing.length > 500 || report.partial.length > 500,
         },
-        missing: iso(report.missing),
+        missing: iso(settledMissing),
         partial: iso(report.partial),
         unexpected: iso(report.unexpected),
       });

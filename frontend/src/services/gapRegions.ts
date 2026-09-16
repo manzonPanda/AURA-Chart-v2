@@ -85,11 +85,23 @@ function floorToBucketMs(tsMs: number, bucketSec: number): number {
  * now be filled by candles loaded from a newer page. This function rebuilds the
  * gap list against the merged candles so repaired buckets disappear.
  *
- * Rules implemented (forensic §8):
+ * Rules implemented (forensic §8, plus the 2026-09-16 settled-boundary fix):
  *  - Rule A/E: a bucket that has an authoritative candle MUST NOT be a DATA GAP.
  *  - Rule B: a gap is only meaningful if it is STRICTLY OLDER than the newest
  *    authoritative closed bucket (the current forming bucket and any unsettled
  *    recent buckets are never shaded).
+ *  - Rule B′ (settled boundary): a bucket the Capital reconciler has not yet
+ *    successfully scanned is PENDING reconciliation — Capital DISTINCT OHLC
+ *    delivery can leave it absent from PostgreSQL for up to ~18 minutes while
+ *    the quote-driven live display already shows the candle — so it must never
+ *    become a DATA GAP. A bucket strictly below the reconciler's last
+ *    successful scan end had its opportunity and, if still missing, is
+ *    genuinely missing: DATA-GAP eligible.
+ *    The boundary comes from the backend (`settledToSec`, epoch SECONDS — the
+ *    same value the backend already enforced). When it is unknown (older
+ *    backend build / reconciler unavailable) a conservative 20-minute grace
+ *    behind the server-calibrated clock applies — the documented worst-case
+ *    normal reconciliation age is 18m07s from bucket start.
  *  - Rule C: a backfill that inserts a previously-missing candle drops its gap
  *    (handled by the caller re-running this on every history update).
  *  - Rule D: this only inspects real candles — temporary quote/live state never
@@ -97,10 +109,45 @@ function floorToBucketMs(tsMs: number, bucketSec: number): number {
  *
  * No candles are fabricated: a band is suppressed only, never created here.
  */
+
+/**
+ * Fallback pending-reconciliation grace (ms) when no authoritative settled
+ * boundary is available. Mirrors the backend's RECONCILE_GRACE_FALLBACK_SEC
+ * (safetyLag 3m + interval 15m + 2m slack with the default settings).
+ */
+export const GAP_SETTLE_GRACE_FALLBACK_MS = 20 * 60_000;
+
+export interface RevalidateGapsOptions {
+  /**
+   * Authoritative settled boundary (epoch MILLISECONDS — `settledToSec * 1000`
+   * from the backend): bucket starts at/after it are pending reconciliation.
+   * `null`/`undefined` ⇒ the time-based fallback below applies.
+   */
+  settledToSecMs?: number | null;
+  /**
+   * "Now" for the fallback grace, epoch ms. Pass the SERVER-CALIBRATED clock
+   * (`Date.now() + clockOffsetMs`) so a skewed client clock cannot flip the
+   * pending classification. Defaults to the local clock + `clockOffsetMs`.
+   */
+  nowMs?: number;
+  /** Server-clock offset (ms) from the realtime stream — used only for the fallback "now". */
+  clockOffsetMs?: number;
+}
+
+/** Resolve the pending boundary (epoch ms) per the options contract above. */
+function resolvePendingBoundaryMs(opts?: RevalidateGapsOptions): number {
+  const settled = opts?.settledToSecMs;
+  if (typeof settled === "number" && Number.isFinite(settled) && settled > 0) return settled;
+  const offset = typeof opts?.clockOffsetMs === "number" && Number.isFinite(opts.clockOffsetMs) ? opts.clockOffsetMs : 0;
+  const now = typeof opts?.nowMs === "number" && Number.isFinite(opts.nowMs) ? opts.nowMs : Date.now() + offset;
+  return now - GAP_SETTLE_GRACE_FALLBACK_MS;
+}
+
 export function revalidateGaps(
   gaps: readonly CandleGap[],
   candles: readonly { ts: number }[],
   bucketSec: number,
+  opts?: RevalidateGapsOptions,
 ): CandleGap[] {
   if (gaps.length === 0) return [];
   if (!Number.isFinite(bucketSec) || bucketSec <= 0) return [];
@@ -120,6 +167,12 @@ export function revalidateGaps(
   // the frontier / forming bucket are suppressed.
   const frontierBucket = floorToBucketMs(latestTs, bucketSec);
 
+  // Rule B′: pending reconciliation — bucket starts at/after the reconciler's
+  // successful scan boundary are never DATA GAPs (backend-enforced too; this
+  // client-side mirror keeps the rule intact when gap state outlives a page —
+  // Load More merges — or when the boundary is unavailable).
+  const pendingBoundaryMs = resolvePendingBoundaryMs(opts);
+
   const kept: CandleGap[] = [];
   for (const g of gaps) {
     if (!Number.isFinite(g.startTime) || !Number.isFinite(g.endTime) || g.endTime <= g.startTime) {
@@ -128,6 +181,7 @@ export function revalidateGaps(
     const gapBucket = floorToBucketMs(g.startTime, bucketSec);
     if (presentBuckets.has(gapBucket)) continue; // Rule A: bucket now has a candle
     if (gapBucket >= frontierBucket) continue; // Rule B: at/after the closed frontier
+    if (gapBucket >= pendingBoundaryMs) continue; // Rule B′: pending reconciliation
     kept.push(g);
   }
   // Stable, ascending by startTime (matches mergeGapLists sort direction).

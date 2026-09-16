@@ -310,6 +310,14 @@ export default function App() {
   // Independent of historical REST — realtime is the priority and always starts.
   const realtime = useRealtimeStream(timeframe, epic || undefined, streamEpoch);
 
+  // Server-clock calibration for the DATA GAP pending fallback (Rule B′): when
+  // the backend's settled reconciliation boundary is unavailable, the 20-minute
+  // grace must count against the SERVER clock, not a skewed client clock. Read
+  // through the ref inside history callbacks (they must not depend on the
+  // realtime object — a clock recalibration must never re-trigger a reload).
+  const clockOffsetRef = useRef(0);
+  clockOffsetRef.current = realtime.clockOffsetMs;
+
   // Clock ticker so tick-age ("CONNECTED · NO TICKS") stays truthful.
   useEffect(() => {
     const id = window.setInterval(() => setNowTick(Date.now()), NOW_TICK_MS);
@@ -685,6 +693,10 @@ export default function App() {
       let lastHasMore = true;
       let finalizedEpic = wantedEpic || "";
       let cursor: number | undefined; // undefined → the newest page
+      // Settled reconciliation boundary (epoch SECONDS) — the freshest value
+      // across the sequential pages. `null` = backend did not supply one (older
+      // build) → the client-side 20-minute grace fallback applies downstream.
+      let settledToSec: number | null = null;
       while (pages < plan.requests && lastHasMore) {
         const page = await fetchCandlesDb(
           timeframe,
@@ -695,6 +707,9 @@ export default function App() {
         if (seq !== requestSeq.current) return; // superseded by a newer scope — discard
         if (wantedEpic && page.epic !== wantedEpic) return; // stale instrument — dropped
         finalizedEpic = page.epic;
+        if (page.settledToSec !== null) {
+          settledToSec = settledToSec === null ? page.settledToSec : Math.max(settledToSec, page.settledToSec);
+        }
         let added: number;
         if (loaded.length === 0) {
           // Newest page adopted as-is (the backend guarantees ascending, chart-ready).
@@ -721,7 +736,15 @@ export default function App() {
       // Revalidate gaps against the freshly loaded dataset — a backfill/reconcile
       // that filled a previously-missing bucket must erase its gap here (Rule C)
       // and gaps at/after the newest closed bucket are suppressed (Rule B).
-      setGaps(revalidateGaps(loadedGaps, loaded, resolutionToBucketSec(timeframe)));
+      // Rule B′ (settled boundary): buckets the reconciler has not yet
+      // successfully scanned are PENDING — a refresh/resync/horizon change can
+      // never repaint them as a DATA GAP. The fallback "now" is server-calibrated.
+      setGaps(
+        revalidateGaps(loadedGaps, loaded, resolutionToBucketSec(timeframe), {
+          settledToSecMs: settledToSec !== null ? settledToSec * 1000 : null,
+          nowMs: Date.now() + clockOffsetRef.current,
+        }),
+      );
       setHistoryMissing(false);
       setHistoryStatus({ loading: false, exhausted: !lastHasMore, error: null });
       if (pages > 1) {
@@ -825,9 +848,15 @@ export default function App() {
         // interval) so shading accumulates across the whole loaded window.
         // Then REVALIDATE against the freshly merged dataset so a backfill that
         // filled a previously-missing bucket erases its gap (Rule C) and
-        // frontier/duplicate gaps are suppressed (Rule A/B).
+        // frontier/duplicate gaps are suppressed (Rule A/B). Rule B′ applies
+        // the settled reconciliation boundary from THIS page (the freshest
+        // frontier — it can only advance, so pending buckets stay pending and
+        // the DATA GAP state never oscillates across history extensions).
         setGaps((prev) =>
-          revalidateGaps(mergeGapLists(prev, data.gaps), merged, resolutionToBucketSec(timeframe)),
+          revalidateGaps(mergeGapLists(prev, data.gaps), merged, resolutionToBucketSec(timeframe), {
+            settledToSecMs: data.settledToSec !== null ? data.settledToSec * 1000 : null,
+            nowMs: Date.now() + clockOffsetRef.current,
+          }),
         );
         console.info(`[HISTORY] +${added} older candles (oldest now ${iso(merged[0].ts)})`);
       }

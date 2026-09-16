@@ -131,6 +131,50 @@ export function resolveReconcileSettings(partial: Partial<ReconcileSettings> = {
     ),
   };
 }
+// ── Settled boundary (DATA GAP semantics — the reconciliation frontier) ──────
+
+/**
+ * Fallback pending-reconciliation grace, in SECONDS, for consumers with no
+ * successful reconciler run to learn the boundary from (reconciler disabled,
+ * fresh boot before the first pass completes). With the default settings this
+ * is safetyLag (3m) + interval (15m) + 2m slack = 20 minutes: the empirical
+ * worst-case normal repair age observed in production is 17m16s and the
+ * theoretical worst case is 18m07s from bucket start, so 20m is the minimum
+ * with sane slack (forensic §1, 2026-09-16).
+ */
+export const RECONCILE_GRACE_FALLBACK_SEC = 20 * 60;
+
+/** Immutable settled-boundary state carried by the scheduled reconciler. */
+export interface SettledScanBoundary {
+  /** Scan window start of the last successful run (epoch ms). */
+  lastScanFromMs: number | null;
+  /** EXCLUSIVE scan end of the last successful run (epoch ms). */
+  lastScanToMs: number | null;
+  /** Whether the last completed run finished with zero errors. */
+  lastRunSucceeded: boolean;
+}
+
+/**
+ * Pure settled-boundary advance for one completed reconciler pass.
+ *
+ * ONLY a fully error-free run advances the boundary: a failed run's detection
+ * result is not authoritative (buckets in its window were found missing but
+ * not confidently repaired or confirmed), so the previous boundary — and the
+ * previous "still missing ⇒ genuinely missing" guarantee — must stand.
+ * A run with no targets (scheduler skipped) is a no-op.
+ */
+export function advanceSettledBoundary(
+  prev: SettledScanBoundary,
+  results: readonly ReconcileResult[],
+): SettledScanBoundary {
+  if (results.length === 0) return prev;
+  const succeeded = results.every((r) => r.errors.length === 0);
+  if (!succeeded) return { ...prev, lastRunSucceeded: false };
+  // All targets share ONE scan window per pass (reconcileTargets computes it
+  // once from `nowMs`); the first result's window is the run's window.
+  const first = results[0]!;
+  return { lastScanFromMs: first.fromMs, lastScanToMs: first.toMs, lastRunSucceeded: true };
+}
 
 // ── Pure window + detection math (unit-tested without any I/O) ───────────────
 
@@ -405,6 +449,19 @@ export interface ReconcilerStatus {
   lastMissing: number;
   lastInserted: number;
   lastErrors: string[];
+  /**
+   * Settled-boundary tracking (DATA GAP semantics): the scan window
+   * `[lastScanFromMs, lastScanToMs)` of the last SUCCESSFUL run. Every bucket
+   * start `< lastScanToMs` has had its successful reconciliation opportunity —
+   * still missing there ⇒ genuinely missing (DATA GAP eligible). Buckets at or
+   * after the boundary are PENDING reconciliation and must never be shaded.
+   * `null` until the first successful run (no boundary established yet).
+   * `lastScanToMs` is EXCLUSIVE (detectGaps scans buckets strictly below it).
+   */
+  lastScanFromMs: number | null;
+  lastScanToMs: number | null;
+  /** Whether the last completed run finished with zero errors (`false` before the first run). */
+  lastRunSucceeded: boolean;
   totals: { missing: number; inserted: number; runsWithErrors: number };
 }
 
@@ -428,6 +485,9 @@ export class CapitalReconciler {
   private lastMissing = 0;
   private lastInserted = 0;
   private lastErrors: string[] = [];
+  private lastScanFromMs: number | null = null;
+  private lastScanToMs: number | null = null;
+  private lastRunSucceeded = false;
   private totalMissing = 0;
   private totalInserted = 0;
   private runsWithErrors = 0;
@@ -483,6 +543,11 @@ export class CapitalReconciler {
       this.runsWithErrors += 1;
       this.lastRunAtMs = Date.now();
       this.lastDurationMs = Date.now() - startedAt;
+      // A thrown run performed no authoritative scan: the settled frontier must
+      // NOT advance (the previous successful boundary stands) AND the run must
+      // not be reported as successful — otherwise `/api/stream/status` could
+      // show lastRunSucceeded=true with lastErrors populated.
+      this.lastRunSucceeded = false;
       console.log(`[capital-reconcile] run FAILED — ${this.lastErrors[0]}`);
       return [];
     } finally {
@@ -501,6 +566,27 @@ export class CapitalReconciler {
     this.totalMissing += this.lastMissing;
     this.totalInserted += this.lastInserted;
     if (this.lastErrors.length > 0) this.runsWithErrors += 1;
+    // Settled-boundary advance (additive state only — scheduling, lookback,
+    // safety lag and Capital REST behavior are untouched): only an error-free
+    // run moves the frontier (see advanceSettledBoundary).
+    const next = advanceSettledBoundary(
+      { lastScanFromMs: this.lastScanFromMs, lastScanToMs: this.lastScanToMs, lastRunSucceeded: this.lastRunSucceeded },
+      results,
+    );
+    this.lastScanFromMs = next.lastScanFromMs;
+    this.lastScanToMs = next.lastScanToMs;
+    this.lastRunSucceeded = next.lastRunSucceeded;
+  }
+
+  /**
+   * The reconciler's settled frontier in epoch SECONDS: every bucket start
+   * strictly below it has had a successful reconciliation opportunity (it was
+   * inside the last error-free run's scan window), so a bucket still missing
+   * there is genuinely missing. `null` until the first successful run —
+   * consumers then fall back to RECONCILE_GRACE_FALLBACK_SEC. Read-only.
+   */
+  settledScanToSec(): number | null {
+    return this.lastScanToMs === null ? null : Math.floor(this.lastScanToMs / 1000);
   }
 
   /** Read-only status — the additive `/api/stream/status` payload. */
@@ -522,6 +608,9 @@ export class CapitalReconciler {
       lastMissing: this.lastMissing,
       lastInserted: this.lastInserted,
       lastErrors: this.lastErrors,
+      lastScanFromMs: this.lastScanFromMs,
+      lastScanToMs: this.lastScanToMs,
+      lastRunSucceeded: this.lastRunSucceeded,
       totals: {
         missing: this.totalMissing,
         inserted: this.totalInserted,

@@ -67,6 +67,11 @@ interface DbCandlesResponse {
   candles: DbCandleDto[];
   /** Detected market-data gaps (epoch-ms) — derived from the calendar + loaded candles. */
   gaps?: { start: number; end: number }[];
+  /** Settled reconciliation boundary (epoch SECONDS, from the backend): bucket
+   *  starts strictly below it have had a successful reconciliation opportunity
+   *  and are DATA-GAP-eligible if still missing; at/after it ⇒ pending.
+   *  Older backends omit the field → treated as unknown (client-side fallback). */
+  settledToSec?: number | null;
 }
 
 /**
@@ -93,7 +98,7 @@ export async function fetchCandlesDb(
   limit = HISTORY_LIMIT,
   epic?: string,
   beforeSec?: number,
-): Promise<{ epic: string; candles: Candle[]; hasMore: boolean; gaps: CandleGap[] }> {
+): Promise<{ epic: string; candles: Candle[]; hasMore: boolean; gaps: CandleGap[]; settledToSec: number | null }> {
   const qs = new URLSearchParams({ timeframe, limit: String(limit) });
   if (epic) qs.set("epic", epic);
   if (beforeSec !== undefined) qs.set("before", String(Math.floor(beforeSec)));
@@ -122,6 +127,12 @@ export async function fetchCandlesDb(
       endTime: g.end,
       reason: "broker_gap" as const,
     })),
+    // Additive settled boundary (epoch SECONDS): the frontend applies the same
+    // pending-vs-confirmed rule so a history reload can never re-paint a
+    // pending bucket as a DATA GAP. `null` = unknown (older backend) → the
+    // caller's 20-minute grace fallback applies in gapRegions.ts.
+    settledToSec:
+      typeof body.settledToSec === "number" && Number.isFinite(body.settledToSec) ? body.settledToSec : null,
   };
 }
 
