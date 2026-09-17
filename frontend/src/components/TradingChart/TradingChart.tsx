@@ -1178,11 +1178,14 @@ export function TradingChart({
       //     forming candle once its bucket is closed — an older authoritative
       //     candle is never mutated by a newer/quote-derived value.
       //
-      // ASCENDING GUARANTEE: `mergeBridgeBars` dedupes by ts but never sorts, so
-      // a ledger bucket sitting in a hole older than the newest history bucket
-      // would otherwise land LAST. Lightweight Charts requires ascending data,
-      // so the result is sorted here (a no-op in the normal already-ordered
-      // case). The merge returns a fresh array, so this mutates no state.
+      // ASCENDING GUARANTEE: Lightweight Charts requires ascending series data —
+      // a series' plot rows are stored in DATA order while the time-scale indices
+      // follow TIME order, so a non-ascending series makes the internal index
+      // lookup miss and the Line colorer throws `Uncaught Error: Value is null`.
+      // `mergeBridgeBars` now sorts its history + ledger merge (so a ledger
+      // bucket sitting in a hole older than the newest history bucket no longer
+      // lands LAST); this is the explicit guard for the DISPLAY series. The merge
+      // returns a fresh array, so sorting here mutates no state.
       //
       // FIX (flicker): the FORMING candle is deliberately NOT passed here.
       // `formingForMerges` changes on every live quote frame; including it in
@@ -1655,6 +1658,15 @@ export function TradingChart({
       // rollover captures only fill buckets the closed frame has not reached) and
       // the forming candle is withheld once its bucket is closed — a quote-derived
       // forming value can never overwrite a persisted closed OHLC.
+    // ASCENDING GUARANTEE (crash fix): this array is fed STRAIGHT into Line
+    // series — EmaBridge/SmaBridge inputs, every PineBridge plot series and the
+    // per-pane marker/price-line carrier (`carrier.setData(barsNow)`). A
+    // non-ascending series makes Lightweight Charts' internal index lookup miss
+    // and its Line colorer throws `Uncaught Error: Value is null` on the next
+    // repaint (e.g. triggered by CandleKit's `updateBar`). `mergeBridgeBars`
+    // sorts its history + ledger merge; this re-asserts the same contract for
+    // the whole bridge array — a no-op in the already-ordered case, and the
+    // merge already returned a fresh array, so no state is mutated.
     return mergeBridgeBars(
       candles.length > 0
         ? [...warmupBars, ...candles.map((c) => asBar({ ...c, ts: alignToBucketStart(c.ts, bucketSec) }))]
@@ -1662,7 +1674,7 @@ export function TradingChart({
       closedLiveLedger,
       null, // forming candle painted live, never part of bridge bars
       bucketSec,
-    );
+    ).sort((a, b) => a.ts - b.ts);
   }, [session, candles, bucketSec, liveCandles, closedLiveLedger, visibleBars, warmupCandles]);
 
   // ── Unified-header reporting (the old bottom `.chart-footer` is gone) ──────

@@ -27,6 +27,7 @@ const T1 = T0 + 60_000;
 const T2 = T0 + 120_000;
 const T3 = T0 + 180_000;
 const T4 = T0 + 240_000;
+const T5 = T0 + 300_000;
 
 const histBar = (ts, close) => ({
   ts,
@@ -120,4 +121,71 @@ test("merge: forming uses bucket grid floor (epoch s -> ms) + null/empty safety"
   const safe = mergeBridgeBars([histBar(T0, 5)], [], liveBar(T1, 7), 0);
   assert.equal(safe.length, 2);
   assert.ok(safe.every((b) => Number.isFinite(b.ts)));
+});
+
+// ── ASCENDING GUARANTEE (crash fix) ──────────────────────────────────────────
+// BUG BEING LOCKED IN: the merged series is fed STRAIGHT into Lightweight Charts
+// Line series (EMA/SMA inputs, PineBridge plot series, the per-pane marker /
+// price-line carrier via `carrier.setData(barsNow)`). LWC stores a series' plot
+// rows in DATA order while its time-scale indices follow TIME order, so a
+// non-ascending series makes its internal `_internal_valueAt(index)` lookup
+// return null and `barStyleFnMap.Line` throws
+//     Uncaught Error: Value is null
+// on the next repaint (e.g. triggered by CandleKit's `updateBar`).
+test("merge: a ledger bucket in a HOLE older than the newest history bucket never lands last", () => {
+  // Capital's OHLC delivery lags a bucket, so the frozen REST page can MISS an
+  // older 3M bucket while its later neighbour is already present:
+  //   history = [T0, T1, T3]   (T2 missing — the hole)
+  //   ledger  = [T2]           (the ledger still carries the closed bucket T2)
+  // Blindly appending the ledger put T2 LAST → non-ascending → the crash.
+  const historical = [histBar(T0, 100), histBar(T1, 101), histBar(T3, 103)];
+  const ledger = [histBar(T2, 102)];
+  const merged = mergeBridgeBars(historical, ledger, null, 60);
+
+  assert.deepEqual(merged.map((b) => b.ts), [T0, T1, T2, T3], "hole bucket is sorted into its place");
+  assert.equal(merged[2].close, 102, "the closed-live bucket keeps its authoritative OHLC");
+  assert.equal(merged[2].high, 103, "OHLC rides along with the bucket, not just the ts");
+  for (let i = 1; i < merged.length; i++) {
+    assert.ok(merged[i].ts > merged[i - 1].ts, "strictly ascending — LWC can index every row");
+  }
+});
+
+test("merge: output is strictly ascending for ANY input order (unsorted history/ledger in)", () => {
+  const historical = [histBar(T2, 102), histBar(T0, 100), histBar(T1, 101)];
+  const ledger = [histBar(T4, 104), histBar(T3, 103)];
+  const merged = mergeBridgeBars(historical, ledger, liveBar(T5, 105), 60);
+
+  assert.deepEqual(
+    merged.map((b) => b.ts),
+    [T0, T1, T2, T3, T4, T5],
+    "the merge must hand Lightweight Charts an ordered series, whatever the inputs",
+  );
+  for (let i = 1; i < merged.length; i++) assert.ok(merged[i].ts > merged[i - 1].ts);
+});
+
+test("merge: a stale forming frame is placed at its true bucket position, never last", () => {
+  const historical = [histBar(T0, 100), histBar(T2, 102)];
+  // Late/stale WS frame for a bucket that is NOT the newest one and is absent.
+  const merged = mergeBridgeBars(historical, [], liveBar(T1, 101.5), 60);
+  assert.deepEqual(merged.map((b) => b.ts), [T0, T1, T2], "inserted in order, ascending preserved");
+
+  // Stale frame whose bucket ALREADY exists → replace in place (no duplicate).
+  const ledger = [histBar(T1, 101), histBar(T3, 103)];
+  const replaced = mergeBridgeBars([histBar(T0, 100)], ledger, liveBar(T1, 101.7), 60);
+  assert.deepEqual(replaced.map((b) => b.ts), [T0, T1, T3], "same bucket never duplicates");
+  assert.equal(replaced[1].close, 101.7, "server truth still replaces the bucket in place");
+});
+
+test("merge: ordering is enforced without mutating the callers' arrays", () => {
+  const historical = [histBar(T0, 100), histBar(T2, 102)];
+  const ledger = [histBar(T1, 101)];
+  const histBefore = historical.map((b) => b.ts);
+  const ledgerBefore = ledger.map((b) => b.ts);
+
+  const merged = mergeBridgeBars(historical, ledger, null, 60);
+
+  assert.deepEqual(historical.map((b) => b.ts), histBefore, "history array untouched");
+  assert.deepEqual(ledger.map((b) => b.ts), ledgerBefore, "ledger array untouched");
+  assert.notEqual(merged, historical, "a fresh array is returned");
+  assert.deepEqual(merged.map((b) => b.ts), [T0, T1, T2]);
 });

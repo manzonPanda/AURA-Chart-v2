@@ -66,7 +66,20 @@ export interface PineSeriesLiveCandle {
  *   - same bucket ts → real/latest candle wins (server truth replaces)
  *   - strictly ascending ts
  *   - no duplicate timestamps
- *   - forming candle is appended LAST
+ *   - forming candle sits LAST when it is the newest bucket (in its true bucket
+ *     position otherwise — a stale frame can never break the ordering)
+ *
+ * ASCENDING GUARANTEE (crash fix): callers feed this series STRAIGHT into
+ * Lightweight Charts Line series (EmaBridge/SmaBridge inputs, every PineBridge
+ * plot series, and the per-pane marker/price-line carrier). LWC stores a
+ * series' plot rows in DATA order while its time-scale indices follow TIME
+ * order, so a non-ascending series makes the internal index lookup
+ * (`_internal_valueAt`) return null and the Line colorer throws
+ * `Uncaught Error: Value is null` on the next repaint. The ledger is normally
+ * newer than the history tail, but Capital's OHLC delivery lags a bucket: the
+ * frozen REST page can MISS an older bucket the ledger still carries, and that
+ * bucket must be sorted back into its hole — never appended after a newer
+ * candle.
  *
  * Pure + framework-free (no React/DOM/engine imports) — unit-testable.
  */
@@ -87,22 +100,38 @@ export function mergeBridgeBars(
       out.push(b);
     }
   }
-  // Then closed-live ledger — newer than history by construction.
+  // Then closed-live ledger — normally newer than history by construction, but
+  // it can also carry a bucket sitting in a HOLE the frozen REST page misses.
   for (const b of closedLive) {
     if (!seen.has(b.ts)) {
       seen.add(b.ts);
       out.push(b);
     }
   }
+  // ASCENDING GUARANTEE (see the docstring): history + ledger are put in ts
+  // order BEFORE the forming candle is placed. Callers hand this array straight
+  // to Lightweight Charts, whose per-series plot list is stored in DATA order
+  // while its time-scale indices follow TIME order — a non-ascending series
+  // makes the internal index lookup miss and the Line colorer throws
+  // `Uncaught Error: Value is null`. This sorts only the fresh `out` array
+  // (callers' arrays are never mutated) and is a no-op in the already-ordered
+  // case.
+  out.sort((a, b) => a.ts - b.ts);
   // Then the forming candle — replaced in place if its bucket ts already exists
-  // (it shouldn't in live mode, but the guard keeps this race-free), else appended.
+  // (it shouldn't in live mode, but the guard keeps this race-free), else placed
+  // at its TRUE bucket position: appended when it is the newest bucket (the
+  // normal case), inserted in order for a stale/out-of-sequence frame so the
+  // ascending guarantee can never be broken.
   if (forming && Number.isFinite(forming.time)) {
     const liveBucketTs = Math.floor((forming.time * 1000) / bucketMs) * bucketMs;
+    const row = { ts: liveBucketTs, open: forming.open, high: forming.high, low: forming.low, close: forming.close, volume: forming.volume };
     const idx = out.findIndex((b) => b.ts === liveBucketTs);
     if (idx >= 0) {
-      out[idx] = { ts: liveBucketTs, open: forming.open, high: forming.high, low: forming.low, close: forming.close, volume: forming.volume };
+      out[idx] = row;
     } else {
-      out.push({ ts: liveBucketTs, open: forming.open, high: forming.high, low: forming.low, close: forming.close, volume: forming.volume });
+      const at = out.findIndex((b) => b.ts > liveBucketTs);
+      if (at < 0) out.push(row);
+      else out.splice(at, 0, row);
     }
   }
   return out;
