@@ -92,16 +92,34 @@ export function supportsReconciliation(store: unknown): store is ReconcileStore 
 export interface ReconcileSettings {
   /** Minutes between automatic runs. */
   intervalMinutes: number;
-  /** How far back each run scans (≤999 keeps one run to a single REST page). */
+  /**
+   * How far back each RECURRING run scans. Default 180. Ceiling 10080 minutes
+   * (7 days): 999 minutes ≈ one Capital REST page, and any larger value is
+   * safely tiled into 999-minute pages by the existing downloader pagination.
+   */
   lookbackMinutes: number;
   /** Newest COMPLETED buckets deliberately skipped (Capital REST settlement). */
   safetyLagMinutes: number;
+  /**
+   * Startup-only extended lookback (default 7200 = 5 days). Used ONLY by the
+   * first run after start(); subsequent scheduled runs use lookbackMinutes.
+   * The 999≈one-page rule does NOT apply to multi-page startup recovery — the
+   * downloader paginates safely up to the 10080 (7-day) ceiling.
+   */
+  startupLookbackMinutes?: number;
 }
+
+/**
+ * Startup recovery default depth: 5 days. Used ONLY by the first run after
+ * start(); `RECONCILE_STARTUP_LOOKBACK_MINUTES` overrides it.
+ */
+const DEFAULT_STARTUP_LOOKBACK_MINUTES = 7200;
 
 export const RECONCILE_DEFAULTS: ReconcileSettings = {
   intervalMinutes: 15,
   lookbackMinutes: 180,
   safetyLagMinutes: 3,
+  startupLookbackMinutes: DEFAULT_STARTUP_LOOKBACK_MINUTES,
 };
 
 const clampInt = (value: number, min: number, max: number, fallback: number): number => {
@@ -121,13 +139,23 @@ export function resolveReconcileSettings(partial: Partial<ReconcileSettings> = {
       partial.intervalMinutes ?? RECONCILE_DEFAULTS.intervalMinutes,
       1, 1440, RECONCILE_DEFAULTS.intervalMinutes,
     ),
+    // Ceiling 10080 min (7 days). 999 ≈ one Capital REST page, but the existing
+    // downloader paginates safely beyond it — so the startup recovery pass can
+    // legitimately scan 7200 (5 days). The DEFAULT stays 180: recurring runs are
+    // unaffected unless an operator explicitly raises RECONCILE_LOOKBACK_MINUTES.
     lookbackMinutes: clampInt(
       partial.lookbackMinutes ?? RECONCILE_DEFAULTS.lookbackMinutes,
-      1, 999, RECONCILE_DEFAULTS.lookbackMinutes,
+      1, 10080, RECONCILE_DEFAULTS.lookbackMinutes,
     ),
     safetyLagMinutes: clampInt(
       partial.safetyLagMinutes ?? RECONCILE_DEFAULTS.safetyLagMinutes,
       1, 60, RECONCILE_DEFAULTS.safetyLagMinutes,
+    ),
+    // Startup recovery depth (5 days by default). Ceiling 10080 (7 days) — the
+    // existing downloader paginates the range into 999-minute REST pages.
+    startupLookbackMinutes: clampInt(
+      partial.startupLookbackMinutes ?? DEFAULT_STARTUP_LOOKBACK_MINUTES,
+      1, 10080, DEFAULT_STARTUP_LOOKBACK_MINUTES,
     ),
   };
 }
@@ -396,7 +424,7 @@ export async function reconcileTargets(
           backoffMs: opts.backoffMs,
           // A malformed row is REPORTED and never inserted; it must not abort an
           // otherwise-healthy repair run.
-                    onInvalid: opts.onInvalid ?? "reject",
+          onInvalid: opts.onInvalid ?? "reject",
           // The downloader's per-step diagnostics are silenced here: the
           // reconciler emits exactly ONE concise summary line per target (see
           // summarizeReconcile), and the downloader's own metrics are folded
@@ -434,7 +462,13 @@ export interface CapitalReconcilerOptions extends ReconcileEngineOptions {
 export interface ReconcilerStatus {
   enabled: boolean;
   intervalMinutes: number;
+  /** Scan depth of RECURRING runs — the scheduler's steady-state lookback. */
   lookbackMinutes: number;
+  /**
+   * Scan depth of the FIRST run after start() ONLY (startup/offline recovery).
+   * Reported so an operator can confirm the extended recovery pass is wired.
+   */
+  startupLookbackMinutes: number;
   safetyLagMinutes: number;
   targets: string[];
   running: boolean;
@@ -499,16 +533,26 @@ export class CapitalReconciler {
     });
   }
 
-  /** Immediate first pass, then one pass per interval. Idempotent. */
+  /**
+   * Immediate first pass with the extended startup lookback (5 days by
+   * default), then one pass per interval using the normal lookbackMinutes.
+   * Idempotent — safe to call multiple times.
+   */
   start(): void {
     if (this.timer || this.stopped) return;
+    const startupLookback =
+      this.settings.startupLookbackMinutes ?? DEFAULT_STARTUP_LOOKBACK_MINUTES;
     const symbols = this.opts.targets.map((t) => t.symbol).join("+") || "(none)";
     console.log(
       `[capital-reconcile] ENABLED — ${symbols}: every ${this.settings.intervalMinutes}m over the last ` +
-        `${this.settings.lookbackMinutes}m, skipping the newest ${this.settings.safetyLagMinutes} completed ` +
+        `${this.settings.lookbackMinutes}m (startup: ${startupLookback}m), skipping the newest ${this.settings.safetyLagMinutes} completed ` +
         `bucket(s); Capital REST repair is INSERT-only (ON CONFLICT DO NOTHING), open buckets only.`,
     );
-    void this.runOnce();
+    // FIRST run only: extended startup recovery lookback (default 7200m = 5 days).
+    // The override only widens lookbackMinutes for this single call; all later
+    // scheduled runs use this.opts unchanged → normal lookbackMinutes (180m).
+    void this.runOnce(Date.now(), startupLookback);
+    // Subsequent runs: normal lookbackMinutes on the configured interval.
     this.timer = setInterval(() => void this.runOnce(), this.settings.intervalMinutes * 60_000);
   }
 
@@ -525,8 +569,17 @@ export class CapitalReconciler {
   /**
    * One sequential, non-overlapping pass. NEVER throws and never rejects.
    * Returns the per-target results ([] when skipped/already running).
+   *
+   * @param nowMs       Epoch-ms to treat as "now" (excluded from scan).
+   * @param overrideLookbackMinutes  Startup-only override: when provided, the
+   *   scan window is widened to this many minutes for this single call only.
+   *   Recurring scheduled runs omit this → the normal lookbackMinutes
+   *   (default 180) is used.
    */
-  async runOnce(nowMs: number = Date.now()): Promise<ReconcileResult[]> {
+  async runOnce(
+    nowMs: number = Date.now(),
+    overrideLookbackMinutes?: number,
+  ): Promise<ReconcileResult[]> {
     if (this.stopped || this.running) {
       if (this.running) this.skippedRuns += 1;
       return [];
@@ -534,7 +587,14 @@ export class CapitalReconciler {
     this.running = true;
     const startedAt = Date.now();
     try {
-      const results = await reconcileTargets(this.opts, nowMs);
+      // First-run override: temporarily widen lookbackMinutes for the startup
+      // recovery scan. Subsequent scheduled runs pass undefined → use this.opts
+      // unchanged (normal lookbackMinutes).
+      const effectiveOpts =
+        overrideLookbackMinutes !== undefined
+          ? { ...this.opts, settings: { ...this.opts.settings, lookbackMinutes: overrideLookbackMinutes } }
+          : this.opts;
+      const results = await reconcileTargets(effectiveOpts, nowMs);
       this.record(results, Date.now() - startedAt);
       return results;
     } catch (err) {
@@ -595,6 +655,8 @@ export class CapitalReconciler {
       enabled: true,
       intervalMinutes: this.settings.intervalMinutes,
       lookbackMinutes: this.settings.lookbackMinutes,
+      startupLookbackMinutes:
+        this.settings.startupLookbackMinutes ?? DEFAULT_STARTUP_LOOKBACK_MINUTES,
       safetyLagMinutes: this.settings.safetyLagMinutes,
       targets: this.opts.targets.map((t) => t.symbol),
       running: this.running,

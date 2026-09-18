@@ -47,6 +47,7 @@ import {
   supportsReconciliation,
   type ReconcileStore,
 } from "../backfill/reconcile.js";
+import { CAPITAL_BACKFILL_WINDOW_MS, MINUTE_MS } from "../backfill/capitalDownloader.js";
 import type { CapitalBackfillRow } from "../backfill/capitalDownloader.js";
 import type { CandleSource } from "../db/candleStore.js";
 import { PgCandleStore } from "../db/candleStore.js";
@@ -181,12 +182,205 @@ test("1c. resolveReconcileSettings: invalid/garbage values fall back safely", ()
   assert.equal(resolveReconcileSettings({ safetyLagMinutes: Number.NaN }).safetyLagMinutes, 3);
   assert.equal(resolveReconcileSettings({ intervalMinutes: 0 }).intervalMinutes, 1);
   assert.equal(resolveReconcileSettings({ intervalMinutes: 99_999 }).intervalMinutes, 1440);
-  // ≤999 minutes keeps ONE run to a single Capital REST page.
-  assert.equal(resolveReconcileSettings({ lookbackMinutes: 50_000 }).lookbackMinutes, 999);
+  // Ceiling is 10080 minutes (7 days) — raised from 999 so the 7200-minute
+  // (5-day) startup recovery can paginate through multiple REST pages.
+  assert.equal(resolveReconcileSettings({ lookbackMinutes: 50_000 }).lookbackMinutes, 10080);
+  assert.equal(resolveReconcileSettings({ startupLookbackMinutes: 50_000 }).startupLookbackMinutes, 10080);
   assert.equal(resolveReconcileSettings({ safetyLagMinutes: 99_999 }).safetyLagMinutes, 60);
 });
 
-// ── 2. Scan-window geometry (forming + safety lag NEVER scanned) ─────────────
+// ── 1d. Startup lookback defaults and configurability ─────────────────────
+
+test("1d. startupLookbackMinutes defaults to 7200 (5 days)", () => {
+  assert.equal(resolveReconcileSettings({}).startupLookbackMinutes, 7200);
+  assert.equal(RECONCILE_DEFAULTS.startupLookbackMinutes, 7200);
+});
+
+test("1e. lookbackMinutes stays 180 by default; startupLookbackMinutes stays 7200", () => {
+  const s = resolveReconcileSettings({});
+  assert.equal(s.lookbackMinutes, 180, "recurring default unchanged");
+  assert.equal(s.startupLookbackMinutes, 7200, "startup default is 5 days");
+  assert.notEqual(s.lookbackMinutes, s.startupLookbackMinutes, "must be distinct");
+});
+
+test("1f. lookbackMinutes=7200 is NOT clamped to 999 (ceiling raised to 10080)", () => {
+  // Before the change, 7200 would silently become 999. Now it passes through.
+  assert.equal(resolveReconcileSettings({ lookbackMinutes: 7200 }).lookbackMinutes, 7200);
+  // 180 still passes through unchanged.
+  assert.equal(resolveReconcileSettings({ lookbackMinutes: 180 }).lookbackMinutes, 180);
+});
+
+test("1g. startupLookbackMinutes can be configured independently from lookbackMinutes", () => {
+  const s = resolveReconcileSettings({ lookbackMinutes: 180, startupLookbackMinutes: 1440 });
+  assert.equal(s.lookbackMinutes, 180, "recurring lookback unchanged");
+  assert.equal(s.startupLookbackMinutes, 1440, "startup lookback is configurable");
+});
+
+// ── 1h. First-run override vs normal run (startup vs recurring) ────────────
+// This is the core regression test: the startup override must widen the scan
+// window for the FIRST run only, and subsequent runs must use the normal
+// 180-minute lookback — never 7200.
+
+test("1h. runOnce with override uses startup lookback (7200m); without override uses normal (180m)", () => {
+  // Startup scan window (7200 min wide, via override):
+  const startupWindow = reconcileScanWindow(NOW_MS, {
+    ...resolveReconcileSettings({}),
+    lookbackMinutes: 7200,
+  });
+  assert.equal(
+    (startupWindow.toSec - startupWindow.fromSec) / RECONCILE_BUCKET_SEC,
+    7200,
+    "startup scan window spans exactly 7200 minutes",
+  );
+
+  // Normal recurring scan window (180 min wide):
+  const normalWindow = reconcileScanWindow(NOW_MS, settings(180, 3));
+  assert.equal(
+    (normalWindow.toSec - normalWindow.fromSec) / RECONCILE_BUCKET_SEC,
+    180,
+    "recurring scan window spans exactly 180 minutes",
+  );
+
+  // The startup window extends much further back than the recurring window:
+  assert.ok(
+    startupWindow.fromSec < normalWindow.fromSec,
+    "startup window starts further back than the normal window",
+  );
+});
+
+test("1i. CapitalReconciler: first runOnce call uses startupLookback, second uses normal lookback", async () => {
+  // NOW_MS = Mon 2026-09-14 22:20 UTC (BST).
+  //   normal  180-min window ≈ Sep 14 19:17…22:17 UTC
+  //   startup 7200-min window ≈ Sep  9 22:17…Sep 14 22:17 UTC
+  // Two holes: one inside the narrow window, one ~4.5 days old — only the
+  // startup recovery scan can see the older one.
+  const recentHole = mon(22, 10);          // Sep 14 22:10 UTC — inside 180 min
+  const oldHole = SEC(10, 0, 10) * 1000;   // Thu Sep 10 10:00 UTC — outside 180 min, inside 7200 min
+  // Verify assumptions:
+  const nw = reconcileScanWindow(NOW_MS, settings(180, 3));
+  const sw = reconcileScanWindow(NOW_MS, { ...resolveReconcileSettings({}), lookbackMinutes: 7200 });
+  assert.ok(recentHole >= nw.fromSec && recentHole < nw.toSec, "recent hole must be in the 180-min window");
+  assert.ok(oldHole < nw.fromSec * 1000, "old hole must be OUTSIDE the 180-min window");
+  assert.ok(oldHole >= sw.fromSec * 1000 && oldHole < sw.toSec * 1000, "old hole must be INSIDE the 7200-min window");
+
+  // Both holes sit on MARKET-OPEN minutes — the Gold calendar is consulted, so a
+  // weekend / daily-break / holiday stamp could never be used as a hole here:
+  assert.equal(isBucketExpected(recentHole, IG_SPOT_GOLD, RECONCILE_BUCKET_SEC), true, "recent hole is a market-open bucket");
+  assert.equal(isBucketExpected(oldHole / 1000, IG_SPOT_GOLD, RECONCILE_BUCKET_SEC), true, "old hole is a market-open bucket");
+
+  // Start with all buckets present in BOTH windows, then introduce the two holes:
+  const normalBuckets = openBuckets(nw.fromSec, nw.toSec);
+  const wideBuckets = openBuckets(sw.fromSec, sw.toSec);
+  const store = new FakeStore();
+  store.present = new Set([...normalBuckets, ...wideBuckets]);
+  store.present.delete(recentHole);     // hole within 180 min
+  store.present.delete(oldHole / 1000); // hole outside 180 min but within 7200 min
+
+  const fetcher = new FakeFetcher()
+    .addBar(recentHole * 1000, 2000, 2010, 1990, 2005)
+    .addBar(oldHole, 2000, 2010, 1990, 2005);
+
+  const reconciler = new CapitalReconciler({
+    store,
+    fetcher,
+    targets: [GOLD],
+    settings: { intervalMinutes: 15, lookbackMinutes: 180, safetyLagMinutes: 3, startupLookbackMinutes: 7200 },
+    pauseMs: 0,
+    logger: noLog,
+  });
+
+  // ── First run: startup recovery with the 7200-min override ───────────────
+  const firstResults = await reconciler.runOnce(NOW_MS, 7200);
+  assert.equal(firstResults.length, 1);
+  assert.equal(
+    (firstResults[0].toMs - firstResults[0].fromMs) / (RECONCILE_BUCKET_SEC * 1000),
+    7200,
+    "first run uses a 7200-minute scan window",
+  );
+  assert.equal(firstResults[0].missingBuckets, 2, "both holes are found in the wide window");
+  assert.equal(firstResults[0].inserted, 2, "both holes are inserted as capital/backfilled");
+  // The wide range spans ~4.5 days ⇒ the EXISTING downloader tiles it into
+  // 999-minute pages. This proves startup recovery needs no downloader change.
+  assert.ok(
+    fetcher.calls > 1,
+    `a 5-day startup range must paginate through multiple REST pages (got ${fetcher.calls})`,
+  );
+  assert.ok(
+    fetcher.records.every((r) => r.toMs - r.fromMs < CAPITAL_BACKFILL_WINDOW_MS),
+    "every request stays inside the unchanged 999-minute page window",
+  );
+
+  // ── Simulate state after first run: both holes filled ─────────────────────
+  store.present.add(recentHole);
+  store.present.add(oldHole / 1000);
+  fetcher.calls = 0;
+  fetcher.records.length = 0;
+
+  // ── Second run: normal recurring without override ─────────────────────────
+  const secondResults = await reconciler.runOnce(NOW_MS);
+  assert.equal(secondResults.length, 1);
+  assert.equal(
+    (secondResults[0].toMs - secondResults[0].fromMs) / (RECONCILE_BUCKET_SEC * 1000),
+    180,
+    "second run uses 180-minute scan window — NOT 7200",
+  );
+  assert.equal(secondResults[0].missingBuckets, 0, "nothing missing in the narrow window (both holes already filled)");
+  assert.equal(fetcher.calls, 0, "no REST traffic when nothing is missing");
+});
+
+// ── 1j. start() wiring: startup pass vs scheduled passes ──────────────────
+// The regression this guards against: every recurring run accidentally
+// inheriting the 5-day startup lookback.
+
+test("1j. start() wires ONLY the immediate pass to startupLookbackMinutes (7200); ticks keep 180", () => {
+  const reconciler = new CapitalReconciler({
+    store: new FakeStore(),
+    fetcher: new FakeFetcher(),
+    targets: [GOLD],
+    settings: { intervalMinutes: 15, lookbackMinutes: 180, startupLookbackMinutes: 7200 },
+    logger: noLog,
+  });
+
+  // Record the override passed to each pass — no I/O, no REST, no DB.
+  const passes: Array<number | undefined> = [];
+  (reconciler as unknown as { runOnce: (n?: number, o?: number) => Promise<unknown> }).runOnce =
+    async (_nowMs?: number, override?: number): Promise<unknown> => {
+      passes.push(override);
+      return [];
+    };
+
+  // Capture the scheduler registration and neutralise it (nothing is leaked).
+  const realSetInterval = globalThis.setInterval;
+  const scheduled: { ms: number; tick: (() => void) | null } = { ms: -1, tick: null };
+  globalThis.setInterval = ((fn: () => void, ms: number) => {
+    scheduled.tick = fn;
+    scheduled.ms = ms;
+    return 0 as unknown as ReturnType<typeof setInterval>;
+  }) as unknown as typeof globalThis.setInterval;
+
+  const quiet = console.log;
+  console.log = () => {};
+  try {
+    reconciler.start();
+    // The IMMEDIATE startup pass carries the extended 5-day lookback.
+    assert.deepEqual(passes, [7200], "the immediate startup pass uses startupLookbackMinutes (7200)");
+    assert.equal(scheduled.ms, 15 * 60_000, "the recurring interval is unchanged (15 minutes)");
+    assert.ok(scheduled.tick !== null, "a recurring pass was registered");
+    // ONE scheduled tick — it must NOT carry the startup override.
+    scheduled.tick!();
+    assert.equal(passes.length, 2, "a scheduled tick triggered exactly one pass");
+    assert.equal(passes[1], undefined, "scheduled passes keep the 180-minute lookback — never 7200");
+    // The status surface reports both depths distinctly.
+    const status = reconciler.statusSnapshot();
+    assert.equal(status.lookbackMinutes, 180, "status.lookbackMinutes is the recurring depth");
+    assert.equal(status.startupLookbackMinutes, 7200, "status.startupLookbackMinutes is the startup depth");
+  } finally {
+    console.log = quiet;
+    globalThis.setInterval = realSetInterval;
+  }
+});
+
+
 
 test("2a. reconcileScanWindow: width = lookback, end = forming − safetyLag", () => {
   const w = reconcileScanWindow(NOW_MS, settings(25, 3));
@@ -238,6 +432,54 @@ test("3c. findMissingBuckets: a fully closed window expects nothing (no false ga
   const scan = findMissingBuckets([], IG_SPOT_GOLD, w);
   assert.equal(scan.expectedBuckets, 0);
   assert.deepEqual(scan.missing, []);
+});
+
+test("3d. a 7200-minute (5-day) startup window still respects the Gold calendar exactly", () => {
+  // The SAME calendar the recurring scan uses, over the extended startup depth:
+  // Wed 2026-09-09 22:17 UTC → Mon 2026-09-14 22:17 UTC, i.e. it contains a
+  // full weekend (Sat 12th + Sun 13th) and 5 daily 21:00–21:59 UTC breaks.
+  const w = reconcileScanWindow(NOW_MS, { ...resolveReconcileSettings({}), lookbackMinutes: 7200 });
+  assert.equal((w.toSec - w.fromSec) / RECONCILE_BUCKET_SEC, 7200, "startup window is 5 days wide");
+
+  const open = openBuckets(w.fromSec, w.toSec);
+  assert.ok(open.length > 0, "a 5-day window contains market-open buckets");
+  assert.ok(open.length < 7200, "closed periods are excluded — NOT every minute is expected");
+  const openSet = new Set(open);
+
+  // The Saturday UTC closure is entirely inside the London Saturday closure.
+  const SAT_OPEN = Math.floor(Date.UTC(2026, 8, 12, 0, 0) / 1000); // Sat 00:00 UTC
+  const SAT_CLOSE = Math.floor(Date.UTC(2026, 8, 13, 0, 0) / 1000); // Sun 00:00 UTC
+  assert.ok(
+    open.every((t) => !(t >= SAT_OPEN && t < SAT_CLOSE)),
+    "no bucket in the Saturday closure is ever expected",
+  );
+
+  // Spot-check the recurring exclusions at 5-day scale (UTC in BST = London − 1h):
+  const at = (y: number, m: number, d: number, h: number, mi: number): number =>
+    Math.floor(Date.UTC(y, m, d, h, mi, 0) / 1000);
+  assert.ok(!openSet.has(at(2026, 8, 12, 12, 0)), "Saturday midday is closed");
+  assert.ok(!openSet.has(at(2026, 8, 13, 5, 0)), "Sunday morning is closed (weekend)");
+  assert.ok(!openSet.has(at(2026, 8, 13, 21, 30)), "Sunday 22:30 London is inside the weekend closure");
+  assert.ok(!openSet.has(at(2026, 8, 14, 21, 30)), "Monday 22:30 London is the daily break (21:00-21:59 UTC)");
+  assert.ok(!openSet.has(at(2026, 8, 11, 21, 30)), "Friday 22:30 London is the Friday-evening week close");
+  assert.ok(openSet.has(at(2026, 8, 13, 22, 30)), "Sunday 23:30 London reopens the week (22:00-22:59 UTC)");
+  assert.ok(openSet.has(at(2026, 8, 10, 19, 0)), "mid-week 20:00 London is open");
+  assert.ok(openSet.has(at(2026, 8, 14, 19, 0)), "the newest full day is open");
+
+  // A 5-day window that is fully populated expects zero gaps (no false repair,
+  // hence no wasted Capital REST traffic after a clean recovery)…
+  const filled = findMissingBuckets(open.map((t) => ({ time: t })), IG_SPOT_GOLD, w);
+  assert.equal(filled.expectedBuckets, open.length);
+  assert.deepEqual(filled.missing, []);
+
+  // …and one deleted bucket anywhere in those 5 days is still detected.
+  const hole = open[Math.floor(open.length / 2)]!;
+  const holed = findMissingBuckets(
+    open.filter((t) => t !== hole).map((t) => ({ time: t })),
+    IG_SPOT_GOLD,
+    w,
+  );
+  assert.deepEqual(holed.missing, [hole], "a multi-day-old hole is detected by the startup scan");
 });
 
 // ── 4. Tight REST range (closed periods are never fetched) ──────────────────

@@ -61,10 +61,21 @@ export interface Config {
     enabled: boolean;
     /** RECONCILE_INTERVAL_MINUTES — minutes between runs (default 15). */
     intervalMinutes: number;
-    /** RECONCILE_LOOKBACK_MINUTES — scan depth (default 180; ≤999 = one page). */
+    /**
+     * RECONCILE_LOOKBACK_MINUTES — scan depth for every RECURRING run
+     * (default 180). 999 minutes ≈ one Capital REST page; larger values are
+     * safely tiled by the existing downloader pagination (999-minute pages).
+     */
     lookbackMinutes: number;
     /** RECONCILE_SAFETY_LAG_MINUTES — newest completed buckets skipped (default 3). */
     safetyLagMinutes: number;
+    /**
+     * RECONCILE_STARTUP_LOOKBACK_MINUTES — extended scan depth for the FIRST
+     * reconciliation run after backend startup only (default 7200 = 5 days).
+     * All subsequent scheduled runs use lookbackMinutes (default 180).
+     * This enables recovery of candles lost during an extended PC outage.
+     */
+    startupLookbackMinutes: number;
   };
 }
 
@@ -137,6 +148,9 @@ export function loadConfig(): Config {
       intervalMinutes: Number(process.env.RECONCILE_INTERVAL_MINUTES || 15),
       lookbackMinutes: Number(process.env.RECONCILE_LOOKBACK_MINUTES || 180),
       safetyLagMinutes: Number(process.env.RECONCILE_SAFETY_LAG_MINUTES || 3),
+      // FIRST RUN ONLY — the immediate startup recovery pass (see
+      // CapitalReconciler.start()). Recurring runs never use this value.
+      startupLookbackMinutes: Number(process.env.RECONCILE_STARTUP_LOOKBACK_MINUTES || 7200),
     },
   };
 }
