@@ -24,6 +24,10 @@ import { createCandlesDbRouter } from "./routes/candlesDb.js";
 import { CapitalReconciler, supportsReconciliation } from "./backfill/reconcile.js";
 import { createEmaAlertRouter } from "./routes/emaAlert.js";
 import { createInstrumentsRouter } from "./routes/instruments.js";
+import { createAuthRouter } from "./routes/auth.js";
+import { createTradingRouter } from "./routes/trading.js";
+import { DashboardClient } from "./services/dashboardClient.js";
+import { createTradeEventRelay } from "./services/tradeEventRelay.js";
 import { RESOLUTION_BUCKET_SEC, createRealtime, redactEpic } from "./realtime.js";
 
 const config = loadConfig();
@@ -208,6 +212,25 @@ if (instruments.length > 0) {
 realtime.onClientSeed(() => ({ type: "emaAlert", state: emaAlertEngine.statusSnapshot() }));
 app.route("/api", createEmaAlertRouter(emaAlertEngine));
 
+// ── Trading Dashboard boundary (P2): auth forwarder + trading proxy ─────────
+// The ONLY path from AURA Chart to the Trading Dashboard (aura-backend) is this
+// server-to-server client; the browser reaches everything through same-origin
+// /api/auth/* + /api/trading/* routes below. The Dashboard URL never reaches
+// the browser, there is no generic proxy, and the caller's Bearer token is
+// forwarded opaquely (never validated/stored here — the Dashboard remains the
+// single authentication + account-ownership authority). Read-only.
+const dashboardClient = new DashboardClient(config.dashboard.baseUrl, config.dashboard.timeoutMs);
+app.route("/api", createAuthRouter(dashboardClient));
+app.route("/api", createTradingRouter(dashboardClient));
+
+// P3-C — LIVE MT5 TRADE EVENT RELAY. Server-side subscriber to the existing
+// aura-backend SSE bus (GET /api/events, user-filtered) per VALIDATED session;
+// fans additive {type:"trade"} frames out over the EXISTING /ws relay to that
+// user's sockets only. Advisory trigger only — the browser refetches real rows
+// through the unchanged P2 REST chain. No new transport anywhere.
+const tradeEventRelay = createTradeEventRelay(dashboardClient, config.dashboard.baseUrl);
+
+
 // Streaming status. Truthful: mirrors the actual Capital stream state, not
 // whether a browser socket happens to be open. `reconciliation` is ADDITIVE —
 // automatic-missing-candle-repair observability (runs, missing, inserted, last
@@ -252,6 +275,8 @@ const redactor = new SecretRedactor(() => [
 const lifecycle = installLifecycle({
   redactor,
   stopRealtime: () => realtime.stop(),
+  // P3-C: abort every upstream trade-event SSE subscriber on shutdown.
+  stopTradeEventRelay: () => tradeEventRelay.stop(),
   // Automatic reconciliation holds no provider socket: clearInterval only. An
   // in-flight run drains on its own and can never block shutdown.
   stopReconciler: () => reconciler?.stop(),
@@ -307,10 +332,18 @@ wss.on("connection", (ws, req) => {
   console.log(`[WS] socket connected res=${res} epic=${redactEpic(epic)}`);
   realtime.addClient(ws, epic, res);
 
+  // P3-C: additive trade-event opt-in — the client authenticates itself with a
+  // {type:"auth",token} frame; unauthenticated sockets receive nothing.
+  tradeEventRelay.attach(ws);
+
   ws.on("close", () => {
     realtime.removeClient(ws);
+    tradeEventRelay.detach(ws);
   });
-  ws.on("error", () => realtime.removeClient(ws));
+  ws.on("error", () => {
+    realtime.removeClient(ws);
+    tradeEventRelay.detach(ws);
+  });
 });
 
 // Starts the Capital WebSocket subscription when configured. The gate is the

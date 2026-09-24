@@ -86,8 +86,23 @@ export interface RealtimeStream {
    * the countdown adds this offset to the local clock instead of trusting it.
    */
   clockOffsetMs: number;
-  /** Latest EMA-reversal alert state broadcast (server-side detection). */
   emaAlert: EmaAlertStateMsg | null;
+  /**
+   * Monotonic counter bumped by an ADVISORY /ws {type:"trade"} frame (P3-C).
+   * The browser never trusts the frame's payload — it triggers a bounded
+   * refetch of trade rows through the unchanged P2 REST chain, which
+   * rebuilds overlays via buildTradeOverlays + reconcileTradeOverlays.
+   * Zero behavioral change for callers that never observe it.
+   */
+  tradeRefresh: number;
+  /**
+   * P3-D: the `accountId` tag of the MOST RECENT trade advisory (null when
+   * the upstream event carried none). A HINT ONLY — App.tsx refetches the
+   * SELECTED account through the unchanged P2 REST chain solely when this
+   * matches the selection; a foreign account's event must not drive this
+   * chart. Reset to null on every clean instrument/stream boundary.
+   */
+  tradeRefreshAccountId: string | null;
 }
 
 /** The CLEAN-SWITCH boundary: every instrument/timeframe/epoch (re)subscription
@@ -104,6 +119,8 @@ export function initialStream(status: RealtimeStatus = "DISCONNECTED"): Realtime
     closed: [],
     clockOffsetMs: 0,
     emaAlert: null,
+    tradeRefresh: 0,
+    tradeRefreshAccountId: null,
   };
 }
 

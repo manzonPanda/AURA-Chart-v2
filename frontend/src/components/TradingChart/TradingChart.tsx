@@ -73,6 +73,8 @@ import {
 import { resolveGapBands } from "../../services/gapRegions";
 import { GapRegionsPrimitive } from "./GapRegionsPrimitive";
 import { WhitespaceBridge } from "./WhitespaceBridge";
+import { TradeOverlayBridge } from "./TradeOverlayBridge";
+import type { TradeOverlay } from "../../services/tradeOverlay";
 import { buildWhitespacePlan } from "../../services/whitespaceRows";
 import { mergeBridgeBars } from "../../services/pineSeries";
 import {
@@ -260,6 +262,13 @@ interface Props {
   warmupCandles?: readonly Candle[];
   /** Detected market-data gaps (broker outages) — rendered as shaded regions. */
   gaps?: CandleGap[];
+  /**
+   * HISTORICAL MT5 TRADE OVERLAY (P3-B) — pre-mapped geometry from
+   * services/tradeOverlay.ts (entry/exit buckets in UTC epoch-ms, already
+   * normalized XAUUSD→GOLD). Default undefined ⇒ nothing attaches and chart
+   * behavior is exactly as before. Filtered to the current instrument epic.
+   */
+  tradeOverlays?: readonly TradeOverlay[];
   /** Timeframe id (MINUTE_1 | MINUTE_3) — used for stream bucket alignment. */
   resolution?: string;
   /**
@@ -957,6 +966,7 @@ export function TradingChart({
   candles,
   warmupCandles = [],
   gaps,
+  tradeOverlays,
   resolution = "",
   instrumentEpic,
   liveCandle = null,
@@ -1016,6 +1026,19 @@ export function TradingChart({
   const prevFormingBarRef = useRef<RealtimeCandleMsg | null>(null);
 
   const bucketSec = resolutionToBucketSec(resolution);
+
+  // ── TRADE OVERLAY visibility (P3-B) ──────────────────────────────────────
+  // Only trades whose normalized MT5 symbol maps to the CURRENT instrument's
+  // epic are rendered (AURA GOLD ⇐ XAUUSD; unresolved symbols like DE40 never
+  // match and never render — no loose substring matching). Empty/undefined
+  // ⇒ exactly the previous chart behavior.
+  const visibleTradeOverlays = useMemo(
+    () =>
+      instrumentEpic
+        ? (tradeOverlays ?? []).filter((o) => o.resolved && o.epic === instrumentEpic)
+        : [],
+    [tradeOverlays, instrumentEpic],
+  );
 
   useEffect(() => {
     if (candles.length > 0) {
@@ -1796,6 +1819,18 @@ export function TradingChart({
               carries is suppressed — the reloaded history may still lack that
               bucket (persistence lag), but the bar IS on the chart. */}
           <GapShading candles={data} gaps={gaps} bucketSec={bucketSec} enabled={!session} />
+          {/* HISTORICAL MT5 TRADE OVERLAY (P3-B) — additive presentation layer:
+              entry/reverse-exit triangles + dotted result-colored entry→exit
+              band for the CURRENT instrument's verified trades (TP/SL levels
+              are data-only, never rendered). Hidden during a replay
+              session (trade markers would mislead on a simulated chart).
+              Open trades extend to the forming bucket via liveCandle.time. */}
+          <TradeOverlayBridge
+            overlays={visibleTradeOverlays}
+            formingBucketSec={liveCandle?.time ?? null}
+            bucketSec={bucketSec}
+            enabled={!session}
+          />
           {/* TIME-SCALE WHITESPACE — invisible LWC series registering the
               missing-gap timestamps as real empty time slots (IG-style).
               Cleared during a replay session, restored on exit. */}

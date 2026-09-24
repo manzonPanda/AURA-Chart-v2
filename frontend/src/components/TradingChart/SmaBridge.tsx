@@ -75,7 +75,15 @@ export function SmaBridge({ bars, liveCandle, bucketSec, settings }: Props) {
 
     // Fresh settings hash → revisit options on the existing series.
     return () => {
-      chart.removeSeries(series);
+      try {
+        chart.removeSeries(series);
+      } catch {
+        /* chart already torn down — the whole chart subtree can unmount at
+           sign-out (login gate), and React's deleted-tree passive-unmount pass
+           runs the parent ChartView's destroy BEFORE this child cleanup, so the
+           chart may already be gone. Same guard as EmaBridge/PineBridge/
+           WhitespaceBridge; without it LWC throws and React unmounts the root. */
+      }
       seriesRef.current = null;
       paintedRef.current = null;
     };

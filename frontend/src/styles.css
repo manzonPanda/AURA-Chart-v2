@@ -87,6 +87,49 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 .instrument { display: flex; flex-direction: column; gap: 1px; line-height: 1.1; padding-left: 14px; border-left: 1px solid var(--border); }
 .instrument-name { font-size: 1rem; font-weight: 700; }
 .instrument-epic { color: var(--muted); font-size: 0.58rem; letter-spacing: 0.07em; text-transform: uppercase; }
+/* ── P3-D ACCOUNT SELECTOR + MT5 MATCH LINE ───────────────── */
+.account-select-block { display: inline-flex; flex-direction: column; gap: 2px; min-width: 0; }
+.account-select-wrap { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.account-select-label {
+  color: var(--muted); font-size: 0.58rem; letter-spacing: 0.07em;
+  text-transform: uppercase; white-space: nowrap;
+}
+/* Labels here are long (name · number) — wider than the instrument select,
+   single-line ellipsis so the header never wraps. */
+.account-select { max-width: 220px; text-overflow: ellipsis; white-space: nowrap; overflow: hidden; }
+/* P3-D status line — visible MATCH/MISMATCH/UNKNOWN text under the selector
+   (the dashboard's computed getter rendered inline, never a stale claim). */
+.mt5-match-line {
+  display: inline-flex; align-items: baseline; gap: 8px; min-width: 0;
+  font-size: 0.62rem; line-height: 1.3; white-space: nowrap;
+}
+.mt5-match-line-head { color: var(--muted); letter-spacing: 0.03em; }
+.mt5-match-line-verdict { font-weight: 700; }
+.mt5-match-line.match   .mt5-match-line-verdict { color: #6ee7b7; }
+.mt5-match-line.mismatch{ color: #ff8a80; }
+.mt5-match-line.mismatch .mt5-match-line-head,
+.mt5-match-line.mismatch .mt5-match-line-verdict { color: #ff8a80; }
+.mt5-match-line.unknown .mt5-match-line-verdict { color: var(--muted); font-weight: 500; }
+/* P3-D historical-feed state chip — loading / N trades / No trades / failure. */
+.overlay-feed-chip {
+  font-size: 0.62rem; font-weight: 600; letter-spacing: 0.02em;
+  padding: 1px 6px; border-radius: 999px; line-height: 1.4;
+  border: 1px solid transparent; white-space: nowrap; cursor: default;
+}
+.overlay-feed-chip.ready      { color: var(--muted); background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.15); }
+.overlay-feed-chip.loading    { color: #90caf9; background: rgba(66, 165, 245, 0.12); border-color: rgba(66, 165, 245, 0.3); }
+.overlay-feed-chip.error      { color: #ffb74d; background: rgba(251, 140, 0, 0.12); border-color: rgba(251, 140, 0, 0.3); }
+.overlay-feed-chip.unauthorized { color: #ff8a80; background: rgba(239, 83, 80, 0.12); border-color: rgba(239, 83, 80, 0.35); }
+.overlay-feed-chip.idle       { color: var(--muted); }
+/* Retry affordance inside the feed-error banner. */
+.banner-retry {
+  font: inherit; font-size: 0.8rem; font-weight: 600;
+  padding: 2px 10px; border-radius: 6px; cursor: pointer;
+  color: inherit; background: rgba(0, 0, 0, 0.25);
+  border: 1px solid currentColor;
+}
+.banner-retry:hover { background: rgba(0, 0, 0, 0.4); }
+
 .instrument-select { max-width: 130px; }
 .instrument-select {
   appearance: none; -webkit-appearance: none;
@@ -1141,4 +1184,111 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 }
 .cset-save-name input:focus { border-color: rgba(56, 189, 248, 0.5); outline: none; }
 .cset-save-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ── P3-D AUTH GATE — sign-in screen (the missing entry point) ──── */
+.auth-gate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+  background:
+    radial-gradient(circle at 72% -18%, rgba(30, 112, 155, 0.16), transparent 32rem),
+    var(--bg);
+}
+.auth-card {
+  width: min(380px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 28px 26px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.auth-card--checking {
+  align-items: center;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.auth-brand { justify-content: center; }
+.auth-lead {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--muted);
+  text-align: center;
+}
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.auth-field input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 10px 12px;
+  font-size: 0.9rem;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.auth-field input:focus {
+  border-color: rgba(71, 199, 255, 0.5);
+  outline: none;
+}
+.auth-field input:disabled { opacity: 0.6; }
+.auth-error {
+  background: rgba(255, 107, 114, 0.1);
+  border: 1px solid rgba(255, 107, 114, 0.45);
+  color: var(--down);
+  border-radius: 8px;
+  padding: 9px 11px;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.auth-submit {
+  background: var(--accent);
+  color: #05202e;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 0.88rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+.auth-submit:hover:not(:disabled) { filter: brightness(1.06); }
+.auth-submit:disabled { opacity: 0.6; cursor: default; }
+.auth-note {
+  margin: 0;
+  font-size: 0.68rem;
+  line-height: 1.5;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* Sign-out control in the unified topbar (P3-D auth entry point). */
+.signout-btn {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 11px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.signout-btn:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
 

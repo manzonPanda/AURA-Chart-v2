@@ -50,6 +50,20 @@ export interface Config {
   /** First-run seed for the EMA alert master switch (before any UI change). */
   emaAlertEnabledOnBoot: boolean;
   /**
+   * Trading Dashboard (aura-backend) API — the P2 server-to-server boundary.
+   * THIS backend is the only component that talks to it; the browser reaches
+   * trading data exclusively through this backend's same-origin /api/trading
+   * proxy routes. Env-driven (DASHBOARD_API_URL); the fallback matches the
+   * local dev Dashboard backend but application logic never hardcodes it.
+   * No credentials are stored here — every request carries the caller's own
+   * Bearer session token, forwarded opaquely and never logged.
+   */
+  dashboard: {
+    baseUrl: string;
+    /** Outbound request timeout in ms — bounded client behavior. */
+    timeoutMs: number;
+  };
+  /**
    * Automatic Capital REST reconciliation of GENUINE missing candles (the
    * DISTINCT OHLC-stream hole repair). Values are clamped again at construction
    * (`resolveReconcileSettings`), so a bad env value can never weaken the
@@ -138,6 +152,16 @@ export function loadConfig(): Config {
     emaAlertEnabledOnBoot: ["on", "true", "1"].includes(
       (process.env.EMA_ALERT_ENABLED || "").trim().toLowerCase(),
     ),
+    // Trading Dashboard (aura-backend) boundary. DASHBOARD_API_URL wins;
+    // the default is the local dev Dashboard backend. Trailing slashes are
+    // stripped so path joins are deterministic. Timeout is clamped to a
+    // sane range (1s–30s) so a bad env value cannot hang request handling.
+    dashboard: {
+      baseUrl: (process.env.DASHBOARD_API_URL || "http://localhost:5001")
+        .trim()
+        .replace(/\/+$/, ""),
+      timeoutMs: Math.min(30_000, Math.max(1_000, Number(process.env.DASHBOARD_API_TIMEOUT_MS) || 10_000)),
+    },
     // Automatic reconciliation — ENABLED by default (opt-out, not opt-in): the
     // whole point is that genuine holes are repaired without an operator. Non-
     // numeric values fall back to the defaults inside resolveReconcileSettings.

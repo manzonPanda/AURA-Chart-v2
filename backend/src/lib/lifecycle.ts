@@ -29,6 +29,8 @@ export interface LifecycleHooks {
   stopRealtime?: () => void;
   /** Stop the automatic Capital REST reconciler's schedule (clearInterval). */
   stopReconciler?: () => void;
+  /** P3-C: abort every upstream trade-event SSE subscriber (server-side). */
+  stopTradeEventRelay?: () => void;
   /** Close the WebSocket relay (disconnects all browser sockets). */
   closeWebSocketServer?: () => void;
   /** Stop accepting new HTTP connections; `onClosed` fires when fully drained. */

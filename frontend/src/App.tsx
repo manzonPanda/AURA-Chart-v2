@@ -57,6 +57,56 @@ import {
 } from "./services/historyPagination";
 import { historyHorizonPages } from "./services/historyHorizon";
 import { findInstrument } from "./services/instruments";
+import {
+  getMt5AccountIdentity,
+  getTradingAccounts,
+  getTradingTrades,
+  type Mt5AccountIdentity,
+  type TradeRecord,
+  type TradingAccount,
+} from "./services/tradingApi";
+import { buildTradeOverlays } from "./services/tradeOverlay";
+import {
+  feedFailure,
+  feedLoading,
+  feedSuccess,
+  initialOverlayFeed,
+  overlayFeedErrorMessage,
+  overlayFeedLabel,
+  type OverlayFeedState,
+} from "./services/overlayFeed";
+import {
+  accountLabel,
+  allowsLiveMt5Data,
+  findAccount,
+  loadStoredAccountId,
+  mt5MatchMessage,
+  resolveMt5Match,
+  resolveSelectedAccountId,
+  saveStoredAccountId,
+  tradeEventAffectsSelection,
+  type Mt5MatchState,
+} from "./services/accountSelection";
+import {
+  getUser,
+  isAuthenticated,
+  signOut,
+  subscribeAuth,
+  validateSession,
+} from "./services/auth";
+// P3-D AUTH ENTRY POINT — the pure, tested form logic behind the sign-in
+// screen. The session itself is still owned by services/auth.ts (P2); this
+// module only decides WHICH VIEW to show and how to phrase a failure.
+import {
+  initialSignInState,
+  isSignInSubmitting,
+  performSignIn,
+  resolveAuthView,
+  signInErrorMessage,
+  signInSubmitting,
+  type SignInState,
+} from "./services/signInFlow";
+import { SignInScreen } from "./components/Auth/SignInScreen";
 import { useInstruments } from "./services/useInstruments";
 import {
   requiredWarmupBars,
@@ -155,6 +205,100 @@ export default function App() {
   // are ignored (replay uses its own cursor slice for anti-look-ahead safety).
   const [warmupCandles, setWarmupCandles] = useState<Candle[]>([]);
   const [gaps, setGaps] = useState<CandleGap[]>([]);
+  // HISTORICAL MT5 TRADE OVERLAY (P3-B) + P3-D ACCOUNT-SCOPED FEED — the feed
+  // state machine (services/overlayFeed.ts) owns overlays, loading, empty,
+  // error and unauthorized states for exactly ONE selected account; see the
+  // data-feed effect near useRealtimeStream. Replaces the P3-B-era
+  // `tradeOverlays` array whose bare catch silently blanked the layer.
+  const [overlayFeed, setOverlayFeed] = useState<OverlayFeedState>(initialOverlayFeed);
+  const tradeOverlays = overlayFeed.overlays;
+  // ACCOUNT SELECTION + MT5 MATCH (P3-D) — the overlay scope is exactly ONE
+  // account (the audit found the P3-B feed merged every account's trades and
+  // blanked the whole layer if any single account call failed).
+  // Identity is the dashboard ACCOUNT ID (UUID); `account_number` is used only
+  // for the optional MT5 comparison and is never required to be numeric.
+  const [tradingAccounts, setTradingAccounts] = useState<TradingAccount[]>([]);
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(() => loadStoredAccountId());
+  const [mt5Identity, setMt5Identity] = useState<Mt5AccountIdentity | null>(null);
+  const selectedAccount = findAccount(tradingAccounts, selectedAccountId);
+  // MATCH / MISMATCH / UNKNOWN is DERIVED (never stored), so the banner can
+  // never go stale — the same live-getter rule the Trading Dashboard uses.
+  const mt5Match: Mt5MatchState = resolveMt5Match(selectedAccount, mt5Identity);
+  const liveMt5Allowed = allowsLiveMt5Data(mt5Match);
+
+  // ── P3-D AUTH GATE — the missing authentication entry point ───────────────
+  // (The P3-D runtime diagnostic proved the account/trade/MT5/overlay chain was
+  // already healthy; the ONLY broken link was that a fresh browser had no way
+  // to obtain a session token.) This is NOT a second auth system: the EXISTING
+  // P2 service (services/auth.ts) still owns signIn / signOut / validateSession
+  // / subscribeAuth and the `aura_chart_auth.v1` storage shape. The gate only
+  // derives WHICH VIEW to render and holds the sign-in form's transient
+  // submit/error state (services/signInFlow.ts — pure and unit-tested). The
+  // account/trade/MT5 effects below are untouched: their existing
+  // subscribeAuth listeners fire the moment a session exists (or disappears).
+  const [authUser, setAuthUser] = useState(() => getUser());
+  // "checking" is true only when a stored token still needs re-validation — a
+  // truly fresh browser goes straight to the sign-in screen, never through a
+  // fake "restoring" state.
+  const [authChecking, setAuthChecking] = useState(() => isAuthenticated());
+  const [authenticated, setAuthenticated] = useState(() => isAuthenticated());
+  const [signInForm, setSignInForm] = useState<SignInState>(initialSignInState);
+  useEffect(() => {
+    let cancelled = false;
+    const unsubscribe = subscribeAuth((state) => {
+      if (cancelled) return;
+      setAuthenticated(state.authenticated);
+      setAuthUser(state.user);
+      if (state.authenticated) setAuthChecking(false);
+    });
+    if (!isAuthenticated()) {
+      setAuthChecking(false);
+    } else {
+      // Cold start WITH a stored token: re-validate against the Dashboard so an
+      // expired/revoked session lands on the login screen instead of on the
+      // confusing "No accounts / No trades loaded" chart (validateSession
+      // clears local state on 401, which notifies the listener above).
+      void validateSession().finally(() => {
+        if (!cancelled) setAuthChecking(false);
+      });
+    }
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
+  /**
+   * Sign-in submit — delegates to the EXISTING P2 `signIn()` through the
+   * tested `performSignIn` wrapper (pre-flight validation, error
+   * classification, no token/credential ever echoed into the message). On
+   * success the auth service has already persisted the session AND notified
+   * subscribers, which is what unlocks every downstream trading effect.
+   */
+  const handleSignIn = (email: string, password: string): void => {
+    if (isSignInSubmitting(signInForm)) return;
+    setSignInForm((prev) => signInSubmitting(prev, email));
+    void performSignIn(email, password).then((outcome) => {
+      setSignInForm(outcome.state);
+      if (outcome.ok) {
+        setAuthenticated(true);
+        setAuthChecking(false);
+      }
+    });
+  };
+
+  /**
+   * Sign-out — the EXISTING P2 `signOut()` (best-effort upstream revoke, then
+   * ALWAYS local clear). Its notification flips this gate to the login screen
+   * AND triggers the pre-existing effects' early-return branches, which clear
+   * accounts, selection, overlays and MT5 identity — no second state machine.
+   */
+  const handleSignOut = (): void => {
+    setSignInForm(initialSignInState());
+    void signOut().then(() => {
+      setAuthenticated(false);
+    });
+  };
   // Instrument selection (Phase 3) — the BACKEND REGISTRY (GET /api/instruments)
   // is the source of truth; localStorage only persists WHICH entry is active.
   // selectedEpic is "" until the catalog resolves → WS/history then run WITHOUT
@@ -308,7 +452,216 @@ export default function App() {
   // the selector drops the socket and re-subscribes with the new `res=` — the
   // backend re-seeds the forming candle for that timeframe automatically.
   // Independent of historical REST — realtime is the priority and always starts.
+  // ── ACCOUNT SELECTION (P3-D) + HISTORICAL MT5 TRADE OVERLAY (P3-B) feed ────
+  // The overlay scope is exactly ONE account — the selected one. The P3-D audit
+  // found the previous feed merged EVERY account's trades through N sequential
+  // REST calls and blanked the whole layer when any single call failed. Now:
+  //   1. accounts load once per signed-in session through the UNCHANGED P2
+  //      chain (tradingApi → AURA backend → dashboard backend → PostgreSQL;
+  //      AURA Chart never touches PostgreSQL, the token rides only in the
+  //      Authorization header);
+  //   2. the stored selection is validated against that list — a stale or
+  //      foreign id falls back deterministically — and persisted back;
+  //   3. trades load for the SELECTED account only, bounded by the P1 cap
+  //      (2000, most-recent-first): no per-candle calls, no unbounded history;
+  //   4. live P3-C refetches RECONCILE into the existing overlays instead of
+  //      replacing them, so a locally-open trade keeps its band and overlay
+  //      identity stays stable. A change of ACCOUNT replaces the set outright
+  //      (never reconcile across two accounts — that would bleed Account A's
+  //      open band onto Account B's chart).
+  // Mapping (symbol normalization + Europe/Helsinki → UTC bucket) stays in
+  // services/tradeOverlay.ts; TradingChart filters to the active instrument and
+  // hides the layer during replay. Buckets are computed on the 1m grid — the 3m
+  // grid is a pure multiple, so one mapping serves both timeframes.
+  /** Ref holding the latest bounded trade-overlay refetch (P3-C: triggered by live events). */
+  const tradeReloadRef = useRef<(() => void) | null>(null);
+
+  // Accounts + selection (once per sign-in; re-resolves on every sign-in change).
+  useEffect(() => {
+    let cancelled = false;
+    const loadAccounts = async () => {
+      if (!isAuthenticated()) {
+        if (!cancelled) {
+          setTradingAccounts([]);
+          setSelectedAccountId(null);
+          // Signed out ⇒ the feed resets to idle (no stale scoped overlays).
+          setOverlayFeed(initialOverlayFeed());
+        }
+        return;
+      }
+      try {
+        const accounts = await getTradingAccounts();
+        if (cancelled) return;
+        setTradingAccounts(accounts);
+        setSelectedAccountId((current) => {
+          const resolved = resolveSelectedAccountId(accounts, current ?? loadStoredAccountId());
+          if (resolved) saveStoredAccountId(resolved);
+          return resolved;
+        });
+      } catch (err) {
+        if (!cancelled) {
+          // Accounts list failure is an accounts-UI problem — it must NEVER
+          // touch the overlay feed (the selector simply stays empty/disabled).
+          console.warn(
+            "[TRADE-OVERLAY] trading accounts unavailable:",
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+    };
+    void loadAccounts();
+    const unsubscribe = subscribeAuth(() => {
+      if (!cancelled) void loadAccounts();
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
+  // The SELECTED account's historical trades → overlay geometry (ONE request;
+  // P3-D). The overlayFeed state machine owns every transition:
+  //   start   → feedLoading (account switch drops the old scope's overlays
+  //             immediately; a same-account refresh keeps them visible),
+  //   success → feedSuccess  (stale responses for a previously selected
+  //             account are dropped — Account A can never repopulate after B),
+  //   failure → feedFailure  (explicit error/unauthorized state; NEVER a
+  //             silent blank chart like the old bare `catch → set([])`).
+  const selectedAccountIdRef = useRef<string | null>(selectedAccountId);
+  selectedAccountIdRef.current = selectedAccountId;
+  // Current timeframe read INSIDE async/rebuild closures (same ref pattern) so
+  // buildTradeOverlays always buckets on the CHART's grid — never a stale one.
+  const timeframeRef = useRef(timeframe);
+  timeframeRef.current = timeframe;
+  // Raw rows of the last SUCCESSFUL load, tagged with their account — a
+  // timeframe switch re-BUILDS bucket geometry (60s ↔ 180s) from this cache
+  // WITHOUT a second REST call (the fetch stays account-scoped and singular).
+  const tradesRowsRef = useRef<{ accountId: string; rows: TradeRecord[] } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      const accountId = selectedAccountIdRef.current;
+      if (!isAuthenticated() || !accountId) {
+        tradesRowsRef.current = null;
+        if (!cancelled) setOverlayFeed(initialOverlayFeed());
+        return;
+      }
+      setOverlayFeed((prev) => feedLoading(prev, accountId));
+      try {
+        const res = await getTradingTrades(accountId, { status: "all", limit: 2000 });
+        if (cancelled) return;
+        if (res.pagination.hasMore) {
+          console.info(
+            `[TRADE-OVERLAY] account ${accountId}: more trades than the P1 cap — showing the most recent ${res.pagination.limit}.`,
+          );
+        }
+        tradesRowsRef.current = { accountId, rows: res.trades };
+        // FIX 4: bucket on the chart's ACTUAL timeframe (resolutionToBucketSec)
+        // instead of the former hard-coded 60 — exact ms fields are built by
+        // buildTradeOverlays itself and are timeframe-independent.
+        const next = buildTradeOverlays(res.trades, resolutionToBucketSec(timeframeRef.current));
+        setOverlayFeed((prev) => feedSuccess(prev, accountId, next, res.trades.length));
+      } catch (err) {
+        if (!cancelled) {
+          console.warn(
+            "[TRADE-OVERLAY] historical trades unavailable:",
+            err instanceof Error ? err.message : err,
+          );
+          setOverlayFeed((prev) => feedFailure(prev, accountId, err));
+        }
+      }
+    };
+    void load();
+    tradeReloadRef.current = load;
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAccountId]);
+
+  // FIX 4 (3m correctness, no refetch): a timeframe switch re-BUILDS the
+  // bucket fields from the cached raw rows on the NEW chart grid (60s ↔ 180s).
+  // Exact ms/price fields are timeframe-independent; the primitive separately
+  // receives the live bucketSec through TradeOverlayBridge. Same-scope guard:
+  // a rebuild can only touch the account that owns the current feed.
+  useEffect(() => {
+    const cached = tradesRowsRef.current;
+    if (!cached || cached.accountId !== selectedAccountIdRef.current) return;
+    const next = buildTradeOverlays(cached.rows, resolutionToBucketSec(timeframe));
+    setOverlayFeed((prev) =>
+      // Only the steady state rebuilds in place: an in-flight load already
+      // reads timeframeRef at completion, and error/unauthorized banners must
+      // not be silently cleared by a timeframe click.
+      prev.phase !== "ready" || prev.accountId !== cached.accountId
+        ? prev
+        : feedSuccess(prev, cached.accountId, next, cached.rows.length),
+    );
+  }, [timeframe]);
+
+  // MT5 terminal identity (P3-D) — READ-ONLY and additive: it only decides
+  // whether live P3-C refreshes may reach this chart. `getMt5AccountIdentity`
+  // degrades to a typed offline identity when the bridge is unreachable, so a
+  // missing terminal can never break the chart or the historical overlays.
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      if (!isAuthenticated()) {
+        if (!cancelled) setMt5Identity(null);
+        return;
+      }
+      try {
+        const identity = await getMt5AccountIdentity();
+        if (!cancelled) setMt5Identity(identity);
+      } catch (err) {
+        if (!cancelled) {
+          console.warn(
+            "[MT5-MATCH] terminal identity unavailable:",
+            err instanceof Error ? err.message : err,
+          );
+          setMt5Identity(null);
+        }
+      }
+    };
+    void load();
+    const unsubscribe = subscribeAuth(() => {
+      if (!cancelled) void load();
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
   const realtime = useRealtimeStream(timeframe, epic || undefined, streamEpoch);
+
+  // P3-C: live MT5 trade-event refetch trigger. The backend relays an advisory
+  // {type:"trade"} /ws frame (via the existing SSE bus → /ws path) when MT5
+  // persists trade rows. The browser NEVER trusts the frame's payload — it
+  // triggers a bounded refetch through the UNCHANGED P2 REST chain, which
+  // rebuilds overlays via buildTradeOverlays + reconcileTradeOverlays. The
+  // backend already coalesces bursts (500ms) per (user,account); the 150ms
+  // frontend debounce is a safety net for reconnect frames.
+  // P3-D PART 8: the frame's accountId is an EVENT/REFETCH HINT ONLY —
+  // tradeEventAffectsSelection() rejects a foreign account's event outright
+  // (no refetch, no merge, no chart activity driven by another account), and
+  // the mismatch gate below additionally suppresses live-driven refreshes
+  // while the terminal provably belongs to a different account.
+  useEffect(() => {
+    if (realtime.tradeRefresh === 0) return; // initial mount — no live event yet
+    // P3-D MISMATCH GUARD: when the local MT5 terminal provably belongs to a
+    // DIFFERENT account than the selected one, live bursts must not drive this
+    // chart (the dashboard's safety rule). "unknown" stays allowed so P3-C live
+    // behaviour is preserved for accounts with no comparable number.
+    if (!liveMt5Allowed) return;
+    // P3-D ACCOUNT GATE: an advisory for ANOTHER account never refetches the
+    // selected account's rows (the refetch below is always account-scoped).
+    if (!tradeEventAffectsSelection(realtime.tradeRefreshAccountId, selectedAccountIdRef.current)) {
+      return;
+    }
+    const reload = tradeReloadRef.current;
+    if (!reload) return;
+    const t = window.setTimeout(() => void reload(), 150);
+    return () => window.clearTimeout(t);
+  }, [realtime.tradeRefresh, realtime.tradeRefreshAccountId, liveMt5Allowed]);
 
   // Server-clock calibration for the DATA GAP pending fallback (Rule B′): when
   // the backend's settled reconciliation boundary is unavailable, the 20-minute
@@ -564,6 +917,30 @@ export default function App() {
     },
     [epic, selectInstrument],
   );
+
+  /**
+   * ACCOUNT SELECTION (P3-D) — switching the selected account is a HARD overlay
+   * boundary: `feedLoading` for a DIFFERENT accountId drops the current set
+   * immediately (never reconcile across two accounts, which would bleed
+   * Account A's open band onto Account B's chart) and the new id is persisted
+   * through AURA's own guarded-localStorage convention in
+   * services/accountSelection.ts. That mirrors the Trading Dashboard's
+   * `user_settings.default_account_id` semantics without inventing a second
+   * account-management architecture. The selection NEVER auto-switches to
+   * whatever MT5 happens to be connected to.
+   */
+  const handleAccountChange = useCallback(
+    (nextId: string) => {
+      if (!nextId || nextId === selectedAccountId) return;
+      // Immediate scope drop + loading state for the new account (the effect
+      // keyed on selectedAccountId then issues the ONE trades request).
+      setOverlayFeed((prev) => feedLoading(prev, nextId));
+      setSelectedAccountId(nextId);
+      saveStoredAccountId(nextId);
+    },
+    [selectedAccountId],
+  );
+
 
   /** Dynamic page title — the selected instrument (fallback: generic label). */
   useEffect(() => {
@@ -923,6 +1300,31 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [candles]);
 
+  // ── P3-D AUTH GATE — render the login screen (or a brief session-restore
+  //    splash) INSTEAD of the chart app when there is no valid session. This is
+  //    the fix for the runtime diagnostic's first broken link: a fresh browser
+  //    now lands on a form that can actually produce a token, instead of the
+  //    chart's misleading "No accounts / No trades loaded" empty state. Placed
+  //    after EVERY hook (rules-of-hooks safe); signed in ⇒ the pre-existing
+  //    markup renders unchanged. ──────────────────────────────────────────
+  const authView = resolveAuthView(authenticated, authChecking);
+  if (authView === "checking") {
+    return (
+      <div className="auth-gate" role="status" aria-live="polite">
+        <div className="auth-card auth-card--checking">Restoring session…</div>
+      </div>
+    );
+  }
+  if (authView === "sign-in") {
+    return (
+      <SignInScreen
+        submitting={isSignInSubmitting(signInForm)}
+        message={signInErrorMessage(signInForm)}
+        onSubmit={handleSignIn}
+      />
+    );
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -956,6 +1358,68 @@ export default function App() {
               ))}
           </select>
             <span className="instrument-epic">{epic || historyEpic || "…"}</span>
+          </div>
+          {/* ACCOUNT SELECTOR (P3-D) — scopes the historical trade overlay to
+              exactly ONE dashboard account. Identity is the stable account UUID;
+              labels use name · account_number when present (never secrets).
+              Picking an account replaces the overlay set outright (the feed
+              effect keys on selectedAccountId) — never reconciles across
+              accounts. Below: the P3-D status line (feed state + selected-vs-
+              MT5 MATCH/MISMATCH/UNKNOWN) and the feed's compact count chip. */}
+          <div className="account-select-block">
+            <div className="account-select-wrap">
+              <span className="account-select-label">Trading Account</span>
+              <select
+                className="instrument-select account-select"
+                value={selectedAccountId ?? ""}
+                onChange={(e) => handleAccountChange(e.target.value)}
+                aria-label="Trading account"
+                title="Selected account scopes the historical trade overlay"
+                disabled={tradingAccounts.length === 0}
+              >
+                {tradingAccounts.length === 0 && <option value="">No accounts</option>}
+                {tradingAccounts.map((account) => (
+                  <option key={account.id} value={account.id}>
+                    {accountLabel(account)}
+                  </option>
+                ))}
+              </select>
+              <span
+                className={`overlay-feed-chip ${overlayFeed.phase}`}
+                data-testid="overlay-feed-chip"
+                title={
+                  overlayFeedErrorMessage(overlayFeed) ??
+                  "Historical trades for the selected account"
+                }
+              >
+                {overlayFeedLabel(overlayFeed)}
+              </span>
+            </div>
+            {/* MATCH STATUS LINE — visible text (not just a tooltip): the
+                Trading Dashboard's computed-getter pattern rendered inline.
+                ●+login when the terminal answers, ○ when it cannot; MATCH and
+                MISMATCH are stated explicitly and UNKNOWN never claims a match. */}
+            <div
+              className={`mt5-match-line ${mt5Match}`}
+              data-testid="mt5-match-line"
+              role="status"
+              title={mt5MatchMessage(mt5Match, selectedAccount, mt5Identity)}
+            >
+              <span className="mt5-match-line-head">
+                MT5&nbsp;
+                {mt5Match !== "unknown" && mt5Identity?.login ? "●" : "○"}&nbsp;
+                {mt5Match !== "unknown" && mt5Identity?.login
+                  ? mt5Identity.login
+                  : "Not connected / unavailable"}
+              </span>
+              <span className="mt5-match-line-verdict">
+                {mt5Match === "match"
+                  ? "✓ Accounts matched"
+                  : mt5Match === "mismatch"
+                    ? "⚠ MT5 account mismatch"
+                    : "Match cannot be verified"}
+              </span>
+            </div>
           </div>
         </div>
         {/* Market group — timeframe · LIVE status · quote readout (timestamp,
@@ -1054,6 +1518,14 @@ export default function App() {
           >
               {loading ? "…" : "Refresh"}
             </button>
+          <button
+            type="button"
+            className="signout-btn"
+            onClick={handleSignOut}
+            title={authUser?.email ? `Signed in as ${authUser.email} — sign out` : "Sign out"}
+          >
+              Sign out
+            </button>
           </div>
         </div>
       </header>
@@ -1068,12 +1540,49 @@ export default function App() {
           <span className="banner-text">HISTORY: persisted candles unavailable (Supabase) — realtime stream continues.</span>
         </div>
       )}
+      {/* MT5 MISMATCH BANNER (P3-D) — the Trading Dashboard's safety rule, same
+          wording intent: MISMATCH is the one dangerous state (the local terminal
+          provably belongs to another account), so it warns loudly and live MT5
+          refreshes are suppressed (liveMt5Allowed gate on the P3-C effect).
+          "unknown" never warns — it must not be mistaken for "no trades". */}
+      {mt5Match === "mismatch" && (
+        <div className="banner error" role="alert">
+          <span className="banner-text">
+            {mt5MatchMessage(mt5Match, selectedAccount, mt5Identity)}
+          </span>
+        </div>
+      )}
+      {/* HISTORICAL TRADE FEED STATE (P3-D) — a failed or unauthorized trades
+          request is an EXPLICIT, non-destructive banner (with Retry) instead of
+          the old silent blank layer. Zero trades is NOT an error: it renders as
+          the "No trades" chip next to the selector, clearly distinct from
+          "Loading trades…" (not yet loaded) and from these banners. */}
+      {overlayFeedErrorMessage(overlayFeed) && (
+        <div
+          className={`banner ${overlayFeed.phase === "unauthorized" ? "error" : "warn"}`}
+          role="alert"
+          data-testid="overlay-feed-error"
+        >
+          <span className="banner-text">{overlayFeedErrorMessage(overlayFeed)}</span>
+          <button
+            type="button"
+            className="banner-retry"
+            onClick={() => {
+              const reload = tradeReloadRef.current;
+              if (reload) void reload();
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       <main className="chart-area">
         <TradingChart
           candles={candles}
           warmupCandles={warmupCandles}
           gaps={gaps}
+          tradeOverlays={tradeOverlays}
           resolution={timeframe}
           instrumentEpic={epic || undefined}
           liveCandle={realtime.candle}

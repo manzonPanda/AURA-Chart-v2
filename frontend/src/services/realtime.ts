@@ -155,6 +155,25 @@ export function useRealtimeStream(
             // reversals). Display-only — detection never runs in the browser.
             const a = msg as { type: "emaAlert"; state: EmaAlertStateMsg };
             setStream((prev) => ({ ...prev, emaAlert: a.state }));
+          } else if (msg.type === "trade" && "action" in msg) {
+            // P3-C: ADVISORY live trade-event trigger. The backend relays an
+            // additive {type:"trade"} frame when MT5 writes trade rows (existing
+            // SSE → /ws path). The browser NEVER trusts the frame's payload — it
+            // bumps a counter that App.tsx observes to trigger a bounded refetch
+            // through the unchanged P2 REST chain. The refetch rebuilds overlays
+            // via buildTradeOverlays + reconcileTradeOverlays. Zero payload
+            // reconstruction happens here.
+            // P3-D: the frame's accountId travels as a HINT ONLY (Part 8) —
+            // App.tsx compares it against the selected account and skips the
+            // refetch entirely for a foreign account's event.
+            const t = msg as { type: "trade"; action: string; accountId?: unknown };
+            const eventAccountId =
+              typeof t.accountId === "string" && t.accountId.trim() ? t.accountId : null;
+            setStream((prev) => ({
+              ...prev,
+              tradeRefresh: prev.tradeRefresh + 1,
+              tradeRefreshAccountId: eventAccountId,
+            }));
           }
         } catch {
           /* non-JSON frame — ignore */

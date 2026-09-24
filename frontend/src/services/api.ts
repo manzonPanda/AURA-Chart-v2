@@ -20,7 +20,7 @@ export class ApiError extends Error {
 }
 
 /** Shared error-body parsing for non-OK backend responses. */
-async function toApiError(res: Response): Promise<ApiError> {
+export async function toApiError(res: Response): Promise<ApiError> {
   let message = res.statusText || "Request failed";
   let code = "HTTP_ERROR";
   try {
