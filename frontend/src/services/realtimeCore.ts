@@ -7,6 +7,7 @@
  * (useRealtimeStream in ./realtime.ts) consumes these pure pieces.
  */
 import { type EmaAlertStateMsg } from "./emaAlertApi.ts";
+import type { LivePositionVisualFrame } from "./livePositionVisual.ts";
 
 /** Connection states reported by the BACKEND (mirrors IG Lightstreamer). */
 export type RealtimeStatus = "CONNECTING" | "LIVE" | "RECONNECTING" | "DISCONNECTED";
@@ -103,6 +104,8 @@ export interface RealtimeStream {
    * chart. Reset to null on every clean instrument/stream boundary.
    */
   tradeRefreshAccountId: string | null;
+  /** Latest authenticated ephemeral P&L/R hint; never an authoritative snapshot. */
+  tradeVisual: LivePositionVisualFrame | null;
 }
 
 /** The CLEAN-SWITCH boundary: every instrument/timeframe/epoch (re)subscription
@@ -121,6 +124,7 @@ export function initialStream(status: RealtimeStatus = "DISCONNECTED"): Realtime
     emaAlert: null,
     tradeRefresh: 0,
     tradeRefreshAccountId: null,
+    tradeVisual: null,
   };
 }
 
@@ -176,6 +180,12 @@ export function buildRealtimeWsUrl(
   const params = new URLSearchParams({ res: resolution });
   if (epic) params.set("epic", epic);
   return `${scheme}://${loc.host}/ws?${params.toString()}`;
+}
+
+/** Authenticate the EXISTING market-data socket for additive P3-C trade events. */
+export function buildTradeAuthFrame(token: string | null): string | null {
+  if (!token) return null;
+  return JSON.stringify({ type: "auth", token });
 }
 
 /**

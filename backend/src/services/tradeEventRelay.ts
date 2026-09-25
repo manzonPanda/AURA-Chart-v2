@@ -32,12 +32,34 @@ import type { DashboardClient } from "./dashboardClient.js";
 /** Additive /ws frame — advisory trigger only (no trade values). */
 export interface TradeEventFrame {
   type: "trade";
-  table: "trades";
+  /**
+   * Which upstream table changed. `trades` ⇒ refetch trade overlays; `accounts`
+   * ⇒ the account's risk levels/configuration changed. Both are advisory
+   * refresh triggers for the SAME read-only fetch — never data.
+   */
+  table: "trades" | "accounts";
   action: string; // upstream action string (INSERT/UPDATE/…) — advisory
   accountId: string | null; // ownership already verified upstream
   userId: string; // validated session owner — the routing key
   at: string | null; // upstream advisory ISO timestamp or null
 }
+
+/** Ephemeral visual hint; it never asks the browser to refetch authoritative state. */
+export interface TradeVisualFrame {
+  type: "tradeVisual";
+  accountId: string;
+  ticket: string;
+  profit: number;
+  swap: number;
+  slValue: number | null;
+  sourceId: string;
+  sourceSequence: number;
+  sequence: number;
+  at: string | null;
+}
+
+export type TradeRelayFrame = TradeEventFrame | TradeVisualFrame;
+
 
 /** Minimal socket surface (real ws.WebSocket satisfies it). */
 interface WsLike {
@@ -111,8 +133,8 @@ export function createTradeEventRelay(
   const pending = new Map<string, ReturnType<typeof setTimeout>>();
   const lastFrame = new Map<string, TradeEventFrame>();
 
-  /** Fan a coalesced frame out ONLY to clients authenticated as `userId`. */
-  function fanOut(userId: string, frame: TradeEventFrame): void {
+  /** Fan a frame out ONLY to clients authenticated as `userId`. */
+  function fanOut(userId: string, frame: TradeRelayFrame): void {
     for (const c of clients.values()) {
       if (c.userId !== userId) continue;
       try {
@@ -208,7 +230,40 @@ export function createTradeEventRelay(
         // aura-backend emits `event: change` with the advisory JSON payload.
         if (!evt || evt.event !== "change") continue;
         const payload = safeJson(evt.data);
-        if (!payload || payload.type !== "change" || payload.table !== "trades") continue;
+        if (!payload) continue;
+        if (payload.type === "visual-position") {
+          if (payload.userId !== userId) continue;
+          if (typeof payload.accountId !== "string" || !payload.accountId) continue;
+          if (typeof payload.ticket !== "string" && typeof payload.ticket !== "number") continue;
+          if (!Number.isFinite(Number(payload.profit)) || !Number.isFinite(Number(payload.swap))) continue;
+          if (typeof payload.sourceId !== "string" || !payload.sourceId) continue;
+          if (!Number.isInteger(Number(payload.sourceSequence)) || Number(payload.sourceSequence) < 0) continue;
+          if (!Number.isInteger(Number(payload.sequence)) || Number(payload.sequence) < 0) continue;
+          const slValue = payload.slValue === null || payload.slValue === undefined
+            ? null
+            : Number(payload.slValue);
+          if (slValue !== null && !Number.isFinite(slValue)) continue;
+          const visualFrame: TradeVisualFrame = {
+            type: "tradeVisual",
+            accountId: payload.accountId,
+            ticket: String(payload.ticket),
+            profit: Number(payload.profit),
+            swap: Number(payload.swap),
+            slValue,
+            sourceId: payload.sourceId,
+            sourceSequence: Number(payload.sourceSequence),
+            sequence: Number(payload.sequence),
+            at: typeof payload.at === "string" ? payload.at : null,
+          };
+          fanOut(userId, visualFrame);
+          continue;
+        }
+        if (payload.type !== "change") continue;
+        // Advisory trigger ONLY. `trades` and `accounts` are the two upstream
+        // tables whose changes can alter the overlay: a trade row drives the
+        // markers, an account row drives the risk levels. The payload is never
+        // trusted as data — the browser refetches authoritative state either way.
+        if (payload.table !== "trades" && payload.table !== "accounts") continue;
         // Authorization boundary (defense in depth): the bus tags every change
         // with its owning user. This stream is fetched with OUR validated token
         // and aura-backend already filters server-side, but never relay an event
@@ -219,7 +274,7 @@ export function createTradeEventRelay(
         // (the socket fan-out trusts only the session we verified ourselves).
         const frame: TradeEventFrame = {
           type: "trade",
-          table: "trades",
+          table: payload.table === "accounts" ? "accounts" : "trades",
           action: typeof payload.action === "string" ? payload.action : "unknown",
           accountId: typeof payload.accountId === "string" ? payload.accountId : null,
           userId,

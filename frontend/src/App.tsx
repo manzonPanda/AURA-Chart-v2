@@ -59,17 +59,35 @@ import { historyHorizonPages } from "./services/historyHorizon";
 import { findInstrument } from "./services/instruments";
 import {
   getMt5AccountIdentity,
+  getTradingAccountState,
   getTradingAccounts,
   getTradingTrades,
+  type AccountState,
   type Mt5AccountIdentity,
   type TradeRecord,
   type TradingAccount,
 } from "./services/tradingApi";
-import { buildTradeOverlays } from "./services/tradeOverlay";
+import {
+  buildAccountRiskOverlays,
+  buildTradeOverlays,
+  hasApplicableLivePosition,
+  liveTradesForEpic,
+} from "./services/tradeOverlay";
+import {
+  applyLivePositionVisual,
+  applyLivePositionVisualsToOverlays,
+  clearLivePositionVisuals,
+  isNewerLivePositionVisual,
+  livePositionVisualKey,
+  reconcileLivePositionVisuals,
+  type LivePositionVisualMap,
+  type LivePositionVisualOrderMap,
+} from "./services/livePositionVisual";
 import {
   feedFailure,
   feedLoading,
   feedSuccess,
+  createSingleFlight,
   initialOverlayFeed,
   overlayFeedErrorMessage,
   overlayFeedLabel,
@@ -475,6 +493,142 @@ export default function App() {
   // grid is a pure multiple, so one mapping serves both timeframes.
   /** Ref holding the latest bounded trade-overlay refetch (P3-C: triggered by live events). */
   const tradeReloadRef = useRef<(() => void) | null>(null);
+  /** Same for the live account-state refetch (kept separate: one may fail alone). */
+  const accountStateReloadRef = useRef<(() => void) | null>(null);
+  const livePositionVisualOrderRef = useRef<LivePositionVisualOrderMap>(new Map());
+  const [livePositionVisuals, setLivePositionVisuals] = useState<LivePositionVisualMap>(
+    () => new Map(),
+  );
+  // Live MT5 state for the SELECTED account. `null` means "not loaded / not
+  // applicable" and clears the live layer — a switch to another account can
+  // never leave the previous account's positions or risk levels on screen.
+  const [accountState, setAccountState] = useState<AccountState | null>(null);
+
+  // LIVE OPEN-TRADE + ACCOUNT-RISK state.
+  //
+  // This is the SAME bounded read path as the historical overlay: the
+  // authoritative `AccountState` computed by aura-backend from MT5 via
+  // read-only GETs. It is fetched on account selection and refetched on the
+  // EXISTING coalesced trade/account event below (the browser never trusts the
+  // event payload — it only triggers this refetch). There is no new pipeline,
+  // no extra polling, and no action of any kind: the data is rendered as
+  // read-only information.
+  useEffect(() => {
+    let cancelled = false;
+    livePositionVisualOrderRef.current = new Map();
+    setLivePositionVisuals(clearLivePositionVisuals());
+    const load = createSingleFlight(async () => {
+      const accountId = selectedAccountIdRef.current;
+      if (!isAuthenticated() || !accountId) {
+        accountStateReloadRef.current = null;
+        if (!cancelled) setAccountState(null);
+        return;
+      }
+      try {
+        const state = await getTradingAccountState(accountId);
+        if (cancelled) return;
+        // Account-switch guard: a late response for a previously selected
+        // account must never repopulate the chart (same rule as the trades feed).
+        if (selectedAccountIdRef.current !== accountId) return;
+        // A successful authoritative snapshot replaces transient display hints.
+        // The ordering map is intentionally retained so a delayed pre-state
+        // frame cannot overwrite the reconciled snapshot when it arrives later.
+        setLivePositionVisuals(clearLivePositionVisuals());
+        setAccountState(state);
+      } catch (err) {
+        if (cancelled) return;
+        // A missing/failed live state degrades to "no live overlay" — it must
+        // never clear or corrupt the historical feed or show a stale account.
+        console.warn(
+          "[LIVE-OVERLAY] account state unavailable:",
+          err instanceof Error ? err.message : err,
+        );
+        if (selectedAccountIdRef.current === accountId) {
+          setLivePositionVisuals(clearLivePositionVisuals());
+          setAccountState(null);
+        }
+      }
+    });
+    void load();
+    accountStateReloadRef.current = load;
+    return () => {
+      cancelled = true;
+      if (accountStateReloadRef.current === load) accountStateReloadRef.current = null;
+    };
+  }, [selectedAccountId]);
+
+  // ── LIVE overlay descriptors (pure derivation, READ-ONLY) ────────────────
+  // `accountState` is the authoritative snapshot the backend computed from MT5
+  // via bounded GETs. These two memos ONLY reshape it for display: no polling,
+  // no second data source, and no arithmetic the backend did not already do. A
+  // null state (signed out, bridge down, no account) yields empty arrays, so the
+  // chart degrades to "no live overlay" rather than inventing one.
+  const authoritativeLiveTradeOverlays = useMemo(
+    () => (accountState ? liveTradesForEpic(accountState.positions, epic) : []),
+    [accountState, epic],
+  );
+  const authoritativeLivePositionKeys = useMemo(
+    () => new Set(
+      authoritativeLiveTradeOverlays
+        .map((overlay) => selectedAccountId
+          ? livePositionVisualKey(selectedAccountId, overlay.ticket)
+          : null)
+        .filter((key): key is string => key !== null),
+    ),
+    [authoritativeLiveTradeOverlays, selectedAccountId],
+  );
+  const reconciledLivePositionVisuals = useMemo(
+    () => reconcileLivePositionVisuals(
+      livePositionVisuals,
+      authoritativeLivePositionKeys,
+      selectedAccountId,
+    ),
+    [livePositionVisuals, authoritativeLivePositionKeys, selectedAccountId],
+  );
+  useEffect(() => {
+    setLivePositionVisuals((previous) => reconcileLivePositionVisuals(
+      previous,
+      authoritativeLivePositionKeys,
+      selectedAccountId,
+    ));
+  }, [authoritativeLivePositionKeys, selectedAccountId]);
+  const liveTradeOverlays = useMemo(
+    () => applyLivePositionVisualsToOverlays(
+      authoritativeLiveTradeOverlays,
+      reconciledLivePositionVisuals,
+      selectedAccountId,
+    ),
+    [authoritativeLiveTradeOverlays, reconciledLivePositionVisuals, selectedAccountId],
+  );
+
+  // Account-risk levels — CONTEXTUAL to an applicable open live position.
+  //
+  // PRODUCT RULE: the account's configured limits are not standalone chart
+  // indicators. The pipeline is:
+  //   live positions filtered by the CURRENT epic (`liveTradeOverlays`)
+  //     → zero applicable positions ⇒ risk overlays = [] (nothing is projected)
+  //     → otherwise build the existing authoritative risk levels
+  // The gate is the SAME authoritative result the live-position layer renders
+  // (`hasApplicableLivePosition` asserts it, the builder re-asserts it), and a
+  // level without a derivable price is dropped by the RENDERER (no line, no
+  // pill, no price-scale tag) rather than parked somewhere on screen.
+  const riskLevelOverlays = useMemo(
+    () =>
+      accountState && hasApplicableLivePosition(authoritativeLiveTradeOverlays, epic)
+        ? buildAccountRiskOverlays({
+            risk: {
+              profitTargetAmount: accountState.profitTargetAmount,
+              dailyLossLimit: accountState.dailyLossLimit,
+              maxDrawdown: accountState.maxDrawdown,
+            },
+            dailyLossRemaining: accountState.dailyLossRemaining,
+            drawdownRemaining: accountState.drawdownRemaining,
+            overlays: authoritativeLiveTradeOverlays,
+            chartEpic: epic,
+          })
+        : [],
+    [accountState, authoritativeLiveTradeOverlays, epic],
+  );
 
   // Accounts + selection (once per sign-in; re-resolves on every sign-in change).
   useEffect(() => {
@@ -539,7 +693,8 @@ export default function App() {
   const tradesRowsRef = useRef<{ accountId: string; rows: TradeRecord[] } | null>(null);
   useEffect(() => {
     let cancelled = false;
-    const load = async () => {
+    const load = createSingleFlight(async () => {
+      if (cancelled) return;
       const accountId = selectedAccountIdRef.current;
       if (!isAuthenticated() || !accountId) {
         tradesRowsRef.current = null;
@@ -556,9 +711,6 @@ export default function App() {
           );
         }
         tradesRowsRef.current = { accountId, rows: res.trades };
-        // FIX 4: bucket on the chart's ACTUAL timeframe (resolutionToBucketSec)
-        // instead of the former hard-coded 60 — exact ms fields are built by
-        // buildTradeOverlays itself and are timeframe-independent.
         const next = buildTradeOverlays(res.trades, resolutionToBucketSec(timeframeRef.current));
         setOverlayFeed((prev) => feedSuccess(prev, accountId, next, res.trades.length));
       } catch (err) {
@@ -570,11 +722,12 @@ export default function App() {
           setOverlayFeed((prev) => feedFailure(prev, accountId, err));
         }
       }
-    };
+    });
     void load();
     tradeReloadRef.current = load;
     return () => {
       cancelled = true;
+      if (tradeReloadRef.current === load) tradeReloadRef.current = null;
     };
   }, [selectedAccountId]);
 
@@ -633,6 +786,37 @@ export default function App() {
 
   const realtime = useRealtimeStream(timeframe, epic || undefined, streamEpoch);
 
+  // Ephemeral P&L/R fast path. The frame is display-only and is accepted only
+  // when its authenticated account/ticket already exists in the current epic's
+  // authoritative live overlay set. `/state` remains the sole authority and
+  // clears/reconciles these transient values on every successful response.
+  useEffect(() => {
+    const visual = realtime.tradeVisual;
+    if (!visual) return;
+    const selected = String(selectedAccountId ?? "").trim();
+    if (!selected || visual.accountId !== selected) return;
+    const key = livePositionVisualKey(visual.accountId, visual.ticket);
+    if (!key || !isNewerLivePositionVisual(livePositionVisualOrderRef.current, visual)) return;
+    const nextOrder = new Map(livePositionVisualOrderRef.current);
+    nextOrder.set(key, {
+      sourceId: visual.sourceId,
+      sourceSequence: visual.sourceSequence,
+      sequence: visual.sequence,
+    });
+    livePositionVisualOrderRef.current = nextOrder;
+    if (!authoritativeLivePositionKeys.has(key)) return;
+    setLivePositionVisuals((previous) => applyLivePositionVisual(
+      previous,
+      visual,
+      authoritativeLivePositionKeys,
+      selectedAccountId,
+    ));
+  }, [
+    realtime.tradeVisual,
+    authoritativeLivePositionKeys,
+    selectedAccountId,
+  ]);
+
   // P3-C: live MT5 trade-event refetch trigger. The backend relays an advisory
   // {type:"trade"} /ws frame (via the existing SSE bus → /ws path) when MT5
   // persists trade rows. The browser NEVER trusts the frame's payload — it
@@ -659,7 +843,14 @@ export default function App() {
     }
     const reload = tradeReloadRef.current;
     if (!reload) return;
-    const t = window.setTimeout(() => void reload(), 150);
+    const t = window.setTimeout(() => {
+      void reload();
+      // Same advisory event refetches the live account state through the same
+      // bounded REST chain. Event payloads are never trusted as data — this is
+      // a trigger only, and the response is the authoritative state.
+      const reloadState = accountStateReloadRef.current;
+      if (reloadState) void reloadState();
+    }, 150);
     return () => window.clearTimeout(t);
   }, [realtime.tradeRefresh, realtime.tradeRefreshAccountId, liveMt5Allowed]);
 
@@ -1583,6 +1774,8 @@ export default function App() {
           warmupCandles={warmupCandles}
           gaps={gaps}
           tradeOverlays={tradeOverlays}
+          liveTradeOverlays={liveTradeOverlays}
+          riskLevelOverlays={riskLevelOverlays}
           resolution={timeframe}
           instrumentEpic={epic || undefined}
           liveCandle={realtime.candle}

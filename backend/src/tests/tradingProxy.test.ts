@@ -128,7 +128,12 @@ test("DashboardClient builds allowlisted URLs and forwards Bearer", async () => 
   const stub = stubFetch((call) => {
     if (call.url === `${BASE}/api/trading/accounts`) return json(200, { accounts: [ACCOUNT] });
     if (call.url.startsWith(`${BASE}/api/trading/accounts/${ACCOUNT.id}/trades`)) return json(200, TRADES);
-    if (call.url === `${BASE}/api/trading/accounts/${ACCOUNT.id}/state`) return json(200, { accountId: ACCOUNT.id });
+    if (call.url === `${BASE}/api/trading/accounts/${ACCOUNT.id}/state`) {
+      return json(200, {
+        accountId: ACCOUNT.id,
+        state: { accountId: ACCOUNT.id, positions: [] },
+      });
+    }
     return json(404, { error: "unexpected path" });
   });
   try {

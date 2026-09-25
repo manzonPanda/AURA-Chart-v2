@@ -69,7 +69,68 @@ export interface TradesResponse {
   pagination: TradesPagination;
 }
 
-/** Live MT5 money fields are null until the later MT5 subscriber phase. */
+/**
+ * One live MT5 position, already bound to the selected account by the
+ * Dashboard backend (a position with no matching open `trades` row for THIS
+ * account is never returned, so no cross-account bleed is possible).
+ *
+ * STRICTLY READ-ONLY: this is a render snapshot. No field is writable, and
+ * nothing in the chain can turn a snapshot into a trade action.
+ */
+export interface LivePosition {
+  /** MT5 position id, as a string (null when the bridge omits it). */
+  ticket: string | null;
+  /** Bridge symbol. */
+  symbol: string;
+  /** MT5 `trade_type`: 0 = BUY, 1 = SELL. */
+  direction: "Buy" | "Sell";
+  lots: number;
+  entryPrice: number;
+  /** Actual MT5 SL, or null when no stop is set (0 is normalized to null). */
+  sl: number | null;
+  /** Actual MT5 TP, or null when no stop is set (0 is normalized to null). */
+  tp: number | null;
+  /** Floating P/L in account currency, as reported by MT5. */
+  profit: number | null;
+  swap: number | null;
+  /** Legacy bridge risk amount; compatibility fallback for R and price sensitivity. */
+  riskUsd: number | null;
+  /** MT5-native account-currency P/L at the current SL, signed as returned. */
+  slValue: number | null;
+  /** MT5-native account-currency P/L at the current TP, signed as returned. */
+  tpValue: number | null;
+  rewardRiskRatio: string | null;
+  /** The account-scoped instrument spelling from the `trades` row. */
+  instrument: string;
+  /** The open `trades.time_open` — the authoritative time anchor. */
+  openTime: string | null;
+  rowRiskPerTrade: string | number | null;
+  rowRrr: string | null;
+  rowLots: string | number | null;
+  rowEntryPrice: string | number | null;
+  /**
+   * Floating P/L netted with swap, derived ONCE server-side. The chart never
+   * re-computes it.
+   */
+  netPnl: number;
+  /** Server-derived R (netPnl / 1R), or null when 1R is unknown. */
+  liveR: number | null;
+  /**
+   * $/price-point sensitivity, or null when it is NOT mathematically derivable
+   * (D3). A null here means the risk levels render monetary-only, with no line.
+   */
+  moneyPerPoint: number | null;
+}
+
+/**
+ * Account state: the stored configuration, the DB-derived open aggregates, the
+ * LIVE MT5 money/positions, and the authoritative MONETARY risk levels.
+ *
+ * `connected` is false (and every live field null/empty) whenever the local
+ * bridge is unreachable — the overlay degrades to the stored+DB state rather
+ * than showing a stale or invented number. Risk levels are always monetary; a
+ * price-axis line is drawn only when it is mathematically derivable.
+ */
 export interface AccountState {
   accountId: string;
   accountNumber: string | null;
@@ -88,16 +149,40 @@ export interface AccountState {
   startDate: string | null;
   openPositions: number;
   openLots: string | number | null;
-  balance: null;
-  equity: null;
-  floatingPnl: null;
-  dailyPnl: null;
-  dailyLossLimit: null;
-  maxDrawdown: null;
-  currentDrawdown: null;
-  drawdownRemaining: null;
-  openRisk: null;
+  /** Is the local MT5 bridge reachable and reporting? */
+  connected: boolean;
+  /** Fixed, display-safe reason when `connected` is false. */
+  bridgeReason: string;
+  balance: number | null;
+  equity: number | null;
+  floatingPnl: number | null;
+  /** Today's realized P&L, account-scoped, cut at `dailyPnlCutoff`. */
+  dailyPnl: number | null;
+  dailyPnlCutoff: string | null;
+  closedTodayCount: number | null;
+  liveOpenPositions: number;
+  liveOpenLots: number;
+  openRisk: number | null;
+  // Account risk levels — MONETARY. The chart decides whether a price-axis line
+  // is mathematically derivable; a level is never invented.
+  dailyLossLimit: number | null;
+  dailyLossRemaining: number | null;
+  dailyLossUsed: number | null;
+  dayPnl: number | null;
+  profitTargetAmount: number | null;
+  maxDrawdown: number | null;
+  currentDrawdown: number | null;
+  drawdownRemaining: number | null;
+  /** The authoritative DrawdownService state (Node port), or null. */
+  drawdownState: Record<string, unknown> | null;
+  positions: LivePosition[];
   updatedAt: string;
+}
+
+/** Exact Dashboard response envelope consumed through the same-origin AURA proxy. */
+export interface DashboardAccountStateResponse {
+  accountId: string;
+  state: AccountState;
 }
 
 export interface TradesQuery {
@@ -151,13 +236,28 @@ export async function getTradingTrades(accountId: string, query: TradesQuery = {
   return parseOk<TradesResponse>(res);
 }
 
-/** Account state: config/limits + open-position aggregates; live money null (later phase). */
+/**
+ * Unwrap the Dashboard's exact `{ accountId, state }` response into the existing
+ * internal AccountState. The inner state is authoritative and is otherwise
+ * passed through untouched, including Dashboard-derived position fields.
+ * Only `positions` receives the existing array guard required by render code.
+ */
+function normalizeAccountState(raw: DashboardAccountStateResponse): AccountState {
+  const state = raw.state;
+  return {
+    ...state,
+    accountId: state.accountId ?? raw.accountId,
+    positions: Array.isArray(state.positions) ? state.positions : [],
+  } as AccountState;
+}
+
+/** Account state: config/limits + authoritative live money, positions, and risk levels. */
 export async function getTradingAccountState(accountId: string): Promise<AccountState> {
   if (!UUID_RE.test(accountId)) {
     throw new ApiError(400, "BAD_ACCOUNT_ID", "accountId must be a UUID.");
   }
   const res = await authorizedFetch(`/trading/accounts/${encodeURIComponent(accountId)}/state`);
-  return parseOk<AccountState>(res);
+  return normalizeAccountState(await parseOk<DashboardAccountStateResponse>(res));
 }
 
 // ── P3-D: local MT5 terminal identity (MATCH / MISMATCH against the selection) ──

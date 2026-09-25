@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
+import { getToken, subscribeAuth } from "./auth";
 import { diag, logWsCandleFrame } from "./diagnostics";
 import { type EmaAlertStateMsg } from "./emaAlertApi.js";
+import { parseLivePositionVisualFrame } from "./livePositionVisual";
 import {
   buildRealtimeWsUrl,
+  buildTradeAuthFrame,
   clockOffsetFromStatus,
   initialStream,
   isFrameForInstrument,
@@ -22,8 +25,7 @@ export type {
   RealtimeCandleMsg,
   RealtimeStream,
 } from "./realtimeCore.js";
-export { buildRealtimeWsUrl, initialStream, isFrameForInstrument };
-
+export { buildRealtimeWsUrl, buildTradeAuthFrame, initialStream, isFrameForInstrument };
 // Re-export the per-timeframe alert state types from the API module — the WS
 // message shape mirrors the REST state exactly (single source of truth).
 export type { EmaAlertStateMsg, EmaAlertUnitState } from "./emaAlertApi.js";
@@ -73,6 +75,17 @@ export function useRealtimeStream(
     let cancelled = false;
     let timer: number | undefined;
     let attempts = 0;
+    const unsubscribeAuth = subscribeAuth(({ authenticated }) => {
+      if (!authenticated) {
+        // The relay has no unauth frame; closing this existing socket is the
+        // server-defined detach path and prevents post-signout trade frames.
+        socket?.close();
+        return;
+      }
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      const authFrame = buildTradeAuthFrame(getToken());
+      if (authFrame) socket.send(authFrame);
+    });
 
     const connect = () => {
       if (cancelled) return;
@@ -80,11 +93,14 @@ export function useRealtimeStream(
 
       setStream((prev) => ({ ...prev, status: attempts > 0 ? "RECONNECTING" : "CONNECTING" }));
 
-      socket = new WebSocket(url);
-      socket.onopen = () => {
+      const nextSocket = new WebSocket(url);
+      socket = nextSocket;
+      nextSocket.onopen = () => {
         attempts = 0;
+        const authFrame = buildTradeAuthFrame(getToken());
+        if (authFrame) nextSocket.send(authFrame);
       };
-      socket.onmessage = (event) => {
+      nextSocket.onmessage = (event) => {
         try {
           const msg = JSON.parse(String(event.data)) as
             | RealtimeStatusMsg
@@ -155,6 +171,10 @@ export function useRealtimeStream(
             // reversals). Display-only — detection never runs in the browser.
             const a = msg as { type: "emaAlert"; state: EmaAlertStateMsg };
             setStream((prev) => ({ ...prev, emaAlert: a.state }));
+          } else if (msg.type === "tradeVisual") {
+            // Ephemeral P&L/R hint only; it never triggers an authoritative refetch.
+            const visual = parseLivePositionVisualFrame(msg);
+            if (visual) setStream((prev) => ({ ...prev, tradeVisual: visual }));
           } else if (msg.type === "trade" && "action" in msg) {
             // P3-C: ADVISORY live trade-event trigger. The backend relays an
             // additive {type:"trade"} frame when MT5 writes trade rows (existing
@@ -200,6 +220,7 @@ export function useRealtimeStream(
 
     return () => {
       cancelled = true;
+      unsubscribeAuth();
       if (timer) window.clearTimeout(timer);
       socket?.close();
     };

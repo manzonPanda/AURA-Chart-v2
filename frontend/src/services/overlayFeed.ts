@@ -25,6 +25,31 @@ import type { TradeOverlay } from "./tradeOverlay.ts";
 /** Explicit feed lifecycle — "empty" is phase `ready` + tradeCount 0. */
 export type OverlayFeedPhase = "idle" | "loading" | "ready" | "error" | "unauthorized";
 
+/**
+ * Coalesce concurrent refresh requests into at most one running task and one
+ * trailing task. Calls made while the task is in flight never start extra work.
+ */
+export function createSingleFlight(task: () => Promise<void>): () => Promise<void> {
+  let inFlight = false;
+  let queued = false;
+  return async () => {
+    if (inFlight) {
+      queued = true;
+      return;
+    }
+    inFlight = true;
+    try {
+      do {
+        queued = false;
+        await task();
+      } while (queued);
+    } finally {
+      inFlight = false;
+      queued = false;
+    }
+  };
+}
+
 export interface OverlayFeedState {
   /** Account the current overlays/phase belong to (null ⇒ no scope yet). */
   accountId: string | null;
@@ -61,6 +86,12 @@ export function feedLoading(
   if (!accountId) return initialOverlayFeed();
   if (prev.accountId !== accountId) {
     return { accountId, phase: "loading", overlays: [], tradeCount: 0, errorMessage: null };
+  }
+  if (prev.accountId === accountId && prev.phase === "ready") {
+    // A background refresh must not create a visible loading state. Returning the
+    // same object also avoids a needless header/chart render while the request
+    // is in flight; account switches still take the hard loading boundary above.
+    return prev;
   }
   return { ...prev, phase: "loading", errorMessage: null };
 }

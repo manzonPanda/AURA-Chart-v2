@@ -358,7 +358,11 @@ test("11b/12b: source guard — the SL/TP painter is gone from the primitive", (
   assert.ok(!src.includes("drawLevel"), "drawLevel removed");
   assert.ok(!src.includes("SL_COLOR"), "SL color removed");
   assert.ok(!src.includes("TP_COLOR"), "TP color removed");
-  assert.ok(!src.includes("fillText"), "no overlay captions at all");
+  // The HISTORICAL path paints no captions. Text exists in this file ONLY for the
+  // additive read-only live/risk plate labels, so scope the assertion to the
+  // historical painters rather than the whole module.
+  const historical = src.slice(0, src.indexOf("drawLiveOverlays("));
+  assert.ok(!historical.includes("fillText"), "no historical overlay captions at all");
 });
 
 // ── 13–16. Exact timestamps + 1m/3m rendering (P3-D interpolation intact) ────

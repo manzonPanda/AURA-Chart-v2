@@ -74,7 +74,7 @@ import { resolveGapBands } from "../../services/gapRegions";
 import { GapRegionsPrimitive } from "./GapRegionsPrimitive";
 import { WhitespaceBridge } from "./WhitespaceBridge";
 import { TradeOverlayBridge } from "./TradeOverlayBridge";
-import type { TradeOverlay } from "../../services/tradeOverlay";
+import type { TradeOverlay, LiveTradeOverlay, RiskLevelOverlay } from "../../services/tradeOverlay";
 import { buildWhitespacePlan } from "../../services/whitespaceRows";
 import { mergeBridgeBars } from "../../services/pineSeries";
 import {
@@ -269,6 +269,16 @@ interface Props {
    * behavior is exactly as before. Filtered to the current instrument epic.
    */
   tradeOverlays?: readonly TradeOverlay[];
+  /**
+   * LIVE open-trade + account-risk overlay (additive, READ-ONLY). These are
+   * pure display descriptors built in App.tsx from the server-authoritative
+   * `AccountState`; the chart never computes risk and never offers an action.
+   * Both default undefined/empty ⇒ nothing attaches and chart behavior is
+   * exactly as before. They are hidden during replay for the same reason the
+   * historical markers are.
+   */
+  liveTradeOverlays?: readonly LiveTradeOverlay[];
+  riskLevelOverlays?: readonly RiskLevelOverlay[];
   /** Timeframe id (MINUTE_1 | MINUTE_3) — used for stream bucket alignment. */
   resolution?: string;
   /**
@@ -967,6 +977,8 @@ export function TradingChart({
   warmupCandles = [],
   gaps,
   tradeOverlays,
+  liveTradeOverlays = [],
+  riskLevelOverlays = [],
   resolution = "",
   instrumentEpic,
   liveCandle = null,
@@ -1038,6 +1050,24 @@ export function TradingChart({
         ? (tradeOverlays ?? []).filter((o) => o.resolved && o.epic === instrumentEpic)
         : [],
     [tradeOverlays, instrumentEpic],
+  );
+
+  // LIVE open trades + account-risk levels (additive, READ-ONLY). These are
+  // scoped to the CURRENT instrument with the SAME exact-epic rule as the
+  // historical rows above, so a position on another instrument is never drawn
+  // on this price axis. The builders in services/tradeOverlay.ts have already
+  // applied this filter; re-checking here keeps the chart self-contained and
+  // makes an unfiltered prop harmless. Account-risk levels are NOT epic-scoped
+  // in the same way: they are account-wide allowances, so they are passed
+  // through and the primitive draws a price line only where one was derived.
+  const visibleLiveOverlays = useMemo(
+    () =>
+      instrumentEpic
+        ? liveTradeOverlays.filter(
+            (o) => o.resolved && o.epic === instrumentEpic,
+          )
+        : [],
+    [liveTradeOverlays, instrumentEpic],
   );
 
   useEffect(() => {
@@ -1827,6 +1857,8 @@ export function TradingChart({
               Open trades extend to the forming bucket via liveCandle.time. */}
           <TradeOverlayBridge
             overlays={visibleTradeOverlays}
+            liveOverlays={visibleLiveOverlays}
+            riskLevels={riskLevelOverlays}
             formingBucketSec={liveCandle?.time ?? null}
             bucketSec={bucketSec}
             enabled={!session}

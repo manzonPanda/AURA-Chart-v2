@@ -103,7 +103,9 @@ export function createTradingRouter(
     }),
   );
 
-  // C — account state (config/limits now; live MT5 money arrives in a later phase).
+  // C — account state: configuration, the authoritative risk levels, and the
+  // live MT5 money/positions for THIS account. Same path, same ownership check,
+  // same token gate — the payload is richer, the contract is unchanged.
   app.get(
     "/trading/accounts/:accountId/state",
     withAuth(async (c, token) => {

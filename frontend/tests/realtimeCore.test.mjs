@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 
 import {
   buildRealtimeWsUrl,
+  buildTradeAuthFrame,
   initialStream,
   isFrameForInstrument,
 } from "../src/services/realtimeCore.ts";
@@ -37,6 +38,13 @@ test("buildRealtimeWsUrl: https page → wss; omitted epic → no epic param (BC
   const noEpic = buildRealtimeWsUrl("MINUTE_3", undefined, LOC);
   assert.ok(!noEpic.includes("epic="), noEpic);
   assert.ok(noEpic.includes("res=MINUTE_3"), noEpic);
+});
+
+test("buildTradeAuthFrame sends the existing opaque session token only when present", () => {
+  assert.equal(buildTradeAuthFrame(null), null);
+  const frame = buildTradeAuthFrame("opaque-session-token");
+  assert.deepEqual(JSON.parse(frame), { type: "auth", token: "opaque-session-token" });
+  assert.ok(!buildRealtimeWsUrl("MINUTE_1", GOLD, LOC).includes("opaque-session-token"));
 });
 
 // ── stale-frame instrument guard ─────────────────────────────────────────────

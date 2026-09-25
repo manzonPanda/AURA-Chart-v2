@@ -273,6 +273,61 @@ test("P3-C auth: another user's trade change never reaches this client", async (
   relay.stop();
 });
 
+function t2Visual(userId: string, accountId: string, over: Record<string, unknown> = {}) {
+  const payload = {
+    type: "visual-position",
+    userId,
+    accountId,
+    ticket: "12345",
+    profit: 81.28,
+    swap: 0,
+    slValue: -47.68,
+    sourceId: "dashboard-a",
+    sourceSequence: 1,
+    sequence: 7,
+    at: "2026-09-25T06:00:00.000Z",
+    ...over,
+  };
+  return `event: change\ndata: ${JSON.stringify(payload)}\n\n`;
+}
+
+test("P3-C visual: authenticated P&L hint fans out immediately without a refetch frame", async () => {
+  const sock = t2Socket();
+  const relay = t2Create(
+    t2DashboardClient(),
+    T2_CONFIG.dashboard.baseUrl,
+    async () => t2SseResponse(t2Visual(T2_USER, T2_ACCT)),
+  );
+  relay.attach(sock, "GOLD");
+  sock.emitMessage(authFrame(T2_GOOD));
+  await sleep(100);
+  const visual = t2Frame(sock, "tradeVisual");
+  assert.ok(visual, "authenticated visual frame fans out");
+  assert.equal(visual.accountId, T2_ACCT);
+  assert.equal(visual.ticket, "12345");
+  assert.equal(visual.profit, 81.28);
+  assert.equal(visual.swap, 0);
+  assert.equal(visual.slValue, -47.68);
+  assert.equal(visual.sequence, 7);
+  assert.equal(t2Frame(sock, "trade"), null, "visual hints never trigger an authoritative refetch");
+  relay.stop();
+});
+
+test("P3-C visual: another user's visual hint is dropped", async () => {
+  const sock = t2Socket();
+  const relay = t2Create(
+    t2DashboardClient(),
+    T2_CONFIG.dashboard.baseUrl,
+    async () => t2SseResponse(t2Visual(T2_OTHER_USER, T2_OTHER_ACCT)),
+  );
+  relay.attach(sock, "GOLD");
+  sock.emitMessage(authFrame(T2_GOOD));
+  await sleep(100);
+  assert.equal(t2Frame(sock, "tradeAuth")?.ok, true);
+  assert.equal(t2Frame(sock, "tradeVisual"), null, "foreign visual data never fans out");
+  relay.stop();
+});
+
 test("P3-C auth: bad token is rejected and no trades are relayed", async () => {
   const sock = t2Socket();
   const relay = t2Create(

@@ -76,6 +76,53 @@ export interface DashboardTradesResponse {
   pagination: DashboardPagination;
 }
 
+/**
+ * One live MT5 position, already bound to the selected account by the
+ * Dashboard backend (a position with no matching open `trades` row for THIS
+ * account is never returned, so no cross-account bleed is possible).
+ *
+ * Read-only by construction: this is a snapshot for rendering. There is no
+ * order/close/modify/cancel verb anywhere in the chain that produces it.
+ */
+export interface DashboardLivePosition {
+  /** MT5 position id, as a string (may be null when the bridge omits it). */
+  ticket: string | null;
+  /** Bridge symbol. */
+  symbol: string;
+  /** MT5 `trade_type`: 0 = BUY, 1 = SELL. */
+  direction: "Buy" | "Sell";
+  lots: number;
+  entryPrice: number;
+  /** Actual MT5 SL, or null when no stop is set (0 is normalized to null). */
+  sl: number | null;
+  /** Actual MT5 TP, or null when no stop is set (0 is normalized to null). */
+  tp: number | null;
+  /** Floating P/L in account currency, as reported by MT5. */
+  profit: number | null;
+  swap: number | null;
+  /** Legacy bridge risk amount; compatibility fallback for R and price sensitivity. */
+  riskUsd: number | null;
+  /** MT5-native account-currency P/L at the current SL, signed as returned. */
+  slValue: number | null;
+  /** MT5-native account-currency P/L at the current TP, signed as returned. */
+  tpValue: number | null;
+  rewardRiskRatio: string | null;
+  /** The account-scoped instrument spelling from the `trades` row. */
+  instrument: string;
+  /** The open `trades.time_open` — the authoritative time anchor. */
+  openTime: string | null;
+  rowRiskPerTrade: string | number | null;
+  rowRrr: string | null;
+  rowLots: string | number | null;
+  rowEntryPrice: string | number | null;
+  /** Dashboard-derived net P/L; the AURA proxy forwards it without calculation. */
+  netPnl: number;
+  /** Dashboard-derived live R multiple, or null when its 1R is unavailable. */
+  liveR: number | null;
+  /** Dashboard-derived money per full price point, or null when underivable. */
+  moneyPerPoint: number | null;
+}
+
 export interface DashboardAccountState {
   accountId: string;
   accountNumber: string | null;
@@ -94,17 +141,43 @@ export interface DashboardAccountState {
   startDate: string | null;
   openPositions: number;
   openLots: string | number | null;
-  /** Live MT5 money fields — null until the later MT5 subscriber phase. */
-  balance: null;
-  equity: null;
-  floatingPnl: null;
-  dailyPnl: null;
-  dailyLossLimit: null;
-  maxDrawdown: null;
-  currentDrawdown: null;
-  drawdownRemaining: null;
-  openRisk: null;
+  /**
+   * LIVE MT5 money. `connected` is false (and the money fields null) whenever
+   * the local bridge is unreachable — the overlay degrades to the DB state
+   * rather than showing a stale or invented number.
+   */
+  connected: boolean;
+  bridgeReason: string;
+  balance: number | null;
+  equity: number | null;
+  floatingPnl: number | null;
+  /** Today's realized P&L, account-scoped, cut at `dailyPnlCutoff`. */
+  dailyPnl: number | null;
+  dailyPnlCutoff: string | null;
+  closedTodayCount: number | null;
+  liveOpenPositions: number;
+  liveOpenLots: number;
+  openRisk: number | null;
+  // Account risk levels — MONETARY. The chart decides whether a price-axis line
+  // is mathematically derivable; a level is never invented.
+  dailyLossLimit: number | null;
+  dailyLossRemaining: number | null;
+  dailyLossUsed: number | null;
+  dayPnl: number | null;
+  profitTargetAmount: number | null;
+  maxDrawdown: number | null;
+  currentDrawdown: number | null;
+  drawdownRemaining: number | null;
+  /** The authoritative DrawdownService state (Node port), or null. */
+  drawdownState: Record<string, unknown> | null;
+  positions: DashboardLivePosition[];
   updatedAt: string;
+}
+
+/** Exact Dashboard `/state` wire envelope, preserved by the AURA proxy. */
+export interface DashboardAccountStateResponse {
+  accountId: string;
+  state: DashboardAccountState;
 }
 
 export interface DashboardSession {
@@ -256,7 +329,7 @@ export class DashboardClient {
     return this.request(PATH.trades(accountId), { token, query: qs });
   }
 
-  getAccountState(token: string, accountId: string): Promise<DashboardAccountState> {
+  getAccountState(token: string, accountId: string): Promise<DashboardAccountStateResponse> {
     return this.request(PATH.state(accountId), { token });
   }
 }

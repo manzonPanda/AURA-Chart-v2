@@ -25,17 +25,27 @@ import { useChartApi } from "@getcandlekit/charts/react";
 
 import { TradeOverlayPrimitive } from "./TradeOverlayPrimitive";
 import { formingBucketToMs } from "../../services/tradeOverlay";
-import type { TradeOverlay } from "../../services/tradeOverlay";
+import type {
+  LiveTradeOverlay,
+  RiskLevelOverlay,
+  TradeOverlay,
+} from "../../services/tradeOverlay";
 
 export { formingBucketToMs };
 
 export function TradeOverlayBridge({
   overlays,
+  liveOverlays,
+  riskLevels,
   formingBucketSec,
   bucketSec,
   enabled,
 }: {
   overlays: readonly TradeOverlay[];
+  /** Live MT5 positions for the CHART instrument (read-only descriptors). */
+  liveOverlays?: readonly LiveTradeOverlay[] | undefined;
+  /** Informational account-risk levels (read-only descriptors). */
+  riskLevels?: readonly RiskLevelOverlay[] | undefined;
   formingBucketSec: number | null | undefined;
   bucketSec: number;
   enabled: boolean;
@@ -66,10 +76,23 @@ export function TradeOverlayBridge({
     if (!primRef.current) return;
     if (!enabled) {
       primRef.current.setOverlays([], null, bucketSec);
+      // Replay clears historical geometry, so the live/risk layer must be
+      // cleared with it — a simulated chart must never show live MT5 state.
+      primRef.current.setLiveOverlays([], []);
       return;
     }
     primRef.current.setOverlays(overlays, formingMs, bucketSec);
   }, [overlays, formingMs, enabled, bucketSec]);
+
+  // The LIVE layer is updated independently of the historical layer: a state
+  // refetch that changes only floating P&L or SL/TP repaints without touching
+  // the completed P3 path. Both arrays are empty when there is no live state,
+  // so account switches and the absence of open positions clear the layer.
+  useEffect(() => {
+    if (!primRef.current) return;
+    if (!enabled) return;
+    primRef.current.setLiveOverlays(liveOverlays ?? [], riskLevels ?? []);
+  }, [liveOverlays, riskLevels, enabled]);
 
   return null;
 }

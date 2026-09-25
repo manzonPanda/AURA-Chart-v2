@@ -28,6 +28,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  createSingleFlight,
   feedFailure,
   feedLoading,
   feedSuccess,
@@ -35,7 +36,15 @@ import {
   overlayFeedErrorMessage,
   overlayFeedLabel,
 } from "../src/services/overlayFeed.ts";
-import { buildTradeOverlays } from "../src/services/tradeOverlay.ts";
+import {
+  applyLivePositionVisual,
+  applyLivePositionVisualsToOverlays,
+  clearLivePositionVisuals,
+  livePositionVisualKey,
+  parseLivePositionVisualFrame,
+  reconcileLivePositionVisuals,
+} from "../src/services/livePositionVisual.ts";
+import { buildAccountRiskOverlays, buildTradeOverlays } from "../src/services/tradeOverlay.ts";
 import {
   allowsLiveMt5Data,
   resolveSelectedAccountId,
@@ -176,6 +185,167 @@ test("H: zero trades (ready/0) is distinguishable from failure and from loading"
   );
   assert.notEqual(overlayFeedLabel(empty), overlayFeedLabel(failed));
   assert.notEqual(overlayFeedErrorMessage(empty), overlayFeedErrorMessage(failed));
+});
+
+test("same-account refresh stays ready and single-flight calls collapse to one trailing reload", async () => {
+  const overlays = buildTradeOverlays([row()], 60);
+  const ready = feedSuccess(feedLoading(initialOverlayFeed(), ACCOUNT_A), ACCOUNT_A, overlays, 1);
+  const refreshed = feedLoading(ready, ACCOUNT_A);
+  assert.equal(refreshed, ready, "background refresh returns the same state object");
+  assert.equal(overlayFeedLabel(refreshed), overlayFeedLabel(ready));
+  assert.notEqual(overlayFeedLabel(refreshed), "Loading trades…");
+
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let calls = 0;
+  const reload = createSingleFlight(async () => {
+    calls += 1;
+    await gate;
+  });
+  const first = reload();
+  await Promise.resolve();
+  const second = reload();
+  const third = reload();
+  assert.equal(calls, 1, "only the active request runs");
+  release();
+  await Promise.all([first, second, third]);
+  assert.equal(calls, 2, "concurrent triggers collapse into one trailing request");
+});
+
+test("initial account load still exposes Loading trades…", () => {
+  assert.equal(
+    overlayFeedLabel(feedLoading(initialOverlayFeed(), ACCOUNT_A)),
+    "Loading trades…",
+  );
+});
+
+// ── Ephemeral P&L/R visual hints ─────────────────────────────────────────────
+const visual = (over = {}) => ({
+  type: "tradeVisual",
+  accountId: ACCOUNT_A,
+  ticket: "12345",
+  profit: 80,
+  swap: 1.28,
+  slValue: -47.68,
+  sourceId: "dashboard-a",
+  sourceSequence: 1,
+  sequence: 1,
+  at: "2026-09-25T06:00:00.000Z",
+  ...over,
+});
+const visualKey = () => livePositionVisualKey(ACCOUNT_A, "12345");
+
+test("matching account/ticket calculates net P&L and R without using Python live_rr", () => {
+  const parsed = parseLivePositionVisualFrame(visual({ live_rr: 999 }));
+  assert.ok(parsed);
+  const applied = applyLivePositionVisual(new Map(), parsed, new Set([visualKey()]), ACCOUNT_A);
+  const entry = applied.get(visualKey());
+  assert.equal(entry.netPnl, 81.28);
+  assert.equal(entry.liveR, 1.7);
+  assert.notEqual(entry.liveR, 999, "Python live_rr is not used");
+});
+
+test("foreign account and unknown ticket visual updates are ignored", () => {
+  const authoritative = new Set([visualKey()]);
+  const base = new Map();
+  assert.equal(
+    applyLivePositionVisual(base, visual({ accountId: ACCOUNT_B }), authoritative, ACCOUNT_A),
+    base,
+  );
+  assert.equal(
+    applyLivePositionVisual(base, visual({ ticket: "unknown" }), authoritative, ACCOUNT_A),
+    base,
+  );
+});
+
+test("invalid/zero SL risk retains the last valid visual R and never fabricates one", () => {
+  const authoritative = new Set([visualKey()]);
+  let map = applyLivePositionVisual(new Map(), visual(), authoritative, ACCOUNT_A);
+  map = applyLivePositionVisual(map, visual({
+    profit: 10,
+    slValue: 0,
+    sourceSequence: 2,
+    sequence: 2,
+  }), authoritative, ACCOUNT_A);
+  assert.equal(map.get(visualKey()).netPnl, 11.28);
+  assert.equal(map.get(visualKey()).liveR, 1.7, "last valid R is retained until reconciliation");
+  const noPrior = applyLivePositionVisual(new Map(), visual({ slValue: null }), authoritative, ACCOUNT_A);
+  assert.equal(noPrior.get(visualKey()).liveR, null);
+});
+
+test("stale/out-of-order events cannot overwrite newer same-source or server-sequenced values", () => {
+  const authoritative = new Set([visualKey()]);
+  let map = applyLivePositionVisual(new Map(), visual({
+    profit: 80,
+    sourceSequence: 2,
+    sequence: 20,
+  }), authoritative, ACCOUNT_A);
+  const staleSource = applyLivePositionVisual(map, visual({
+    profit: 10,
+    sourceSequence: 1,
+    sequence: 21,
+  }), authoritative, ACCOUNT_A);
+  assert.equal(staleSource.get(visualKey()).netPnl, 81.28);
+  const staleServer = applyLivePositionVisual(map, visual({
+    sourceId: "dashboard-b",
+    profit: 20,
+    sourceSequence: 1,
+    sequence: 19,
+  }), authoritative, ACCOUNT_A);
+  assert.equal(staleServer.get(visualKey()).netPnl, 81.28);
+});
+
+const liveOverlay = () => ({
+  key: "p:12345",
+  ticket: "12345",
+  epic: "GOLD",
+  resolved: true,
+  mt5Symbol: "XAUUSD",
+  direction: "Buy",
+  lots: 0.12,
+  entryPrice: 4275.41,
+  sl: 4267.27,
+  tp: 4295.67,
+  netPnl: 60,
+  liveR: 0.61,
+  openTime: "2026-09-24 08:00:00",
+  moneyPerPoint: 10,
+});
+
+test("visual merge changes only P&L/R; account-risk output stays unchanged", () => {
+  const authoritative = [liveOverlay()];
+  const visuals = applyLivePositionVisual(new Map(), visual(), new Set([visualKey()]), ACCOUNT_A);
+  const display = applyLivePositionVisualsToOverlays(authoritative, visuals, ACCOUNT_A);
+  assert.equal(display[0].netPnl, 81.28);
+  assert.equal(display[0].liveR, 1.7);
+  for (const field of ["sl", "tp", "moneyPerPoint", "entryPrice", "lots", "direction", "epic"]) {
+    assert.equal(display[0][field], authoritative[0][field], `${field} remains authoritative`);
+  }
+  const riskInput = {
+    risk: { profitTargetAmount: 400, dailyLossLimit: 200, maxDrawdown: 500 },
+    overlays: authoritative,
+    chartEpic: "GOLD",
+  };
+  assert.deepEqual(
+    buildAccountRiskOverlays({ ...riskInput, overlays: display }),
+    buildAccountRiskOverlays(riskInput),
+  );
+});
+
+test("authoritative state clears transient values and closed/missing tickets remove them", () => {
+  const populated = applyLivePositionVisual(new Map(), visual(), new Set([visualKey()]), ACCOUNT_A);
+  assert.equal(populated.size, 1);
+  assert.equal(clearLivePositionVisuals().size, 0, "successful /state replaces transient hints");
+  assert.equal(
+    reconcileLivePositionVisuals(populated, new Set(), ACCOUNT_A).size,
+    0,
+    "closed/missing authoritative position removes the hint",
+  );
+  assert.equal(
+    reconcileLivePositionVisuals(populated, new Set([visualKey()]), ACCOUNT_B).size,
+    0,
+    "account switch removes the hint",
+  );
 });
 
 // ── N/O — P3-C advisory frames are account-scoped hints only ───────────────
