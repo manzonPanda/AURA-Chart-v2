@@ -398,8 +398,8 @@ test("14+16: 3m — exact :55s timestamp still resolves on the 180s grid", () =>
   assert.equal(exit.pts[0].x, wantExitX, "exit interpolates on 3m too");
 });
 
-// ── 17. Open trade behavior preserved ────────────────────────────────────────
-test("17: open trade — entry only, dashed slate extension to the forming bucket", () => {
+// ── 17. Open trade behavior ──────────────────────────────────────────────────
+test("17: open trade keeps the entry marker but draws no gray band", () => {
   const open = ov({
     exitBucketMs: null,
     exitExactMs: null,
@@ -408,20 +408,18 @@ test("17: open trade — entry only, dashed slate extension to the forming bucke
     status: "open",
   });
   const formingMs = Date.UTC(2026, 8, 23, 12, 30, 0);
-  const { ctx, scale } = render([open], { formingMs });
-  const tris = triangles(ctx);
-  assert.equal(tris.length, 1, "open trade renders ONLY the entry triangle");
-  const b = bands(ctx);
-  assert.equal(b.length, 1, "open band still drawn");
-  assert.deepEqual(b[0].dash, [5, 4], "pre-existing open dashed pattern");
-  assert.equal(b[0].color, "rgba(148, 163, 184, 0.75)", "pre-existing open slate");
-  assert.equal(
-    b[0].pts[b[0].pts.length - 1].x,
-    scale.timeToCoordinate(formingMs / 1000),
-    "extends to the forming bucket (registered point), never an invented time",
-  );
-  assert.equal(b[0].pts[0].y, b[0].pts[1].y, "horizontal at the entry price (no exit price)");
-  assert.equal(bandOutcome({ status: "open", pnl: null }), "open", "never classified won/lost");
+  const { ctx } = render([open], { formingMs });
+  assert.equal(triangles(ctx).length, 1, "the historical open entry marker remains");
+  assert.equal(bands(ctx).length, 0, "the unwanted gray open-trade band is absent");
+  assert.equal(bandOutcome({ status: "open", pnl: null }), "open", "still never classified won/lost");
+});
+
+test("17b: closed historical result bands remain intact", () => {
+  const { ctx } = render([ov()]);
+  const closedBands = bands(ctx);
+  assert.equal(closedBands.length, 1);
+  assert.deepEqual(closedBands[0].dash, [2, 3]);
+  assert.equal(closedBands[0].color, "#26a69a", "winning closed band stays teal");
 });
 
 // ── 18. Account/epic switching — visibility filter unchanged ─────────────────

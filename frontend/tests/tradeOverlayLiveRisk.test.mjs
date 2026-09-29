@@ -427,7 +427,18 @@ test("5c: STOP LOSS and TAKE PROFIT use one styled line, pill and exact price ta
 });
 
 // ── 6. the three account-risk amounts come straight from the server ─────────
-const RISK = { profitTargetAmount: 5000, dailyLossLimit: 3000, maxDrawdown: 10000 };
+const RISK = {
+  initialBalance: 100000,
+  balance: 100000,
+  equity: 100000,
+  floatingPnl: 0,
+  drawdownBasis: "balance",
+  profitTargetAmount: 5000,
+  dailyLossLimit: 3000,
+  dailyLossFloor: 97000,
+  maxDrawdown: 10000,
+  maxDrawdownFloor: 90000,
+};
 test("6: PROFIT TARGET / DAILY LOSS / MAX DRAWDOWN render with their exact amounts", () => {
   // An applicable OPEN position on the chart instrument is the gate for the
   // account-risk layer (see 8/19/20) — with one open, all three are eligible.
@@ -451,24 +462,179 @@ test("6: PROFIT TARGET / DAILY LOSS / MAX DRAWDOWN render with their exact amoun
 test("6b: an unconfigured allowance yields a null amount, never a fake $0", () => {
   const live = liveOf();
   const levels = buildAccountRiskOverlays({
-    risk: { profitTargetAmount: null, dailyLossLimit: null, maxDrawdown: null },
+    risk: {
+      initialBalance: 100000,
+      balance: 100000,
+      equity: 100000,
+      floatingPnl: 0,
+      drawdownBasis: "balance",
+      profitTargetAmount: null,
+      dailyLossLimit: null,
+      dailyLossFloor: null,
+      maxDrawdown: null,
+      maxDrawdownFloor: null,
+    },
     overlays: [live],
     chartEpic: "GOLD",
   });
   for (const l of levels) assert.equal(l.amount, null);
   assert.equal(formatRiskAmount(null), "—");
   assert.equal(formatRiskAmount(0), "$0");
-  // …and with no derivable price the renderer paints NOTHING for them: no
-  // floating monetary label, no line, no tag.
   const { ctx, prim } = render({ live: [live], risk: levels });
   for (const kind of ["PROFIT TARGET", "DAILY LOSS", "MAX DRAWDOWN"]) {
-    assert.ok(
-      !ctx.texts.some((t) => t.startsWith(kind)),
-      `${kind} is not parked anywhere on the chart`,
-    );
+    assert.ok(!ctx.texts.some((t) => t.startsWith(kind)), `${kind} is not parked anywhere on the chart`);
   }
   assert.equal(riskLines(ctx).length, 0);
   assert.equal(prim.priceAxisViews().length, 3, "the live entry, SL and TP are tagged");
+});
+
+test("6c: Profit Target projects the ABSOLUTE account target from initial balance", () => {
+  const live = liveOf();
+  // The account must REACH initialBalance + target, so only the shortfall from
+  // the CURRENT balance is still owed by the open book: 100,000 + 400 - 99,700
+  // = +$700, which is 70 points at $10/point above the 4300.5 entry.
+  const levels = buildAccountRiskOverlays({
+    risk: { ...RISK, initialBalance: 100000, profitTargetAmount: 400, balance: 99700 },
+    overlays: [live],
+    chartEpic: "GOLD",
+  });
+  assert.equal(
+    levels[0].price,
+    4370.5,
+    "only the +$700 shortfall from the current balance is required of the open book",
+  );
+  // Earning the target from scratch (balance == initial balance) still asks the
+  // full +$400, so the projection is not a fixed delta from the entry.
+  const fromScratch = buildAccountRiskOverlays({
+    risk: { ...RISK, initialBalance: 100000, profitTargetAmount: 400, balance: 100000 },
+    overlays: [live],
+    chartEpic: "GOLD",
+  });
+  assert.equal(fromScratch[0].price, 4340.5, "+$400 from the entry when nothing is earned yet");
+  assert.ok(
+    fromScratch[0].price < levels[0].price,
+    "a higher current balance means less P/L still owed, so the required price sits lower",
+  );
+  // The stale DB realized-P&L sum is NOT the baseline: moving it cannot move the line.
+  const samePrice = buildAccountRiskOverlays({
+    risk: { ...RISK, initialBalance: 100000, profitTargetAmount: 400, balance: 99700 },
+    overlays: [live],
+    chartEpic: "GOLD",
+  });
+  assert.equal(levels[0].price, samePrice[0].price);
+  // Without an initial balance the level is undrawable rather than guessed.
+  const noBase = buildAccountRiskOverlays({
+    risk: { ...RISK, initialBalance: null, balance: 99700 },
+    overlays: [live],
+    chartEpic: "GOLD",
+  });
+  assert.equal(noBase[0].price, null, "no absolute baseline ⇒ no projected price");
+});
+
+// ── 6c-bis. The VERIFIED live XAUUSD account, checked against MT5's own economics ──
+test("6c-bis: the verified live position projects the exact MT5 threshold prices", () => {
+  // MT5 contract economics for this symbol/position: $6.00 of account-currency
+  // P/L per $1.00 of price move (contractSize 100 × 0.06 lots).
+  const live = liveOf({
+    ticket: "10684645438",
+    entryPrice: 4276.15,
+    sl: 4268.89,
+    tp: 4315.52,
+    lots: 0.06,
+    moneyPerPoint: 6,
+  });
+  const risk = {
+    initialBalance: 5000,
+    balance: 4975.27,
+    equity: 4974.13,
+    floatingPnl: -1.14,
+    drawdownBasis: "balance",
+    profitTargetAmount: 400,
+    dailyLossLimit: 198.09,
+    dailyLossFloor: 4754.22,
+    maxDrawdown: 500,
+    maxDrawdownFloor: 4500,
+  };
+  const [target, daily, drawdown] = buildAccountRiskOverlays({
+    risk,
+    overlays: [live],
+    chartEpic: "GOLD",
+  });
+  // 5400 - 4975.27 = +424.73  →  4276.15 + 424.73 / 6
+  assert.ok(Math.abs(target.price - 4346.938333) < 1e-4, `profit target ${target.price}`);
+  // 4754.22 - 4975.27 = -221.05  →  4276.15 - 221.05 / 6
+  assert.ok(Math.abs(daily.price - 4239.308333) < 1e-4, `daily loss ${daily.price}`);
+  // 4500 - 4975.27 = -475.27  →  4276.15 - 475.27 / 6
+  assert.ok(Math.abs(drawdown.price - 4196.938333) < 1e-4, `max drawdown ${drawdown.price}`);
+
+  // Floating P/L alone never moves a fixed floor's projected price.
+  const afterPnl = buildAccountRiskOverlays({
+    risk: { ...risk, floatingPnl: 120.5, equity: 5095.77 },
+    overlays: [liveOf({ ...live, netPnl: 120.5, liveR: 1.2 })],
+    chartEpic: "GOLD",
+  });
+  assert.equal(afterPnl[1].price, daily.price, "DAILY LOSS stays fixed while floating P/L moves");
+  assert.equal(afterPnl[2].price, drawdown.price, "MAX DRAWDOWN stays fixed (balance basis)");
+});
+
+test("6d: fixed Daily Loss and Max Drawdown prices ignore floating/remaining changes", () => {
+  const fixed = buildAccountRiskOverlays({
+    risk: RISK,
+    dailyLossRemaining: 3000,
+    drawdownRemaining: 10000,
+    overlays: [liveOf()],
+    chartEpic: "GOLD",
+  });
+  const afterLoss = buildAccountRiskOverlays({
+    risk: RISK,
+    dailyLossRemaining: 100,
+    drawdownRemaining: 250,
+    overlays: [liveOf({ netPnl: 2900, liveR: 29 })],
+    chartEpic: "GOLD",
+  });
+  assert.deepEqual(afterLoss.map((level) => level.price), fixed.map((level) => level.price));
+  assert.equal(fixed[1].price, 4000.5, "daily floor 97,000 - realized balance 100,000");
+  assert.equal(fixed[2].price, 3300.5, "drawdown floor 90,000 - realized balance 100,000");
+});
+
+test("6e: drawdown projection honors balance/equity basis without double-counting floating P&L", () => {
+  const balanceMode = buildAccountRiskOverlays({
+    risk: {
+      ...RISK,
+      balance: 100000,
+      equity: 101000,
+      floatingPnl: 250,
+      drawdownBasis: "balance",
+    },
+    overlays: [liveOf()],
+    chartEpic: "GOLD",
+  });
+  const equityMode = buildAccountRiskOverlays({
+    risk: {
+      ...RISK,
+      balance: 100000,
+      equity: 101000,
+      floatingPnl: 250,
+      drawdownBasis: "equity",
+    },
+    overlays: [liveOf()],
+    chartEpic: "GOLD",
+  });
+  assert.equal(balanceMode[2].price, 3300.5, "balance mode anchors at 100,000");
+  assert.equal(equityMode[2].price, 3225.5, "equity mode anchors at 101,000 - 250 floating");
+
+  const sameNonOpenBaseline = buildAccountRiskOverlays({
+    risk: {
+      ...RISK,
+      balance: 100000,
+      equity: 101500,
+      floatingPnl: 750,
+      drawdownBasis: "equity",
+    },
+    overlays: [liveOf()],
+    chartEpic: "GOLD",
+  });
+  assert.equal(sameNonOpenBaseline[2].price, equityMode[2].price);
 });
 
 // ── 7. a price level is derived ONLY from proven sensitivity (D3) ───────────
@@ -751,7 +917,11 @@ test("13: real Dashboard state envelope normalizes into a usable AccountState", 
     state: {
       accountId: ACCOUNT_ID,
       connected: true,
-      balance: null,
+      balance: 100000,
+      initialBalance: 100000,
+      dailySessionStartBalance: 100000,
+      dailyLossFloor: 9950,
+      maxDrawdownFloor: 9800,
       positions: [
         {
           ticket: "12345",
@@ -1057,9 +1227,17 @@ test("18: a de-collided pill keeps a leader to its TRUE price", () => {
 //        buildAccountRiskOverlays → primitive. The gate MUST accept exactly the
 //        positions the LIVE layer already renders on this chart — no stricter.
 const APP_RISK = {
+  initialBalance: 100000,
+  balance: 100000,
+  equity: 100000,
+  floatingPnl: 0,
+  drawdownBasis: "balance",
   profitTargetAmount: 5000,
   dailyLossLimit: 3000,
+  dailySessionStartBalance: 100000,
+  dailyLossFloor: 97000,
   maxDrawdown: 10000,
+  maxDrawdownFloor: 90000,
   dailyLossRemaining: 3000,
   drawdownRemaining: 10000,
 };
@@ -1099,9 +1277,16 @@ function appRiskLevels(accountState, epic) {
     liveTradeOverlays,
     riskLevels: buildAccountRiskOverlays({
       risk: {
+        initialBalance: accountState.initialBalance,
+        balance: accountState.balance,
+        equity: accountState.equity,
+        floatingPnl: accountState.floatingPnl,
+        drawdownBasis: accountState.drawdownBasis === "equity" ? "equity" : "balance",
         profitTargetAmount: accountState.profitTargetAmount,
         dailyLossLimit: accountState.dailyLossLimit,
+        dailyLossFloor: accountState.dailyLossFloor,
         maxDrawdown: accountState.maxDrawdown,
+        maxDrawdownFloor: accountState.maxDrawdownFloor,
       },
       dailyLossRemaining: accountState.dailyLossRemaining,
       drawdownRemaining: accountState.drawdownRemaining,

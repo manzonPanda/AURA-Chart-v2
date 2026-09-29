@@ -322,7 +322,18 @@ test("visual merge changes only P&L/R; account-risk output stays unchanged", () 
     assert.equal(display[0][field], authoritative[0][field], `${field} remains authoritative`);
   }
   const riskInput = {
-    risk: { profitTargetAmount: 400, dailyLossLimit: 200, maxDrawdown: 500 },
+    risk: {
+      initialBalance: 100000,
+      balance: 100000,
+      equity: 100000,
+      floatingPnl: 0,
+      drawdownBasis: "balance",
+      profitTargetAmount: 400,
+      dailyLossLimit: 200,
+      dailyLossFloor: 99800,
+      maxDrawdown: 500,
+      maxDrawdownFloor: 99500,
+    },
     overlays: authoritative,
     chartEpic: "GOLD",
   };

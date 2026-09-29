@@ -170,6 +170,18 @@ const TICK_STALE_MS = 240_000; // stale after 4 min with no fresh tick
 /** Re-render cadence for tick-age display. */
 const NOW_TICK_MS = 5_000;
 
+/**
+ * PostgreSQL `numeric` columns arrive as strings, so a config value can be a
+ * number, a numeric string, or absent. Coerce to a finite number, or null when
+ * the value cannot be trusted — a threshold built on a NaN baseline is never
+ * drawn, rather than drawn at an invented price.
+ */
+function toFiniteNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 /** Truthful stream label: LIVE only while real ticks are fresh. */
 function streamLabel(status: string, lastTickAt: number, now: number): {
   label: string;
@@ -617,9 +629,16 @@ export default function App() {
       accountState && hasApplicableLivePosition(authoritativeLiveTradeOverlays, epic)
         ? buildAccountRiskOverlays({
             risk: {
+              initialBalance: toFiniteNumber(accountState.initialBalance),
+              balance: accountState.balance,
+              equity: accountState.equity,
+              floatingPnl: accountState.floatingPnl,
+              drawdownBasis: accountState.drawdownBasis === "equity" ? "equity" : "balance",
               profitTargetAmount: accountState.profitTargetAmount,
               dailyLossLimit: accountState.dailyLossLimit,
+              dailyLossFloor: accountState.dailyLossFloor,
               maxDrawdown: accountState.maxDrawdown,
+              maxDrawdownFloor: accountState.maxDrawdownFloor,
             },
             dailyLossRemaining: accountState.dailyLossRemaining,
             drawdownRemaining: accountState.drawdownRemaining,

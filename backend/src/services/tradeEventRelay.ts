@@ -82,6 +82,18 @@ interface UpstreamSub {
 /** Coalesce window for bursts of change events (ms). */
 export const TRADE_REFRESH_DEBOUNCE_MS = 500;
 
+/**
+ * Upstream rejected our bearer: the session behind `subs.token` is gone (TTL
+ * expiry, or sign-out deleting its `public.sessions` row). This is NOT a
+ * transient transport fault, so retrying the same dead token forever is wrong.
+ */
+class UpstreamAuthError extends Error {
+  constructor(status: number) {
+    super(`upstream /api/events status=${status}`);
+    this.name = "UpstreamAuthError";
+  }
+}
+
 export interface TradeEventRelay {
   /** Opt a /ws client into trade events via {type:"auth",token} frames. */
   attach(ws: WsLike): void;
@@ -165,6 +177,13 @@ export function createTradeEventRelay(
   function subscribe(userId: string, token: string): void {
     const existing = subs.get(userId);
     if (existing) {
+      // FIX (stale-token pin): the shared stream is only as good as the token it
+      // was created with. A session can die (TTL expiry, or sign-out DELETING
+      // its public.sessions row) while the ref-counted entry survives, pinning a
+      // permanently-401 token. Every auth frame here has ALREADY been validated
+      // through dashboardClient.getSession, so the newest token is by definition
+      // the freshest usable one — adopt it instead of silently keeping the old.
+      existing.token = token;
       existing.refs += 1;
       return;
     }
@@ -196,11 +215,25 @@ export function createTradeEventRelay(
           signal: abort.signal,
         });
         if (!res.ok || !res.body) {
+          if (res.status === 401) throw new UpstreamAuthError(res.status);
           throw new Error(`upstream /api/events status=${res.status}`);
         }
         await consumeSse(res.body, userId);
       } catch (err) {
         if (abort.signal.aborted) return; // deliberate stop/detach — expected
+        if (err instanceof UpstreamAuthError) {
+          // FIX (401 spin): the pinned token is dead, so a 5s retry can only ever
+          // 401 again — that spin is exactly what silently starved the relay of
+          // events. Release the entry instead; the next authenticated client
+          // re-subscribes cleanly. The identity guard means a subscription that
+          // was already replaced while this request was in flight is left alone.
+          if (subs.get(userId) === sub) subs.delete(userId);
+          console.warn(
+            "[TRADE-RELAY] upstream session rejected; released subscription so the next auth re-subscribes:",
+            err.message,
+          );
+          return;
+        }
         console.warn(
           "[TRADE-RELAY] upstream SSE error:",
           err instanceof Error ? err.message : err,

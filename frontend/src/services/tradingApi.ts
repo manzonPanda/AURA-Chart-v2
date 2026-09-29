@@ -156,6 +156,8 @@ export interface AccountState {
   balance: number | null;
   equity: number | null;
   floatingPnl: number | null;
+  /** Realized account P/L since inception, excluding the open book. */
+  realizedPnlSinceAccountStart: number | null;
   /** Today's realized P&L, account-scoped, cut at `dailyPnlCutoff`. */
   dailyPnl: number | null;
   dailyPnlCutoff: string | null;
@@ -166,11 +168,17 @@ export interface AccountState {
   // Account risk levels — MONETARY. The chart decides whether a price-axis line
   // is mathematically derivable; a level is never invented.
   dailyLossLimit: number | null;
+  /** Balance at the latest 5:00 AM PHT session start. */
+  dailySessionStartBalance: number | null;
+  /** Fixed account value at the current session's daily-loss floor. */
+  dailyLossFloor: number | null;
   dailyLossRemaining: number | null;
   dailyLossUsed: number | null;
   dayPnl: number | null;
   profitTargetAmount: number | null;
   maxDrawdown: number | null;
+  /** Authoritative configured fixed/trailing account drawdown floor. */
+  maxDrawdownFloor: number | null;
   currentDrawdown: number | null;
   drawdownRemaining: number | null;
   /** The authoritative DrawdownService state (Node port), or null. */

@@ -8,10 +8,10 @@
  *   EXIT    — REVERSE triangle of the entry marker (visual refinement), same
  *             direction color, TIP-anchored at the exact exit execution price
  *             (LONG exit points down, SHORT exit points up).
- *   BAND    — DOTTED line connecting entry → exit (closed trades): green when
- *             pnl > 0, red when pnl < 0, the pre-existing neutral slate when
- *             break-even/unknown; open trades keep the dashed slate extension
- *             to the forming bucket and are never classified won/lost.
+ *   BAND    — DOTTED line connecting entry → exit for closed trades: green when
+ *             pnl > 0, red when pnl < 0, neutral slate for break-even/unknown.
+ *             Open trades intentionally keep only their entry marker; their live
+ *             entry/SL/TP/risk levels are drawn separately.
  *
  * Apex orientation is MEASURED from the chart's actual price→coordinate
  * behavior ({@link detectScaleOrientation}) — an inverted price scale flips
@@ -288,15 +288,12 @@ export function formatPrice(price: number, precision?: number | undefined): stri
 const BUY_COLOR = "#26a69a";
 const SELL_COLOR = "#ef5350";
 /**
- * Band stroke — open keeps the pre-existing dashed slate "still live"; closed
- * is DOTTED and result-colored: green win / red loss / slate neutral (a
- * break-even or unknown P/L keeps the pre-existing gray — never invented).
+ * Closed historical band — result-colored dotted line. Open trades intentionally
+ * have no band; their entry marker and live risk levels are drawn separately.
  */
 const BAND_NEUTRAL = "rgba(148, 163, 184, 0.9)";
-const BAND_OPEN = "rgba(148, 163, 184, 0.75)";
 const BAND_WIN = BUY_COLOR;
 const BAND_LOSS = SELL_COLOR;
-const OPEN_BAND_DASH: readonly number[] = [5, 4];
 const CLOSED_BAND_DASH: readonly number[] = [2, 3];
 const MARKER_RING = "rgba(15, 23, 42, 0.9)";
 /** Marker geometry (px, media space). */
@@ -875,30 +872,24 @@ export class TradeOverlayPrimitive {
     // tip anchor (the execution-price coordinate) never moves.
     const orientation = detectScaleOrientation(series, overlay.entryPrice);
 
-    // TRADE BAND — DOTTED entry → exit, colored by the existing result
-    // semantics (pnl > 0 green / pnl < 0 red / break-even-or-unknown slate)…
-    // open trades keep the pre-existing dashed slate extension to the forming
-    // bucket and are never classified won/lost.
+    // CLOSED TRADE BAND — DOTTED entry → exit, colored by the existing result
+    // semantics (pnl > 0 green / pnl < 0 red / break-even-or-unknown slate).
+    // Open trades intentionally render no band; their entry marker remains.
     if (exEnd !== null && eyEnd !== null) {
       const yClamped = Math.max(-EDGE_MARGIN_PX, Math.min(height + EDGE_MARGIN_PX, eyEnd));
       if (Math.abs(exEnd - ex) > 1) {
         const outcome = bandOutcome(overlay);
         ctx.save();
-        if (outcome === "open") {
-          ctx.strokeStyle = BAND_OPEN;
-          ctx.lineWidth = 1.5;
-          ctx.setLineDash([...OPEN_BAND_DASH]);
-        } else {
+        if (outcome !== "open") {
           ctx.strokeStyle =
             outcome === "win" ? BAND_WIN : outcome === "loss" ? BAND_LOSS : BAND_NEUTRAL;
-
           ctx.lineWidth = 1.25;
           ctx.setLineDash([...CLOSED_BAND_DASH]);
+          ctx.beginPath();
+          ctx.moveTo(ex, ey);
+          ctx.lineTo(exEnd, yClamped);
+          ctx.stroke();
         }
-        ctx.beginPath();
-        ctx.moveTo(ex, ey);
-        ctx.lineTo(exEnd, yClamped);
-        ctx.stroke();
         ctx.restore();
       }
     }

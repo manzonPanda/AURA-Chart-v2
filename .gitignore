@@ -22,6 +22,10 @@ backend/data/
 .DS_Store
 Thumbs.db
 
+# Windows reserved device name — a `2>nul` redirection under bash creates a real
+# file called "nul" holding only the shell's stderr. Never real content.
+nul
+
 # logs
 *.log
 

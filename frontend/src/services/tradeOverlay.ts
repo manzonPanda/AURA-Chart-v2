@@ -401,12 +401,26 @@ export type RiskLevelKind = "profitTarget" | "dailyLoss" | "maxDrawdown";
 
 /** The authoritative monetary values, straight from the server (never derived). */
 export interface AccountRiskInput {
+  /** accounts.initial_balance — the absolute base the profit target is measured from. */
+  readonly initialBalance: number | null;
+  /** Current realized MT5 balance; the open book is added by the solver. */
+  readonly balance: number | null;
+  /** Current MT5 equity, including the open book. */
+  readonly equity: number | null;
+  /** Current authoritative open-book P/L, excluded from the non-open baseline. */
+  readonly floatingPnl: number | null;
+  /** Configured drawdown account basis. */
+  readonly drawdownBasis: "balance" | "equity";
   /** initial_balance × profit_target_percent/100, or null when unconfigured. */
   readonly profitTargetAmount: number | null;
-  /** initial_balance × daily_loss_limit_percent/100, or null. */
+  /** Session-start balance × daily_loss_limit_percent/100, or null. */
   readonly dailyLossLimit: number | null;
+  /** Fixed account value at the 5:00 AM PHT daily-loss floor, or null. */
+  readonly dailyLossFloor: number | null;
   /** initial_balance × max_total_drawdown_percent/100, or null. */
   readonly maxDrawdown: number | null;
+  /** Authoritative fixed/trailing drawdown floor, or null. */
+  readonly maxDrawdownFloor: number | null;
 }
 
 /** One renderable risk annotation. Monetary value is ALWAYS present. */
@@ -579,22 +593,46 @@ export function buildAccountRiskOverlays(input: AccountRiskLevelsInput): RiskLev
     });
   };
 
-  // PROFIT TARGET: the price at which the open book is up by the target amount.
-  const target = input.risk.profitTargetAmount;
-  push("profitTarget", "PROFIT TARGET", target, target === null ? null : Math.abs(target));
+  // Each account threshold is converted ONCE into the open-book P&L required
+  // at that threshold, then handed to the unchanged sensitivity solver.
+  const initialBalance = input.risk.initialBalance;
+  const profitTarget = input.risk.profitTargetAmount;
+  const dailyFloor = input.risk.dailyLossFloor;
+  const drawdownFloor = input.risk.maxDrawdownFloor;
 
-  // DAILY LOSS: the price at which the open book would consume the remaining
-  // daily budget (a negative money delta for a BUY book).
-  const dailyBudget = input.dailyLossRemaining ?? input.risk.dailyLossLimit;
-  const dailyLimit = input.risk.dailyLossLimit;
-  const dailyAmount = dailyLimit === null ? null : -(input.dailyLossRemaining ?? dailyLimit);
-  push("dailyLoss", "DAILY LOSS", dailyAmount, dailyBudget === null ? null : -Math.abs(dailyBudget));
+  // PROFIT TARGET is an ABSOLUTE account value, not a further delta: the account
+  // is expected to REACH initial_balance + target, so only the shortfall from the
+  // current balance still has to be earned by the open book. The DB realized-P&L
+  // sum is deliberately NOT used — it can be stale against MT5's own deal ledger.
+  const profitBookPnl =
+    initialBalance === null || profitTarget === null || input.risk.balance === null
+      ? null
+      : initialBalance + profitTarget - input.risk.balance;
+  push("profitTarget", "PROFIT TARGET", profitTarget, profitBookPnl);
 
-  // MAX DRAWDOWN: same shape, against the remaining drawdown buffer.
-  const drawdownBuffer = input.drawdownRemaining ?? input.risk.maxDrawdown;
-  const maxDrawdown = input.risk.maxDrawdown;
-  const drawdownAmount = maxDrawdown === null ? null : -(input.drawdownRemaining ?? maxDrawdown);
-  push("maxDrawdown", "MAX DRAWDOWN", drawdownAmount, drawdownBuffer === null ? null : -Math.abs(drawdownBuffer));
+  // The session floor is an absolute account value. Current open-book P/L is
+  // already represented by the entry-to-price equation, so subtract the current
+  // realized account balance (not floating "remaining" amounts).
+  const dailyBookPnl =
+    dailyFloor === null || input.risk.balance === null
+      ? null
+      : dailyFloor - input.risk.balance;
+  push("dailyLoss", "DAILY LOSS", input.risk.dailyLossLimit === null ? null : -Math.abs(input.risk.dailyLossLimit), dailyBookPnl);
+
+  // The configured basis decides which current account value anchors the floor.
+  // Equity already includes floating P/L, so remove that open-book amount before
+  // handing the baseline to the unchanged entry-to-price sensitivity equation.
+  // This prevents the current floating P/L from being counted twice.
+  const drawdownBaseline = input.risk.drawdownBasis === "equity"
+    ? input.risk.equity === null || input.risk.floatingPnl === null
+      ? null
+      : input.risk.equity - input.risk.floatingPnl
+    : input.risk.balance;
+  const drawdownBookPnl =
+    drawdownFloor === null || drawdownBaseline === null
+      ? null
+      : drawdownFloor - drawdownBaseline;
+  push("maxDrawdown", "MAX DRAWDOWN", input.risk.maxDrawdown === null ? null : -Math.abs(input.risk.maxDrawdown), drawdownBookPnl);
 
   return out;
 }

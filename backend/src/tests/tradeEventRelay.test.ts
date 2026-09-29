@@ -344,3 +344,194 @@ test("P3-C auth: bad token is rejected and no trades are relayed", async () => {
   assert.equal(t2Frame(sock, "trade"), null, "unauthorized client gets no trades");
   relay.stop();
 });
+
+// ---PART3--- (stale-session pin: token adoption + 401 release)
+
+/** Two VALID session tokens for the SAME user, so only freshness differs. */
+const T3_USER = "77777777-1111-4222-8333-444444444444";
+const T3_ACCT = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+const T3_TOKEN_A = "t3-token-A";
+const T3_TOKEN_B = "t3-token-B";
+
+function t3DashboardClient() {
+  return {
+    async getSession(token: string) {
+      // Both tokens are VALID; the relay is expected to prefer the newest.
+      if (token !== T3_TOKEN_A && token !== T3_TOKEN_B) return null;
+      return { user: { id: T3_USER }, id: T3_USER, sub: T3_USER, token };
+    },
+  } as any;
+}
+
+/** Fetch stub that scripts the upstream response per bearer token. */
+function t3Fetch(behaviour: (token: string, callIndex: number) => "ok" | "500" | "401") {
+  const calls: string[] = [];
+  const streams = new Map<string, ReturnType<typeof makeSseBody>>();
+  const fetchImpl = (url: string | URL, init?: RequestInit): Promise<Response> => {
+    const auth = (init?.headers as Record<string, string>)?.Authorization ?? "";
+    const token = auth.replace("Bearer ", "");
+    calls.push(token);
+    const verdict = behaviour(token, calls.length);
+    if (verdict === "401") {
+      return Promise.resolve({ ok: false, status: 401, body: null } as unknown as Response);
+    }
+    if (verdict === "500") {
+      return Promise.resolve({ ok: false, status: 500, body: null } as unknown as Response);
+    }
+    let body = streams.get(token);
+    if (!body) { body = makeSseBody(); streams.set(token, body); }
+    return Promise.resolve({ ok: true, status: 200, body: body.stream } as unknown as Response);
+  };
+  return { calls, streams, fetchImpl };
+}
+
+test("stale-session pin: a newer valid token replaces the shared subscription's pinned token", async () => {
+  // First client pins token A; the stream fails transiently so the loop retries.
+  const f = t3Fetch((token) => (token === T3_TOKEN_A ? "500" : "ok"));
+  const relay = t2Create(t3DashboardClient(), T2_CONFIG.dashboard.baseUrl, f.fetchImpl);
+
+  const c1 = t2Socket();
+  relay.attach(c1, "GOLD");
+  c1.emitMessage(authFrame(T3_TOKEN_A));
+  await sleep(150);
+  assert.equal(relay.subscriptionCount(), 1, "first client creates the shared subscription");
+  assert.equal(f.calls[0], T3_TOKEN_A, "upstream was called with token A");
+
+  // A second VALID client (newer session) subscribes while the loop waits.
+  const c2 = t2Socket();
+  relay.attach(c2, "GOLD");
+  c2.emitMessage(authFrame(T3_TOKEN_B));
+  await sleep(150);
+  assert.equal(relay.subscriptionCount(), 1, "subscription is SHARED, not duplicated");
+  assert.equal(relay.authedClientCount(), 2, "both clients are authenticated");
+
+  // The 5s retry must now present the NEWEST token, not the pinned A.
+  await sleep(5600);
+  assert.equal(f.calls.length, 2, "one retry happened after the transient 500");
+  assert.equal(
+    f.calls[1], T3_TOKEN_B,
+    "retry uses the newest validated token B (the stale-token pin is healed)",
+  );
+  relay.stop();
+});
+
+test("stale-session pin: an upstream 401 releases the subscription instead of retrying forever", async () => {
+  const f = t3Fetch(() => "401");
+  const relay = t2Create(t3DashboardClient(), T2_CONFIG.dashboard.baseUrl, f.fetchImpl);
+
+  const sock = t2Socket();
+  relay.attach(sock, "GOLD");
+  sock.emitMessage(authFrame(T3_TOKEN_A));
+  await sleep(200);
+  assert.equal(t2Frame(sock, "tradeAuth")?.ok, true, "client auth itself succeeded");
+  // The stub 401s immediately, so the release may already have happened by the
+  // time we look — the meaningful assertion is the END STATE, not the transient.
+  assert.equal(relay.subscriptionCount(), 0, "401 RELEASES the stale subscription");
+
+  // The old 5s spin would keep re-sending the same dead token forever.
+  const callsAfterRelease = f.calls.length;
+  await sleep(6000);
+  assert.equal(
+    f.calls.length, callsAfterRelease,
+    "no further retries: the 401 spin is gone",
+  );
+
+  // A later valid client re-subscribes cleanly.
+  const sock2 = t2Socket();
+  const ok2 = t3Fetch(() => "ok");
+  const relay2 = t2Create(t3DashboardClient(), T2_CONFIG.dashboard.baseUrl, ok2.fetchImpl);
+  relay2.attach(sock2, "GOLD");
+  sock2.emitMessage(authFrame(T3_TOKEN_B));
+  await sleep(200);
+  assert.equal(relay2.subscriptionCount(), 1, "next auth re-subscribes cleanly");
+  assert.equal(ok2.calls[0], T3_TOKEN_B, "re-subscribe uses the fresh token");
+  relay2.stop();
+  relay.stop();
+});
+
+test("stale-session pin: a 401 does NOT remove a newer replacement subscription", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  // First fetch hangs until we let it fail, proving the entry was replaced meanwhile.
+  const f = t3Fetch(() => "ok");
+  let callNo = 0;
+  const fetchImpl = async (url: string | URL, init?: RequestInit): Promise<Response> => {
+    callNo += 1;
+    if (callNo === 1) {
+      await gate;
+      return { ok: false, status: 401, body: null } as unknown as Response;
+    }
+    return f.fetchImpl(url, init);
+  };
+  const relay = t2Create(t3DashboardClient(), T2_CONFIG.dashboard.baseUrl, fetchImpl);
+
+  const c1 = t2Socket();
+  relay.attach(c1, "GOLD");
+  c1.emitMessage(authFrame(T3_TOKEN_A));
+  await sleep(150);
+  assert.equal(relay.subscriptionCount(), 1);
+
+  // Force a different subscription object for the same user, then fail the old one.
+  relay.stop();
+  const relay2 = t2Create(t3DashboardClient(), T2_CONFIG.dashboard.baseUrl, () =>
+    Promise.resolve({ ok: true, status: 200, body: makeSseBody().stream } as unknown as Response));
+  const c2 = t2Socket();
+  relay2.attach(c2, "GOLD");
+  c2.emitMessage(authFrame(T3_TOKEN_B));
+  await sleep(150);
+  assert.equal(relay2.subscriptionCount(), 1, "replacement subscription exists");
+
+  release();
+  await sleep(300);
+  assert.equal(relay2.subscriptionCount(), 1, "stale 401 must NOT delete the replacement entry");
+  relay2.stop();
+});
+
+test("stale-session pin: ref-count and detach behaviour are unchanged on success", async () => {
+  const f = t3Fetch(() => "ok");
+  const relay = t2Create(t3DashboardClient(), T2_CONFIG.dashboard.baseUrl, f.fetchImpl);
+
+  const c1 = t2Socket();
+  const c2 = t2Socket();
+  relay.attach(c1, "GOLD");
+  c1.emitMessage(authFrame(T3_TOKEN_A));
+  await sleep(150);
+  relay.attach(c2, "GOLD");
+  c2.emitMessage(authFrame(T3_TOKEN_B));
+  await sleep(150);
+  assert.equal(relay.subscriptionCount(), 1, "two tabs share ONE upstream stream");
+  assert.equal(f.calls.length, 1, "only one upstream connection for two tabs");
+
+  relay.detach(c1);
+  await sleep(50);
+  assert.equal(relay.subscriptionCount(), 1, "one tab left ⇒ subscription retained");
+  assert.equal(relay.authedClientCount(), 1);
+
+  relay.detach(c2);
+  await sleep(50);
+  assert.equal(relay.subscriptionCount(), 0, "last tab gone ⇒ subscription released");
+  relay.stop();
+});
+
+test("stale-session pin: normal SSE streaming still fans out trade frames", async () => {
+  const f = t3Fetch(() => "ok");
+  const relay = t2Create(t3DashboardClient(), T2_CONFIG.dashboard.baseUrl, f.fetchImpl);
+  const sock = t2Socket();
+  relay.attach(sock, "GOLD");
+  sock.emitMessage(authFrame(T3_TOKEN_B));
+  await sleep(200);
+  assert.equal(t2Frame(sock, "tradeAuth")?.ok, true);
+
+  f.streams.get(T3_TOKEN_B)!.push(
+    `event: change\ndata: ${JSON.stringify({
+      type: "change", table: "trades", action: "update",
+      userId: T3_USER, accountId: T3_ACCT, at: new Date().toISOString(),
+    })}\n\n`,
+  );
+  await sleep(TRADE_REFRESH_DEBOUNCE_MS + 250);
+  const trade = t2Frame(sock, "trade");
+  assert.ok(trade, "a trades change still fans out as a trade frame");
+  assert.equal(trade.table, "trades");
+  assert.equal(trade.accountId, T3_ACCT);
+  relay.stop();
+});
