@@ -63,6 +63,7 @@
  */
 import type { SeriesAttachedParameter, Time } from "lightweight-charts";
 
+import { liveLevelMetrics } from "../../services/tradeOverlay.ts";
 import type {
   LiveTradeOverlay,
   RiskLevelKind,
@@ -251,22 +252,62 @@ export function formatLivePnl(netPnl: number): string {
 }
 
 /**
- * Compact signed R for a live label, e.g. `" +1.63R"`; null 1R ⇒ no R suffix.
+ * Compact signed R for a live label, e.g. `+1.63R`; null 1R ⇒ no R suffix.
  *
- * The leading space is intentional: it is the separator between the money and
- * the R in the composed label (`BUY 0.33 +$58.08 +1.63R`). Returning `""` for
- * an unknown 1R means the separator disappears with it, so the label can never
- * end in a dangling space or show a fake `0.00R`.
+ * Returns `""` for an unknown 1R so the R simply drops out of the composed
+ * label — it can never render a fake `0.00R`. No leading space: the label
+ * composer owns all separation, so segments never double-space.
  */
 export function formatLiveR(liveR: number | null): string {
   if (liveR === null || !Number.isFinite(liveR)) return "";
-  return ` ${liveR > 0 ? "+" : ""}${liveR.toFixed(2)}R`;
+  return `${liveR > 0 ? "+" : ""}${liveR.toFixed(2)}R`;
 }
 
-/** Lot size for a live label, e.g. `0.33` / `1.50`; always two decimals. */
-export function formatLots(lots: number): string {
-  if (!Number.isFinite(lots)) return "";
-  return lots.toFixed(2);
+/**
+ * Compact signed PERCENT for a live label, e.g. `+2.00%` / `-0.95%`.
+ *
+ * Two decimals always, so a column of labels stays visually aligned and the
+ * precision never depends on the magnitude of the move. An exact zero renders
+ * UNSIGNED (`0.00%`): a `+` on zero would claim a direction that does not
+ * exist. Null / non-finite yields `""`, so an underivable percentage simply
+ * drops out of the label instead of appearing as `0.00%` or `NaN%`.
+ */
+export function formatLivePercent(percent: number | null): string {
+  if (percent === null || !Number.isFinite(percent)) return "";
+  // Symmetric half-away-from-zero rounding. `Math.round` is asymmetric for
+  // negative halves (Math.round(-12.5) === -12 but Math.round(12.5) === 13), which
+  // would render a −0.125% risk and a +0.125% gain as different magnitudes.
+  const scaled = percent * 100;
+  const rounded = (Math.sign(scaled) * Math.round(Math.abs(scaled))) / 100;
+  const sign = rounded === 0 ? "" : rounded < 0 ? "-" : "+";
+  return `${sign}${Math.abs(rounded).toFixed(2)}%`;
+}
+
+/**
+ * Compose one live pill's text from the parts that ARE derivable.
+ *
+ * The metric segments are joined in the fixed order `% → R → $` and any empty
+ * segment is dropped, so the label degrades cleanly (`BUY +$58.08` when the
+ * percentage is unknown) and can never contain a double space, a dangling
+ * separator, or a placeholder. `withR` is false for the stop, where the R would
+ * be a tautological `-1.00R` that adds no information.
+ */
+export function formatLiveLabel(
+  prefix: string,
+  metrics: { percent: number | null; r: number | null; money: number | null },
+  opts: { withR?: boolean } = {},
+): string {
+  const segments: string[] = [];
+  const percent = formatLivePercent(metrics.percent);
+  if (percent) segments.push(percent);
+  if (opts.withR !== false) {
+    const r = formatLiveR(metrics.r);
+    if (r) segments.push(r);
+  }
+  if (metrics.money !== null && Number.isFinite(metrics.money)) {
+    segments.push(formatLivePnl(metrics.money));
+  }
+  return segments.length ? `${prefix} ${segments.join(" ")}` : prefix;
 }
 
 /**
@@ -616,6 +657,12 @@ export class TradeOverlayPrimitive {
   private overlays: TradeOverlay[] = [];
   private liveOverlays: LiveTradeOverlay[] = [];
   private riskLevels: RiskLevelOverlay[] = [];
+  /**
+   * `accounts.initial_balance` — the denominator for every live label's `%`.
+   * Null ⇒ no percentage is drawn (never a guessed one). It is the SAME basis
+   * the account-risk levels use, so both read in the same unit.
+   */
+  private accountBasis: number | null = null;
   private formingBucketMs: number | null = null;
   /** The CHART's current candle bucket (epoch-ms) — drives exact-X bracketing. */
   private bucketMs = 60_000;
@@ -683,9 +730,11 @@ export class TradeOverlayPrimitive {
   setLiveOverlays(
     live: readonly LiveTradeOverlay[],
     risk: readonly RiskLevelOverlay[],
+    accountBasis: number | null = null,
   ): void {
     this.liveOverlays = [...live];
     this.riskLevels = [...risk];
+    this.accountBasis = accountBasis;
     this.invalidateAxisViews();
     if (this.requestUpdate) this.requestUpdate();
     else this.needsRedraw = true;
@@ -965,8 +1014,11 @@ export class TradeOverlayPrimitive {
    *     flips the visual apex while the numeric anchor does not move;
    *   • dashed SL/TP levels at the ACTUAL MT5 values (null = not set, so nothing
    *     is drawn at price 0);
-   *   • a compact `BUY 0.33 +$58.08 +1.63R` pill on the shared right-edge
-   *     ladder, de-collided against the account-risk pills.
+   *   • a compact `BUY +2.00% +1.59R +$145.92` pill on the shared right-edge
+   *     ladder, de-collided against the account-risk pills. Lot size is NOT shown
+ *     (it is a sizing input, not a risk metric); the SL / TP pills read
+ *     `STOP LOSS -0.95% -$50.00` and `TAKE PROFIT +1.95% +1.59R +$145.92`, with
+ *     no `@ price` — the line and price-scale tag already carry that.
    *
    * This method draws. It registers NO event handlers, exposes no callback, and
    * holds no mutable trade handle — the canvas output is the only product, so a
@@ -1085,8 +1137,13 @@ export class TradeOverlayPrimitive {
       rows.push({
         key: `live:${index}`,
         y,
-        // Direction, size, money and R — the established live label contract.
-        text: `${live.direction.toUpperCase()} ${formatLots(live.lots)} ${formatLivePnl(live.netPnl)}${formatLiveR(live.liveR)}`,
+        // Direction, %, R and money — the live label contract. Lot size is NOT
+        // shown: it is a position-sizing input, not a risk or outcome metric, and
+        // the % / R / $ triple is what the level is actually judged on.
+        text: formatLiveLabel(
+          live.direction.toUpperCase(),
+          liveLevelMetrics(live, "position", this.accountBasis),
+        ),
         // The plate is tinted by the P&L sign (the established money coding) and
         // the accent bar carries the same tone, so the pill reads at a glance.
         plate:
@@ -1101,7 +1158,12 @@ export class TradeOverlayPrimitive {
           rows.push({
             key: `live:${index}:sl`,
             y: slY,
-            text: `STOP LOSS  @ ${formatPrice(live.sl)}`,
+            // % and money at the stop — NO R (a stop IS 1R, so "-1.00R" is
+            // tautological) and NO @ price (the line and the price-scale tag
+            // already carry the level's exact price).
+            text: formatLiveLabel("STOP LOSS", liveLevelMetrics(live, "stop", this.accountBasis), {
+              withR: false,
+            }),
             plate: RISK_PLATE,
             textColor: RISK_TEXT,
             accent: SELL_COLOR,
@@ -1115,7 +1177,12 @@ export class TradeOverlayPrimitive {
           rows.push({
             key: `live:${index}:tp`,
             y: tpY,
-            text: `TAKE PROFIT  @ ${formatPrice(live.tp)}`,
+            // % / R / money at the target — the reward the level offers. No @
+            // price: the line and the price-scale tag already carry it.
+            text: formatLiveLabel(
+              "TAKE PROFIT",
+              liveLevelMetrics(live, "target", this.accountBasis),
+            ),
             plate: RISK_PLATE,
             textColor: RISK_TEXT,
             accent: BUY_COLOR,

@@ -37,6 +37,7 @@ export function TradeOverlayBridge({
   overlays,
   liveOverlays,
   riskLevels,
+  accountBasis,
   formingBucketSec,
   bucketSec,
   enabled,
@@ -46,6 +47,12 @@ export function TradeOverlayBridge({
   liveOverlays?: readonly LiveTradeOverlay[] | undefined;
   /** Informational account-risk levels (read-only descriptors). */
   riskLevels?: readonly RiskLevelOverlay[] | undefined;
+  /**
+   * `accounts.initial_balance` — the denominator for each live label's `%`, so
+   * a position's percentage means the same thing as an account-risk level's.
+   * Null/omitted ⇒ the % is simply not drawn.
+   */
+  accountBasis?: number | null | undefined;
   formingBucketSec: number | null | undefined;
   bucketSec: number;
   enabled: boolean;
@@ -91,8 +98,8 @@ export function TradeOverlayBridge({
   useEffect(() => {
     if (!primRef.current) return;
     if (!enabled) return;
-    primRef.current.setLiveOverlays(liveOverlays ?? [], riskLevels ?? []);
-  }, [liveOverlays, riskLevels, enabled]);
+    primRef.current.setLiveOverlays(liveOverlays ?? [], riskLevels ?? [], accountBasis ?? null);
+  }, [liveOverlays, riskLevels, accountBasis, enabled]);
 
   return null;
 }

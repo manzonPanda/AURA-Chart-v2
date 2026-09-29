@@ -42,7 +42,8 @@ import {
   layoutRiskLabelTops,
   formatLivePnl,
   formatLiveR,
-  formatLots,
+  formatLivePercent,
+  formatLiveLabel,
   formatPrice,
 } from "../src/components/TradingChart/TradeOverlayPrimitive.ts";
 import {
@@ -52,6 +53,9 @@ import {
   hasApplicableLivePosition,
   deriveThresholdPrice,
   formatRiskAmount,
+  liveLevelMetrics,
+  accountPercent,
+  parseRRatio,
 } from "../src/services/tradeOverlay.ts";
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -170,11 +174,22 @@ function makeCtx() {
 
 const T0 = Date.UTC(2026, 8, 23, 12, 0, 0) / 1000;
 
+/**
+ * `accounts.initial_balance` — the denominator for every live pill's `%`.
+ *
+ * The % is ACCOUNT-scoped (`money / initial_balance × 100`), the same unit the
+ * account's own PROFIT TARGET / DAILY LOSS / MAX DRAWDOWN levels use, so a
+ * position's stop and an account limit are directly comparable numbers. With
+ * $100,000: +$58.08 ⇒ +0.06%, −$125.00 ⇒ −0.13%, +$125.00 ⇒ +0.13%.
+ */
+const ACCOUNT_BASIS = 100_000;
+
 /** Render a live/risk frame through the REAL primitive; returns recorded calls. */
 function render({
   live = [],
   risk = [],
   invert = false,
+  accountBasis = ACCOUNT_BASIS,
   gridSec = 60,
   pxPerPrice,
   baseY,
@@ -192,7 +207,7 @@ function render({
     series,
     requestUpdate: () => {},
   });
-  prim.setLiveOverlays(live, risk);
+  prim.setLiveOverlays(live, risk, accountBasis);
   const ctx = makeCtx();
   prim.renderer.draw({
     useBitmapCoordinateSpace: (cb) =>
@@ -228,6 +243,9 @@ function pos(over = {}) {
     netPnl: 58.08,
     liveR: 1.63,
     moneyPerPoint: 10,
+    // trades.risk_per_trade — the 1R the live dashboard divides by. 58.08/35.63
+    // = 1.6298 ⇒ the +1.63R its "Total R Gained" card shows.
+    riskPerTrade: 35.63,
     instrument: "XAUUSD",
     openTime: "2026-09-23 15:10:00", // Helsinki wall clock → 12:10:00Z
     ...over,
@@ -271,11 +289,160 @@ test("1: live open trade renders an entry marker tip-anchored at overlay.entryPr
   assert.notEqual(tris[0].pts[1].y, tris[0].pts[0].y);
 });
 
-test("1b: the live P&L label shows direction, lots, money and R", () => {
+test("1h: dragging the SL moves the stop's % and $, but NEVER the R", () => {
+  // Two positions identical in every way except where the stop sits.
+  //
+  // The R must NOT move: the live dashboard's "Total R Gained" is
+  // `profit / riskPerTrade`, recorded at ENTRY, whereas the server's `live_rr`
+  // divides by the CURRENT stop distance and therefore jitters under the cursor.
+  //
+  // The stop's % and $ MUST move: they answer "how much of my account do I lose
+  // if this stop is hit", which is exactly what the user is changing.
+  const wide = liveOf({ sl: 4288, tp: 4313, netPnl: 58.08, riskPerTrade: 35.63 });
+  const tight = liveOf({ sl: 4299, tp: 4313, netPnl: 58.08, riskPerTrade: 35.63 });
+
+  const wideMetrics = liveLevelMetrics(wide, "position", ACCOUNT_BASIS);
+  const tightMetrics = liveLevelMetrics(tight, "position", ACCOUNT_BASIS);
+  assert.equal(wideMetrics.r, tightMetrics.r, "the position R is invariant to SL placement");
+  assert.equal(wideMetrics.r, 58.08 / 35.63, "R is profit / riskPerTrade, the dashboard's own math");
+  assert.equal(wideMetrics.percent, tightMetrics.percent, "the P/L % is invariant too");
+
+  // The stop's % is the money AT THE STOP over the account, so it tracks the drag:
+  // 12.5 points × $10 = −$125 ⇒ −0.125%, then 1.5 points ⇒ −$15 ⇒ −0.015%.
+  const wideStop = liveLevelMetrics(wide, "stop", ACCOUNT_BASIS);
+  const tightStop = liveLevelMetrics(tight, "stop", ACCOUNT_BASIS);
+  assert.equal(wideStop.money, -125);
+  assert.equal(tightStop.money, -15);
+  assert.equal(wideStop.percent, (-125 / ACCOUNT_BASIS) * 100);
+  assert.equal(tightStop.percent, (-15 / ACCOUNT_BASIS) * 100);
+  assert.ok(
+    wideStop.percent < tightStop.percent,
+    "a tighter stop risks a SMALLER share of the account, so its % is less negative",
+  );
+  assert.notEqual(wideStop.percent, tightStop.percent, "the stop's % follows the drag");
+
+  // A recorded 1R always beats the live SL distance, even when they disagree.
+  const conflicting = liveOf({ sl: 4299, riskPerTrade: 100, netPnl: 50, liveR: 0.5 });
+  assert.equal(
+    liveLevelMetrics(conflicting, "position", ACCOUNT_BASIS).r,
+    0.5,
+    "50 / 100 = 0.5R, NOT the server's liveR or the SL-derived unit",
+  );
+});
+
+test("1b: the live P&L label shows direction, %, R and money — and NO lot", () => {
   const { ctx } = render({ live: [liveOf()] });
   const label = ctx.texts.find((t) => t.startsWith("BUY"));
   assert.ok(label, "a live P&L label is painted");
-  assert.match(label, /^BUY 0\.33 \+\$58\.08 \+1\.63R$/);
+  // entry 4300.5, $10/point, +$58.08 floating. The % is ACCOUNT-scoped:
+  // +$58.08 / $100,000 = +0.058% ⇒ +0.06%.
+  assert.equal(label, "BUY +0.06% +1.63R +$58.08");
+  assert.ok(!/\b0\.33\b/.test(label), "the lot size is never shown");
+});
+
+test("1c: the server's own SL/TP money and R:R win over any client derivation", () => {
+  // The MT5-native values deliberately DISAGREE with what $10/point would imply
+  // (sensitivity would give ∓$125 and ±1.00R). The account's own numbers are
+  // authoritative, so the label must follow them, not the arithmetic.
+  const live = liveOf({ slValue: -50, tpValue: 145.92, rewardRiskRatio: "2.92" });
+  const { ctx } = render({ live: [live] });
+  assert.equal(live.slValue, -50, "the server value survives the overlay build");
+  assert.equal(live.tpValue, 145.92);
+  assert.equal(live.rewardRiskRatio, "2.92");
+  assert.ok(ctx.texts.includes("STOP LOSS -0.05% -$50.00"), "stop money is MT5's own");
+  assert.ok(
+    ctx.texts.includes("TAKE PROFIT +0.15% +4.10R +$145.92"),
+    "target R is the account's reward:risk ratio",
+  );
+
+  // R derived from the money when the server reports no ratio: 145.92 / 35.63.
+  const noRatio = liveOf({ slValue: -50, tpValue: 145.92, rewardRiskRatio: null });
+  const derived = liveLevelMetrics(noRatio, "target", ACCOUNT_BASIS);
+  assert.equal(derived.money, 145.92);
+  assert.ok(
+    Math.abs(derived.r - 145.92 / 35.63) < 1e-9,
+    "1R is the RECORDED risk, so R is self-consistent with the $",
+  );
+});
+
+test("1d: every live metric is direction-oriented, so a SELL's levels read truthfully", () => {
+  // A short entered at 4300.5 with its stop ABOVE entry (a real stop) and its
+  // target BELOW: both are gains/losses by the money they represent.
+  const short = liveOf({ direction: "Sell", sl: 4313.0, tp: 4288.0, netPnl: 58.08, liveR: 1.63 });
+  const stop = liveLevelMetrics(short, "stop", ACCOUNT_BASIS);
+  const target = liveLevelMetrics(short, "target", ACCOUNT_BASIS);
+  assert.ok(stop.percent < 0, "a short's stop above entry is a loss ⇒ negative %");
+  assert.ok(stop.money < 0, "…and negative money");
+  assert.ok(target.percent > 0, "a short's target below entry is a gain ⇒ positive %");
+  assert.ok(target.money > 0, "…and positive money");
+  assert.equal(stop.r, -125 / 35.63, "R is the level's money over the recorded 1R");
+  assert.equal(Math.round(target.r * 1000) / 1000, 3.508, "the symmetric target mirrors it");
+
+  // The % is money over the ACCOUNT basis, so a zero/absent balance yields no
+  // percentage rather than an Infinity or NaN leaking into the label.
+  const zeroBasis = liveOf();
+  assert.equal(liveLevelMetrics(zeroBasis, "stop", 0).percent, null, "a zero balance yields no %");
+  assert.equal(liveLevelMetrics(zeroBasis, "stop", null).percent, null, "no balance ⇒ no %");
+  assert.equal(zeroBasis.moneyPerPoint, 10, "…and the $ is still derivable");
+});
+
+test("1f: the % is the ACCOUNT's percentage, never a price-distance one", () => {
+  // entry 4300.5, sl 4288, $10/point ⇒ the stop is $125 away, which is
+  // 0.29% of the PRICE — but only 0.13% of a $100,000 ACCOUNT. The label must
+  // show the account reading, because that is the unit the account's own
+  // PROFIT TARGET / DAILY LOSS / MAX DRAWDOWN levels are expressed in.
+  const live = liveOf();
+  const stop = liveLevelMetrics(live, "stop", ACCOUNT_BASIS);
+  assert.equal(stop.money, -125);
+  // The stop's % is the money AT THE STOP over the ACCOUNT — not the stop's
+  // share of the entry PRICE (0.29%), and not the recorded risk. That is the
+  // unit the account's own PROFIT TARGET / DAILY LOSS / MAX DRAWDOWN levels use.
+  assert.equal(stop.percent, (-125 / ACCOUNT_BASIS) * 100);
+  assert.equal(accountPercent(-125, ACCOUNT_BASIS), stop.percent);
+  // Doubling the account halves the reported risk % for the SAME dollar risk.
+  assert.equal(accountPercent(-125, 200_000), -0.0625);
+  assert.equal(accountPercent(null, ACCOUNT_BASIS), null, "no money ⇒ no %");
+  assert.equal(accountPercent(-125, null), null, "no basis ⇒ no %");
+  assert.equal(accountPercent(-125, 0), null, "a zero basis never divides by zero");
+});
+
+test("1g: the account's r:R string parses in every shape the bridge emits", () => {
+  // Real payloads carry "+1.90R" (signed, R-suffixed), a bare "1.63", and the
+  // reward:risk PAIR "1:2" — which must resolve to 2, the REWARD side. Reading
+  // the pair inverted would silently report HALF the real reward.
+  assert.equal(parseRRatio("+1.90R"), 1.9);
+  assert.equal(parseRRatio("-0.50R"), -0.5);
+  assert.equal(parseRRatio("1.90r"), 1.9, "the suffix is case-insensitive");
+  assert.equal(parseRRatio("1.63"), 1.63);
+  assert.equal(parseRRatio("2.5"), 2.5);
+  assert.equal(parseRRatio("1:2"), 2, "a 1:2 setup is 2R of reward, not 0.5R");
+  assert.equal(parseRRatio("1:2.5"), 2.5, "reward 2.5 over risk 1 is 2.5R");
+  assert.equal(parseRRatio("  +1.90R  "), 1.9, "surrounding whitespace is tolerated");
+  assert.equal(parseRRatio("1:0"), 0, "zero reward is a real 0R, not a missing value");
+  assert.equal(parseRRatio("0:2"), null, "a zero RISK side divides by zero ⇒ no ratio");
+  assert.equal(parseRRatio(""), null);
+  assert.equal(parseRRatio(null), null);
+  assert.equal(parseRRatio(undefined), null);
+  assert.equal(parseRRatio("n/a"), null, "junk never becomes 0");
+
+  // The suffixed form must survive all the way to the rendered label — this is
+  // the shape that silently produced NaN before. The account's `rrr` is only
+  // consulted when NO 1R is known, so the case removes both the recorded risk
+  // and the sensitivity, and supplies the target money from MT5 directly.
+  const live = liveOf({
+    rewardRiskRatio: "+1.90R",
+    riskPerTrade: null,
+    moneyPerPoint: null,
+    tpValue: 125,
+  });
+  const { ctx } = render({ live: [live] });
+  assert.ok(
+    ctx.texts.includes("TAKE PROFIT +0.13% +1.90R +$125.00"),    "an R-suffixed r:R renders as a real R, never NaN or 0.00R",
+  );
+  assert.ok(
+    ctx.texts.every((t) => !t.includes("NaN") && !t.includes("undefined")),
+    "no label can ever contain NaN or undefined",
+  );
 });
 
 // ── 2. BUY and SELL both render with the correct per-direction apex ──────────
@@ -407,8 +574,8 @@ test("5c: STOP LOSS and TAKE PROFIT use one styled line, pill and exact price ta
   assert.equal(liveDashed.filter((s) => s.pts.some((p) => p.y === tpY)).length, 1, "one TP line");
   assert.equal(liveDashed.find((s) => s.pts.some((p) => p.y === slY)).color, "#ef5350");
   assert.equal(liveDashed.find((s) => s.pts.some((p) => p.y === tpY)).color, "#26a69a");
-  assert.ok(first.ctx.texts.includes("STOP LOSS  @ 4288.00"));
-  assert.ok(first.ctx.texts.includes("TAKE PROFIT  @ 4313.00"));
+  assert.ok(first.ctx.texts.includes("STOP LOSS -0.13% -$125.00"));
+  assert.ok(first.ctx.texts.includes("TAKE PROFIT +0.13% +3.51R +$125.00"));
   assert.deepEqual(first.prim.priceAxisViews().map((tag) => tag.text()), [
     "4300.50", "4288.00", "4313.00",
   ]);
@@ -417,10 +584,15 @@ test("5c: STOP LOSS and TAKE PROFIT use one styled line, pill and exact price ta
   ]);
 
   const next = render({ live: [moved] });
-  assert.ok(next.ctx.texts.includes("STOP LOSS  @ 4290.00"));
-  assert.ok(next.ctx.texts.includes("TAKE PROFIT  @ 4310.00"));
-  assert.ok(!next.ctx.texts.includes("STOP LOSS  @ 4288.00"));
-  assert.ok(!next.ctx.texts.includes("TAKE PROFIT  @ 4313.00"));
+  assert.ok(next.ctx.texts.includes("STOP LOSS -0.11% -$105.00"));
+  assert.ok(next.ctx.texts.includes("TAKE PROFIT +0.10% +2.67R +$95.00"));
+  assert.ok(!next.ctx.texts.includes("STOP LOSS -0.13% -$125.00"));
+  assert.ok(!next.ctx.texts.includes("TAKE PROFIT +0.13% +3.51R +$125.00"));
+  // The pill no longer carries the price, but the price-scale tag still does.
+  assert.ok(
+    next.ctx.texts.every((t) => !t.includes("@")),
+    "no live pill repeats its level's price — the price-scale tag owns that",
+  );
   assert.deepEqual(next.prim.priceAxisViews().map((tag) => tag.text()), [
     "4300.50", "4290.00", "4310.00",
   ]);
@@ -699,16 +871,31 @@ test("8b: unknown sensitivity on the position ⇒ still annotation-only", () => 
   assert.equal(riskLines(ctx).length, 0);
   // The price-less risk descriptors are not chart decorations: no risk pills
   // or risk tags. The live entry/SL/TP labels remain independently authoritative.
+  // With no proven sensitivity there is no honest $ (nor an R built on one). The
+  // % is derived from that same money, so it drops too — but the position's own
+  // floating P/L is still server-authoritative and keeps its % and R. Each field
+  // degrades on its own; none is invented.
   assert.deepEqual(ctx.texts, [
-    "BUY 0.33 +$58.08 +1.63R",
-    "STOP LOSS  @ 4288.00",
-    "TAKE PROFIT  @ 4313.00",
+    "BUY +0.06% +1.63R +$58.08",
+    "STOP LOSS",
+    "TAKE PROFIT",
   ]);
 });
 
 test("8c: a MIXED book is not collapsed into one misleading price", () => {
   const buy = liveOf({ ticket: "1", moneyPerPoint: 10 });
-  const sell = liveOf({ ticket: "2", direction: "Sell", moneyPerPoint: 10, entryPrice: 4300.5, netPnl: -20, liveR: -2 });
+  const sell = liveOf({
+    ticket: "2",
+    direction: "Sell",
+    moneyPerPoint: 10,
+    entryPrice: 4300.5,
+    netPnl: -20,
+    liveR: -2,
+    // A realistic SHORT: its stop sits ABOVE entry and its target BELOW, so the
+    // stop is a loss and the target a gain.
+    sl: 4313,
+    tp: 4288,
+  });
   assert.equal(
     deriveThresholdPrice(5000, [
       { instrument: "XAUUSD", sign: 1, moneyPerPoint: 10, entryPrice: 4300.5 },
@@ -724,10 +911,14 @@ test("8c: a MIXED book is not collapsed into one misleading price", () => {
   assert.equal(riskLines(ctx).length, 0);
   assert.equal(ctx.texts.length, 6, "each position owns entry, SL and TP pills");
   for (const label of [
-    "BUY 0.33 +$58.08 +1.63R",
-    "SELL 0.33 -$20.00 -2.00R",
-    "STOP LOSS  @ 4288.00",
-    "TAKE PROFIT  @ 4313.00",
+    "BUY +0.06% +1.63R +$58.08",
+    "SELL -0.02% -0.56R -$20.00",
+    // A realistic SHORT: its stop sits ABOVE entry and its target BELOW. The
+    // % is the money at that level over the account, and both the % and the $
+    // are direction-oriented — so the short's stop reads as a loss and its
+    // target as a gain.
+    "STOP LOSS -0.13% -$125.00",
+    "TAKE PROFIT +0.13% +3.51R +$125.00",
   ]) {
     assert.ok(ctx.texts.includes(label), `${label} is painted`);
   }
@@ -765,15 +956,39 @@ test("9: risk labels de-collide while every line stays on its exact price", () =
 });
 
 // ── 10. formatters stay compact and never fake a missing value ──────────────
-test("10: compact money / R / lots formatting", () => {
+test("10: compact money / R / percent formatting", () => {
   assert.equal(formatLivePnl(58.08), "+$58.08");
   assert.equal(formatLivePnl(-12.5), "-$12.50");
   assert.equal(formatLivePnl(0), "+$0.00");
-  assert.equal(formatLiveR(1.63), " +1.63R");
-  assert.equal(formatLiveR(-0.5), " -0.50R");
+  assert.equal(formatLiveR(1.63), "+1.63R", "no leading space — the composer owns separation");
+  assert.equal(formatLiveR(-0.5), "-0.50R");
   assert.equal(formatLiveR(null), "", "an unknown R is omitted, never shown as 0.00R");
-  assert.equal(formatLots(0.33), "0.33");
-  assert.equal(formatLots(1.5), "1.50");
+
+  assert.equal(formatLivePercent(1.95), "+1.95%");
+  assert.equal(formatLivePercent(-0.95), "-0.95%");
+  assert.equal(formatLivePercent(0), "0.00%", "zero is unsigned — a + would claim a direction");
+  assert.equal(formatLivePercent(2), "+2.00%", "always two decimals, whatever the magnitude");
+  assert.equal(formatLivePercent(null), "", "an unknown % is omitted, never shown as 0.00%");
+  assert.equal(formatLivePercent(Number.NaN), "", "NaN never reaches the label");
+
+  // The composer drops empty segments instead of leaving dangling separators.
+  const metrics = { percent: 1.95, r: 1.59, money: 145.92 };
+  assert.equal(formatLiveLabel("BUY", metrics), "BUY +1.95% +1.59R +$145.92");
+  assert.equal(formatLiveLabel("STOP LOSS", metrics, { withR: false }), "STOP LOSS +1.95% +$145.92");
+  assert.equal(
+    formatLiveLabel("BUY", { percent: null, r: null, money: 58.08 }),
+    "BUY +$58.08",
+    "an unknown % / R simply drops out",
+  );
+  assert.equal(
+    formatLiveLabel("BUY", { percent: null, r: null, money: null }),
+    "BUY",
+    "with nothing derivable the label is the bare direction, never 'BUY  '",
+  );
+  assert.ok(
+    !/\s{2,}/.test(formatLiveLabel("BUY", metrics)),
+    "the composed label never contains a double space",
+  );
 });
 
 // ── 11. READ-ONLY: no trade-management interaction anywhere ─────────────────
@@ -1404,3 +1619,47 @@ test("20e: App path — every valid risk level uses the real price coordinate", 
   const entryTag = prim.priceAxisViews().find((t) => t.text() === entryText);
   assert.equal(entryTag.coordinate(), series.priceToCoordinate(liveTradeOverlays[0].entryPrice));
 });
+// ── 1e. the three live pills, rendered exactly as a user sees them ──────────
+// Each case runs the REAL composer over a realistic position shape, so the
+// exact strings on screen are asserted here and cannot silently drift.
+function pills(position) {
+  const o = buildLiveTradeOverlay({ position: pos(position), chartEpic: "GOLD" });
+  return [
+    formatLiveLabel(o.direction.toUpperCase(), liveLevelMetrics(o, "position", ACCOUNT_BASIS)),
+    o.sl !== null
+      ? formatLiveLabel("STOP LOSS", liveLevelMetrics(o, "stop", ACCOUNT_BASIS), { withR: false })
+      : null,
+    o.tp !== null ? formatLiveLabel("TAKE PROFIT", liveLevelMetrics(o, "target", ACCOUNT_BASIS)) : null,
+  ].filter(Boolean);
+}
+
+test("1e: the three live pills render the documented format end-to-end", () => {
+  // The account's own MT5 values are authoritative and win over $10/point.
+  assert.deepEqual(
+    pills({ slValue: -50, tpValue: 145.92, rewardRiskRatio: "2.92" }),
+    ["BUY +0.06% +1.63R +$58.08", "STOP LOSS -0.05% -$50.00", "TAKE PROFIT +0.15% +4.10R +$145.92"],
+  );
+  // Without them the proven sensitivity supplies the money, and 1R is the stop.
+  assert.deepEqual(pills({}), [
+    "BUY +0.06% +1.63R +$58.08",
+    "STOP LOSS -0.13% -$125.00",
+    "TAKE PROFIT +0.13% +3.51R +$125.00",
+  ]);
+  // A short: its stop sits ABOVE entry and is still shown as a loss.
+  assert.deepEqual(pills({ direction: "Sell", sl: 4313, tp: 4288 }), [
+    "SELL +0.06% +1.63R +$58.08",
+    "STOP LOSS -0.13% -$125.00",
+    "TAKE PROFIT +0.13% +3.51R +$125.00",
+  ]);
+  // No sensitivity ⇒ the levels lose their $ and the R built on it, but the stop
+  // still shows its ACCOUNT RISK % (the recorded 1R needs no sensitivity) and
+  // the position keeps its % / $ from the server-reported floating P&L.
+  assert.deepEqual(pills({ moneyPerPoint: null, liveR: null }), [
+    "BUY +0.06% +1.63R +$58.08",
+    "STOP LOSS",
+    "TAKE PROFIT",
+  ]);
+  // Unset levels draw no pill at all.
+  assert.deepEqual(pills({ sl: null, tp: null }), ["BUY +0.06% +1.63R +$58.08"]);
+});
+

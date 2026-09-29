@@ -265,6 +265,42 @@ export interface LivePositionInput {
   readonly entryPrice: number;
   readonly sl: number | null;
   readonly tp: number | null;
+  /**
+   * `trades.risk_per_trade` — the 1R the live dashboard's "Total R Gained"
+   * divides by. It arrives as a P1 numeric string, so it is normalized to a
+   * number during the build. `riskUsd` is the legacy alias for the same value.
+   */
+  readonly rowRiskPerTrade?: string | number | null;
+  readonly riskUsd?: number | null;
+  /**
+   * MT5-native account-currency P/L if the position were closed at `sl`, signed
+   * as the server returned it. This is the AUTHORITATIVE money for the stop
+   * label — preferred over any client-side derivation. Null when the server
+   * could not compute it, in which case the stop label falls back to the proven
+   * $/point sensitivity ({@link LivePositionInput.moneyPerPoint}).
+   */
+  readonly slValue: number | null;
+  /** As {@link slValue}, but at the take-profit level. */
+  readonly tpValue: number | null;
+  /**
+   * The account-currency RISK of this trade — 1R.
+   *
+   * This is the `trades.risk_per_trade` the live dashboard itself divides by for
+   * "Total R Gained" (`getTradeR: profit / riskPerTrade`). It is the risk
+   * recorded when the trade was placed, so it is deliberately STABLE: dragging
+   * the SL later must NOT retroactively change how the trade's R is measured.
+   * Deriving 1R from the live SL distance instead makes every R on the chart
+   * jump every time the user adjusts a stop. Optional because the P1 payload
+   * spells it `rowRiskPerTrade` / `riskUsd`; {@link buildLiveTradeOverlay}
+   * resolves the aliases into this one field.
+   */
+  readonly riskPerTrade?: number | null;
+  /**
+   * The account-scoped reward:risk ratio, exactly as the server reported it (a
+   * string in the P1 contract). This is the R multiple the take-profit
+   * represents, so the target label never re-derives it.
+   */
+  readonly rewardRiskRatio: string | null;
   /** Floating P/L already netted with swap by the server. */
   readonly netPnl: number;
   /** Server-derived R (netPnl / 1R), or null when 1R is unknown. */
@@ -295,6 +331,14 @@ export interface LiveTradeOverlay {
   readonly sl: number | null;
   /** Actual MT5 TP — rendered as a read-only informational level. */
   readonly tp: number | null;
+  /** Authoritative account-currency P/L at the SL; null when not computed. */
+  readonly slValue: number | null;
+  /** Authoritative account-currency P/L at the TP; null when not computed. */
+  readonly tpValue: number | null;
+  /** The trade's recorded 1R (`trades.risk_per_trade`); null when unknown. */
+  readonly riskPerTrade: number | null;
+  /** Server-reported reward:risk ratio (the R the target represents). */
+  readonly rewardRiskRatio: string | null;
   readonly netPnl: number;
   readonly liveR: number | null;
   readonly openTime: string | null;
@@ -343,6 +387,17 @@ export function buildLiveTradeOverlay(input: LiveTradeOverlayInput): LiveTradeOv
     entryPrice: position.entryPrice,
     sl: position.sl,
     tp: position.tp,
+    slValue: position.slValue ?? null,
+    tpValue: position.tpValue ?? null,
+    // 1R is recorded once, under three names across the bridge's payloads. The
+    // first positive value wins so a stale/zero `riskUsd` cannot shadow the
+    // real `risk_per_trade`.
+    riskPerTrade: firstPositive(
+      position.riskPerTrade,
+      toNumber(position.rowRiskPerTrade),
+      position.riskUsd,
+    ),
+    rewardRiskRatio: position.rewardRiskRatio ?? null,
     netPnl: position.netPnl,
     liveR: position.liveR,
     openTime: position.openTime,
@@ -392,6 +447,238 @@ export function hasApplicableLivePosition(
   const wanted = (chartEpic ?? "").trim().toUpperCase();
   if (!wanted) return false;
   return overlays.some((overlay) => overlay.epic === wanted);
+}
+
+// ── Live label metrics: %, R and $ for the position, its SL and its TP ──────
+
+/**
+ * Which account risk level a label describes.
+ *
+ * - `position` — the live position's own line: the CURRENT floating move from
+ *   entry (its % / R / $ are what the account holds right now).
+ * - `stop` / `target` — the SL / TP line: what the position would hold IF it
+ *   were closed at that level.
+ */
+export type LiveLevelRole = "position" | "stop" | "target";
+
+/** Everything one live label can show, or null where it is NOT derivable. */
+export interface LiveLevelMetrics {
+  /** Signed % move from entry, e.g. `1.95` for `+1.95%`. Null when underivable. */
+  readonly percent: number | null;
+  /** Signed R multiple at that level, e.g. `1.59`. Null when 1R is unknown. */
+  readonly r: number | null;
+  /** Signed account-currency P/L at that level, e.g. `145.92`. */
+  readonly money: number | null;
+}
+
+/** +1 for a BUY (price must rise), -1 for a SELL. */
+function directionSign(direction: "Buy" | "Sell"): 1 | -1 {
+  return direction === "Buy" ? 1 : -1;
+}
+
+/**
+ * The first strictly-positive finite candidate, or null.
+ *
+ * The bridge carries the same fact under several aliases (`riskPerTrade`,
+ * `rowRiskPerTrade`, `riskUsd`) and any of them may be absent, zero or junk, so
+ * the first usable one wins rather than letting a bad value shadow a good one.
+ */
+function firstPositive(...values: readonly (number | null | undefined)[]): number | null {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+  }
+  return null;
+}
+
+/**
+ * Account-scoped percentage of a MONETARY amount — the canonical risk
+ * convention this project uses everywhere (see the trading-overlay audit):
+ *
+ *     risk % = money / initial_balance × 100
+ *
+ * This is deliberately NOT a price-distance percentage (`(level−entry)/entry`).
+ * A level's % answers "how much of my ACCOUNT does this risk represent", which
+ * is the only reading that makes a position's stop comparable to the account's
+ * own PROFIT TARGET / DAILY LOSS / MAX DRAWDOWN levels — all of which are
+ * configured as percent-of-initial-balance. A price-distance % cannot be
+ * compared to those and would silently mix two different units on one axis.
+ *
+ * Null when the amount or the account basis is unknown: with no balance there
+ * is no honest percentage, so it is omitted rather than invented.
+ */
+export function accountPercent(
+  money: number | null,
+  accountBasis: number | null | undefined,
+): number | null {
+  if (money === null || !Number.isFinite(money)) return null;
+  if (accountBasis === null || accountBasis === undefined) return null;
+  if (!Number.isFinite(accountBasis) || accountBasis === 0) return null;
+  const percent = (money / accountBasis) * 100;
+  return Number.isFinite(percent) ? percent : null;
+}
+
+/**
+ * Account-currency P/L the position would hold if closed at `levelPrice`.
+ *
+ * P/L is `sign × moneyPerPoint × (level - entry)`. The server's OWN `slValue` /
+ * `tpValue` always win when present (MT5-native, and already netted with swap);
+ * the sensitivity form is only a fallback for when the bridge omitted them.
+ * Null when neither is available.
+ */
+export function levelMoney(
+  overlay: Pick<LiveTradeOverlay, "direction" | "entryPrice" | "moneyPerPoint">,
+  levelPrice: number | null,
+  authoritative: number | null | undefined,
+): number | null {
+  if (typeof authoritative === "number" && Number.isFinite(authoritative)) return authoritative;
+  if (levelPrice === null || !Number.isFinite(levelPrice)) return null;
+  const mpp = overlay.moneyPerPoint;
+  if (mpp === null || !Number.isFinite(mpp) || mpp === 0) return null;
+  const money = directionSign(overlay.direction) * mpp * (levelPrice - overlay.entryPrice);
+  return Number.isFinite(money) ? money : null;
+}
+
+/**
+ * Parse an R multiple out of the account's `rrr` / `rewardRiskRatio` STRING.
+ *
+ * The bridge is NOT consistent about this field's shape — real payloads carry
+ * `"+1.90R"` (signed, R-suffixed), `"1.63"` (bare number) and `"1:2"` /
+ * `"1:2.5"` (a reward:risk PAIR). All three are accepted:
+ *
+ *   • a bare or signed number      → used as-is
+ *   • a number with a trailing `R`  → the `R` is decoration, stripped
+ *   • a `risk:reward` pair `a:b`   → the REWARD side, `b / a`
+ *
+ * A `1:2` reading of "1 unit of risk for 2 of reward" is the standard MT
+ * convention and yields `2`; taking the risk side would silently report HALF
+ * the real reward, which is the classic R:R misread.
+ *
+ * Null when nothing numeric can be read — never a fabricated 0.
+ */
+export function parseRRatio(raw: string | null | undefined): number | null {
+  if (typeof raw !== "string") return null;
+  const text = raw.trim();
+  if (text === "") return null;
+
+  // "1:2" / "1:2.5" — risk : reward. The FIRST side is the risk and the SECOND
+  // is the reward, so the R multiple is reward / risk = 2 / 1 = 2.
+  const pair = /^(-?\d+(?:\.\d+)?)\s*:\s*(-?\d+(?:\.\d+)?)$/.exec(text);
+  if (pair) {
+    const risk = Number(pair[1]);
+    const reward = Number(pair[2]);
+    // Guard the RISK side (the divisor) — a zero risk is not a ratio.
+    if (Number.isFinite(risk) && Number.isFinite(reward) && risk !== 0) {
+      const ratio = reward / risk;
+      return Number.isFinite(ratio) ? ratio : null;
+    }
+    return null;
+  }
+
+  // "+1.90R" / "-0.50R" / "1.63" — strip the decorative suffix, then parse.
+  const numeric = Number(text.replace(/R$/i, "").trim());
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+/**
+ * 1R — the account-currency risk the live dashboard measures against.
+ *
+ * `riskPerTrade` (`trades.risk_per_trade`) is the ONLY accepted primary source,
+ * matching `getTradeR` / `calculateTradeR` in the live dashboard. It is fixed at
+ * entry, so an R derived from it does not move when the user drags the SL.
+ *
+ * The live SL distance is used ONLY as a last-resort fallback when the account
+ * recorded no risk at all — never in preference to a recorded 1R.
+ */
+function riskUnit(overlay: LiveTradeOverlay): number | null {
+  const recorded = overlay.riskPerTrade;
+  if (recorded !== null && Number.isFinite(recorded) && recorded > 0) return recorded;
+  const fromSl = Math.abs(levelMoney(overlay, overlay.sl, overlay.slValue) ?? 0);
+  return Number.isFinite(fromSl) && fromSl > 0 ? fromSl : null;
+}
+
+/**
+ * The R multiple a level represents.
+ *
+ * 1R is `riskPerTrade` (see {@link riskUnit}), so a level's R is simply its own
+ * P/L over that fixed unit — the same arithmetic the live dashboard's "Total R
+ * Gained" card performs, and the R and the `$` printed beside it can never
+ * disagree.
+ *
+ * Fallbacks run only when no 1R is known at all, in the dashboard's own order:
+ * the target falls back to the account's `rrr`, then the position to the
+ * server's `liveR`. Every path yields null rather than a fabricated `0.00R`.
+ */
+export function levelR(
+  overlay: LiveTradeOverlay,
+  role: LiveLevelRole,
+  levelMoneyValue: number | null,
+  authoritativeR: string | null | undefined = null,
+): number | null {
+  // PRIMARY — the dashboard's own arithmetic over the RECORDED 1R. This is
+  // taken before `liveR` on purpose: the server's `live_rr` divides by the
+  // CURRENT stop distance, so it shifts whenever the user drags the SL, whereas
+  // `profit / riskPerTrade` is fixed at entry and matches "Total R Gained".
+  if (levelMoneyValue !== null && Number.isFinite(levelMoneyValue)) {
+    const oneR = riskUnit(overlay);
+    if (oneR !== null) {
+      const r = levelMoneyValue / oneR;
+      if (Number.isFinite(r)) return r;
+    }
+  }
+  // The target's planned reward:risk, when the account recorded one.
+  if (role === "target") {
+    const parsed = parseRRatio(authoritativeR);
+    if (parsed !== null) return parsed;
+  }
+  // Last resort — the server's current R, used only when no 1R is known at all.
+  if (role === "position") {
+    const live = overlay.liveR;
+    if (live !== null && Number.isFinite(live)) return live;
+  }
+  return null;
+}
+
+/**
+ * Every metric one live label needs, resolved in ONE place.
+ *
+ * Keeping this beside the data model (rather than inline in the canvas code)
+ * means the position, stop and target rows are all built by the same rules, and
+ * each field degrades to null INDEPENDENTLY — a label can show `%` without `$`,
+ * and neither is ever invented.
+ *
+ * `accountBasis` is `accounts.initial_balance`: the same denominator the
+ * account's own risk levels use, so the % on a position and the % on a
+ * DAILY LOSS line mean the same thing and can be compared directly.
+ */
+export function liveLevelMetrics(
+  overlay: LiveTradeOverlay,
+  role: LiveLevelRole,
+  accountBasis: number | null | undefined = null,
+): LiveLevelMetrics {
+  if (role === "position") {
+    const money = Number.isFinite(overlay.netPnl) ? overlay.netPnl : null;
+    return {
+      percent: accountPercent(money, accountBasis),
+      r: levelR(overlay, "position", money),
+      money,
+    };
+  }
+  const isStop = role === "stop";
+  const level = isStop ? overlay.sl : overlay.tp;
+  const money = levelMoney(overlay, level, isStop ? overlay.slValue : overlay.tpValue);
+  return {
+    // A LEVEL's % is the MONEY IT REPRESENTS over the account basis, so it
+    // MOVES when the user drags the stop: it answers "how much of my account do
+    // I lose if this level is hit". It is the same account-scoped unit as the
+    // position's % and as the account's own risk levels.
+    //
+    // The R, by contrast, deliberately does NOT move — it stays on the recorded
+    // `riskPerTrade` (see riskUnit) so it matches the dashboard's "Total R
+    // Gained" instead of re-basing whenever the stop is adjusted.
+    percent: accountPercent(money, accountBasis),
+    r: levelR(overlay, role, money, overlay.rewardRiskRatio),
+    money,
+  };
 }
 
 // ── Account risk levels (PROFIT TARGET / DAILY LOSS / MAX DRAWDOWN) ──

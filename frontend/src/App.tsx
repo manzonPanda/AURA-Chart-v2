@@ -624,6 +624,15 @@ export default function App() {
   // (`hasApplicableLivePosition` asserts it, the builder re-asserts it), and a
   // level without a derivable price is dropped by the RENDERER (no line, no
   // pill, no price-scale tag) rather than parked somewhere on screen.
+  // The account basis every live pill's `%` is measured against:
+  // `accounts.initial_balance` — the SAME denominator the three account-risk
+  // levels use, so "−0.95% on this stop" and "−3% daily loss" are directly
+  // comparable numbers rather than two unrelated units. Null ⇒ no % is drawn.
+  const liveAccountBasis = useMemo(
+    () => toFiniteNumber(accountState?.initialBalance),
+    [accountState],
+  );
+
   const riskLevelOverlays = useMemo(
     () =>
       accountState && hasApplicableLivePosition(authoritativeLiveTradeOverlays, epic)
@@ -1795,6 +1804,7 @@ export default function App() {
           tradeOverlays={tradeOverlays}
           liveTradeOverlays={liveTradeOverlays}
           riskLevelOverlays={riskLevelOverlays}
+          accountBasis={liveAccountBasis}
           resolution={timeframe}
           instrumentEpic={epic || undefined}
           liveCandle={realtime.candle}

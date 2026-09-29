@@ -279,6 +279,12 @@ interface Props {
    */
   liveTradeOverlays?: readonly LiveTradeOverlay[];
   riskLevelOverlays?: readonly RiskLevelOverlay[];
+  /**
+   * `accounts.initial_balance` — the denominator for every live pill's `%`, so a
+   * position's percentage is directly comparable to an account-risk level's.
+   * Null/omitted ⇒ the % is not drawn.
+   */
+  accountBasis?: number | null;
   /** Timeframe id (MINUTE_1 | MINUTE_3) — used for stream bucket alignment. */
   resolution?: string;
   /**
@@ -979,6 +985,7 @@ export function TradingChart({
   tradeOverlays,
   liveTradeOverlays = [],
   riskLevelOverlays = [],
+  accountBasis = null,
   resolution = "",
   instrumentEpic,
   liveCandle = null,
@@ -1859,6 +1866,7 @@ export function TradingChart({
             overlays={visibleTradeOverlays}
             liveOverlays={visibleLiveOverlays}
             riskLevels={riskLevelOverlays}
+            accountBasis={accountBasis}
             formingBucketSec={liveCandle?.time ?? null}
             bucketSec={bucketSec}
             enabled={!session}
