@@ -575,9 +575,83 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 }
 .ma-structure-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .ma-structure-title { color: var(--accent); font-size: 0.6rem; font-weight: 800; letter-spacing: 0.12em; }
+/* Badge + eye share the header's right slot (the row keeps its space-between
+   baseline, so the title never shifts). */
+.ma-structure-head-right { display: inline-flex; align-items: center; gap: 7px; flex: none; }
 .ma-structure-badge { font-size: 0.56rem; font-weight: 800; letter-spacing: 0.08em; }
 .ma-structure-badge.live { color: var(--up); }
 .ma-structure-badge.replay { color: var(--ck-warn); }
+/* Visibility toggle — compact, muted, visually SECONDARY to the title: a
+   transparent 16px hit box that only tints on hover/focus. Same shape as the
+   ActiveIndicatorsOverlay eye buttons so the chart has one button language.
+   `pointer-events: auto` re-enables events for this control only — the panel
+   container stays `none`, so chart panning / candle-picking pass through. */
+.ma-structure-toggle,
+.ma-structure-restore {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: manipulation; /* touch: no 300ms double-tap-zoom delay */
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.ma-structure-toggle {
+  width: 16px;
+  height: 16px;
+  margin-left: -1px;
+  align-self: center;
+  flex: none;
+}
+.ma-structure-toggle svg,
+.ma-structure-restore svg { display: block; }
+.ma-structure-toggle:hover,
+.ma-structure-toggle:focus-visible,
+.ma-structure-restore:hover,
+.ma-structure-restore:focus-visible {
+  color: var(--accent);
+  border-color: var(--border-strong);
+  background: var(--accent-soft);
+  outline: none;
+}
+.ma-structure-toggle:active,
+.ma-structure-restore:active { background: var(--accent-soft); opacity: 0.75; }
+/* HIDDEN state — the panel contents are not rendered at all, so the shell is
+   reduced to just the restore pill (no card, no padding box, no border). It
+   keeps the panel's own anchor point and z-index so it cannot overlap the
+   price axis, trade overlays or the scroll-to-latest control. */
+.ma-structure--collapsed {
+  top: 44px;
+  width: auto;
+  padding: 0;
+  background: none;
+  border: 0;
+  box-shadow: none;
+}
+.ma-structure-restore {
+  gap: 4px;
+  height: 20px;
+  padding: 0 6px 0 5px;
+  background: rgba(9, 13, 20, 0.72);
+  border-color: var(--border);
+  border-radius: 5px;
+  opacity: 0.75;
+}
+.ma-structure-restore:hover,
+.ma-structure-restore:focus-visible { opacity: 1; }
+.ma-structure-restore-label {
+  color: var(--muted);
+  font-size: 0.55rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+.ma-structure-restore:hover .ma-structure-restore-label,
+.ma-structure-restore:focus-visible .ma-structure-restore-label { color: var(--accent); }
 .ma-structure-sub { margin-top: 2px; color: var(--muted); font-size: 0.6rem; letter-spacing: 0.07em; }
 .ma-structure-section { margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--border); }
 .ma-structure-kicker { color: var(--muted); font-size: 0.55rem; font-weight: 800; letter-spacing: 0.12em; }
