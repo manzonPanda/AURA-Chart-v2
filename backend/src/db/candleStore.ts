@@ -16,6 +16,21 @@ export interface PgQueryable {
   ): Promise<QueryResult<R>>;
 }
 
+/**
+ * MAXIMUM 1m ROWS a single `loadCandles` call will return.
+ *
+ * Both store implementations clamp silently, so this is a real ceiling and not
+ * a formality. It is NAMED and EXPORTED because the derived-timeframe history
+ * loader must plan its request against the SAME number: a derived timeframe
+ * needs `limit * minutes + minutes + 1` underlying rows, and for MINUTE_5 at
+ * limit=2000 that is 10006 — six rows over this cap. The store would return
+ * fewer rows than requested, `hasMore` would wrongly report false, and
+ * pagination would stop before the true start of history.
+ *
+ * See `effectiveDerivedLimit` in routes/candlesDb.ts.
+ */
+export const MAX_CANDLE_STORE_ROWS = 10000;
+
 /** Raw ohlc_candles row returned by the persistence backend. */
 export interface CandleRow {
   bucket_time: string; // ISO-8601 timestamptz
@@ -241,7 +256,7 @@ export class SupabaseCandleStore implements CandleBackend {
     limit: number,
     beforeSec?: number,
   ): Promise<PersistedCandle[]> {
-    const capped = Math.max(1, Math.min(10000, Math.round(limit) || 500));
+    const capped = Math.max(1, Math.min(MAX_CANDLE_STORE_ROWS, Math.round(limit) || 500));
     const PAGE = 1000; // PostgREST per-request max — keep every window ≤ 1000
     const rows: CandleRow[] = [];
     for (let from = 0; from < capped; from += PAGE) {
@@ -470,7 +485,7 @@ export class PgCandleStore implements CandleBackend {
   async loadCandles(
     instrument: string, timeframe: string, limit: number, beforeSec?: number,
   ): Promise<PersistedCandle[]> {
-    const capped = Math.max(1, Math.min(10000, Math.round(limit) || 500));
+    const capped = Math.max(1, Math.min(MAX_CANDLE_STORE_ROWS, Math.round(limit) || 500));
     const PAGE = 1000;
     const rows: CandleRow[] = [];
     const cols = "bucket_time,open,high,low,close,tick_count,status";

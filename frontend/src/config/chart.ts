@@ -14,12 +14,35 @@
 export const TIMEFRAMES = [
   { key: "MINUTE_1", label: "1m", bucketSec: 60 },
   { key: "MINUTE_3", label: "3m", bucketSec: 180 },
+  { key: "MINUTE_5", label: "5m", bucketSec: 300 },
 ] as const;
 
 export type TimeFrameKey = (typeof TIMEFRAMES)[number]["key"];
 
 /** Default selection preserves the historic 3m-first chart experience. */
 export const DEFAULT_TIME_FRAME: TimeFrameKey = "MINUTE_3";
+
+/**
+ * localStorage key — the user's TIMEFRAME choice (the TIMEFRAMES key itself).
+ *
+ * Deliberately NOT a ChartSettings field: chart templates snapshot the entire
+ * ChartSettings object, so a timeframe stored there would make applying a
+ * template silently change the selected timeframe. This mirrors the
+ * instrument-selection key (services/instruments.ts INSTRUMENT_STORAGE_KEY).
+ */
+export const TIMEFRAME_STORAGE_KEY = "aura.timeframe.v1";
+
+/**
+ * Validate a stored timeframe against the canonical TIMEFRAMES registry —
+ * unknown, non-string or corrupted values fall back to the default
+ * (sanitize-safe). Mirrors {@link sanitizeHistoryHorizon} exactly, and is the
+ * ONLY allowlist a persisted timeframe has to pass.
+ */
+export function sanitizeTimeFrame(raw: unknown): TimeFrameKey {
+  return typeof raw === "string" && TIMEFRAMES.some((tf) => tf.key === raw)
+    ? (raw as TimeFrameKey)
+    : DEFAULT_TIME_FRAME;
+}
 
 /**
  * HISTORY HORIZON — how much TRADING history the chart loads on initial load

@@ -8,6 +8,8 @@ import {
 } from "react";
 import {
   ChartView,
+  DrawingController,
+  MeasurementOverlay,
   ReplayControls,
   createReplayController,
   useChartApi,
@@ -38,6 +40,11 @@ import { diag, iso, logUpdateBar, maybeLogChartBlock } from "../../services/diag
 import { candleCloseCountdown, planLiveUpdate, pruneClosedLiveBars, type LiveBar, frameAuthority, authorityRank } from "../../services/liveCandle";
 import { defaultEmaSettings, type EmaSettings } from "../../config/emaSettings";
 import type { SmaSettings } from "../../config/smaSettings";
+import {
+  listBuiltInOverlayControls,
+  setIndicatorActive,
+  setIndicatorVisible,
+} from "../../services/activeIndicators";
 import type { ImportedPineIndicator, PineRunStatus } from "../../services/pineImport";
 import type { PineSymbolMeta } from "../../services/pineEngineTypes";
 import type { HorizonCalendar } from "../../services/marketCalendar";
@@ -56,6 +63,7 @@ import {
   type CandleSettings,
 } from "../../config/chartSettings";
 import { MaStructurePanel } from "./MaStructurePanel";
+import { DrawingLayer } from "./DrawingLayer";
 import { PineBridge } from "./PineBridge";
 import { SmaBridge } from "./SmaBridge";
 import { ScrollToLatestButton } from "./ScrollToLatestButton";
@@ -67,6 +75,8 @@ import {
 } from "../../services/replay";
 import {
   isNearHistoryEdge,
+  isSameHistoryScope,
+  planScopeChangeAnchor,
   shouldShowLoadMore,
   type HistoryStatus,
 } from "../../services/historyPagination";
@@ -285,8 +295,22 @@ interface Props {
    * Null/omitted ⇒ the % is not drawn.
    */
   accountBasis?: number | null;
-  /** Timeframe id (MINUTE_1 | MINUTE_3) — used for stream bucket alignment. */
+  /** Timeframe id (MINUTE_1 | MINUTE_3 | MINUTE_5) — used for stream bucket alignment. */
   resolution?: string;
+  /**
+   * Bucket width (seconds) the `candles` prop was actually FETCHED on — the grid
+   * those bars belong to. Defaults to `undefined`, which is read as "the active
+   * resolution's grid" (the historical single-timeframe behavior).
+   *
+   * A timeframe click flips `resolution` one render BEFORE the matching history
+   * request resolves, so for that window `candles` still holds the PREVIOUS
+   * timeframe's bars. Re-aligning them onto the incoming grid emits duplicate
+   * timestamps (3m bars floor onto the 5m grid: 0,180,360… → 0,0,300…), so the
+   * display dataset is frozen at its last scope-consistent value for the
+   * duration of a switch — the chart keeps the valid content it already shows
+   * (no empty-chart flash) and never sees mixed-grid rows.
+   */
+  historyBucketSec?: number;
   /**
    * Selected instrument's epic — the closed-live ledger's SCOPE key (FIX 2).
    * The ledger must survive same-scope history reloads (every history load
@@ -855,6 +879,10 @@ function LiveBarBridge({
  *  - EXCEPTION: when "Load More History" captured a visible range, the next
  *    prepend repaint restores that exact window (the user stays anchored on
  *    the candles they were reading).
+ *  - EXCEPTION: after a genuine TIMEFRAME/SCOPE change the user who was at the
+ *    LIVE edge is re-anchored to the new timeframe's live edge, once. A user who
+ *    deliberately scrolled back into history is left where they are. Neither
+ *    path re-enables continuous auto-follow.
  *  - Emits the crosshair-hovered candle — or `null` (→ fall back to the latest
  *    forming/historical candle) — to the OHLC readout.
  */
@@ -863,6 +891,7 @@ function ViewportBridge({
   bucketSec,
   onCrosshairCandle,
   preserveRangeRef,
+  pendingLiveEdgeAnchorRef,
   onNearHistoryEdge,
 }: {
   candles: readonly Candle[];
@@ -873,6 +902,14 @@ function ViewportBridge({
    *  bar layout to shift underneath the user, keeping the historical viewport
    *  anchored. Structural type: a mutable ref to the captured LWC visible range. */
   preserveRangeRef?: { current: { from: number; to: number } | null } | null;
+  /**
+   * One-shot live-edge re-anchor request, raised ONLY by a genuine
+   * timeframe/scope change and already evaluated against the PRE-switch
+   * viewport by the parent. The NEXT bus-"data" repaint (the new dataset)
+   * consumes it exactly once; every later repaint sees it already cleared, so
+   * it can never turn into continuous auto-follow.
+   */
+  pendingLiveEdgeAnchorRef?: { current: boolean } | null;
   /** Reports whether the visible range's left edge sits near the oldest
    *  loaded candle (reveals the "Load More History" control). */
   onNearHistoryEdge?: (near: boolean) => void;
@@ -932,8 +969,26 @@ function ViewportBridge({
     };
 
     const applyViewportAfterData = () => {
+      // (1) TIMEFRAME / SCOPE CHANGE. The user WAS at the live edge when they
+      //     clicked, so re-anchor to the new timeframe's live edge now that the
+      //     new dataset is applied. Cleared BEFORE the call so the action is
+      //     consumed exactly once and can never re-fire on a later repaint.
+      //     `scrollToRealTime()` is the same call ScrollToLatestButton makes, so
+      //     the button keeps its meaning (it is hidden once we are back at the
+      //     edge). Deliberately NOT the removed auto-follow: nothing raises
+      //     this flag except a bucket-width change.
+      if (pendingLiveEdgeAnchorRef?.current) {
+        pendingLiveEdgeAnchorRef.current = false;
+        try {
+          ts.scrollToRealTime();
+        } catch {
+          /* older LWC — keep the current view */
+        }
+        return;
+      }
+      // (2) LOAD MORE HISTORY — unchanged behavior.
       const captured = preserveRangeRef?.current ?? null;
-      if (!captured) return; // Auto-follow removed: the user's viewport is never moved.
+      if (!captured) return; // no pending action: the viewport is never moved.
       // Prepend repaint: put the user back on the exact candles they were
       // viewing (the captured times still resolve to the same candles —
       // prepends are strictly older and never re-time existing bars).
@@ -981,6 +1036,7 @@ function ViewportBridge({
 export function TradingChart({
   candles,
   warmupCandles = [],
+  historyBucketSec,
   gaps,
   tradeOverlays,
   liveTradeOverlays = [],
@@ -1045,6 +1101,20 @@ export function TradingChart({
   const prevFormingBarRef = useRef<RealtimeCandleMsg | null>(null);
 
   const bucketSec = resolutionToBucketSec(resolution);
+  /**
+   * SCOPE CONSISTENCY — the loaded history's grid vs. the active timeframe's.
+   *
+   * `resolution` flips the instant the selector is clicked, but `candles` only
+   * catches up when the matching history request resolves. While the two
+   * disagree the loaded bars belong to a DIFFERENT grid, and re-aligning them
+   * onto the incoming one fabricates duplicate timestamps (3m bars floor onto
+   * the 5m grid: 0,180,360… → 0,0,300…). The REST-derived datasets below are
+   * therefore frozen at their last scope-consistent value for that window: the
+   * chart keeps rendering the valid content it already shows (no empty-chart
+   * flash) and no mixed-scope row ever reaches `setData`. The freeze lifts in
+   * the same commit that installs the new dataset.
+   */
+  const historyScopeCurrent = isSameHistoryScope(historyBucketSec, bucketSec);
 
   // ── TRADE OVERLAY visibility (P3-B) ──────────────────────────────────────
   // Only trades whose normalized MT5 symbol maps to the CURRENT instrument's
@@ -1216,7 +1286,17 @@ export function TradingChart({
   // `formingForMerges` memo (withholding the forming candle only once its
   // bucket closed) is gone — the forming candle never merges at all.
 
+  // Frozen last scope-consistent display dataset. A memo cache, not state: the
+  // value is idempotent for a given input, so a StrictMode double-invoke is
+  // harmless. Holds the previous timeframe's VALID bars across a switch.
+  const frozenDataRef = useRef<Bar[] | null>(null);
+  /** Same freeze for the Pine/EMA/SMA bridge series (see `bridgeBars`). */
+  const frozenBridgeBarsRef = useRef<readonly Bar[] | null>(null);
+
   const data = useMemo<Bar[]>(() => {
+    // Mid-switch scope mismatch: keep the last valid dataset rather than
+    // re-gridding foreign-scope bars onto the incoming timeframe's grid.
+    if (!historyScopeCurrent) return frozenDataRef.current ?? liveCandles;
     if (candles.length > 0) {
       // section 5: REST history + closed-live ledger. Every setData/history replacement
       // REAPPLIES the ledger, so a bucket that has already closed live can never
@@ -1256,15 +1336,18 @@ export function TradingChart({
       // The forming candle stays painted exclusively by LiveBarBridge via
       // `controller.updateBar()` + the bus-"data" re-apply, so its absence from
       // `data` is intentional: history + closed-live ledger only.
-      return mergeBridgeBars(
+      const merged = mergeBridgeBars(
         candles.map((c) => asBar({ ...c, ts: alignToBucketStart(c.ts, bucketSec) })),
         closedLiveLedger,
         null, // forming candle painted live, never via setData
         bucketSec,
       ).sort((a, b) => a.ts - b.ts);
+      frozenDataRef.current = merged;
+      return merged;
     }
+    frozenDataRef.current = liveCandles;
     return liveCandles;
-  }, [candles, bucketSec, liveCandles, closedLiveLedger]);
+  }, [candles, bucketSec, liveCandles, closedLiveLedger, historyScopeCurrent]);
 
   // ── Closed-live-bucket ledger SCOPE (FIX 2: persistence across reloads) ──────
   // The ledger is scoped to the INSTRUMENT + TIMEFRAME — NOT to the history
@@ -1420,6 +1503,21 @@ export function TradingChart({
   // cursor-scoped indicator inputs, candle-pick entry and a clean exit.
   const [chartApi, setChartApi] = useState<ChartViewApi | null>(null);
 
+  // ── Drawing tools (CandleKit) ──────────────────────────────────────────────
+  // ONE DrawingController per chart scope (instrument epic × timeframe) — the
+  // exact boundaries AURA treats as chart identity elsewhere (ledger, replay,
+  // history). storageKey stays null: CandleKit's localStorage KV is DISABLED
+  // because AURA's authoritative store is PostgreSQL, reached through
+  // DrawingLayer → /api/drawings. A fresh controller per scope guarantees
+  // engines (and their listeners) never leak drawings across scopes, and the
+  // per-scope DrawingLayer restores the persisted set before the toolbar
+  // appears. `instrumentEpic`/`resolution` are both required: an unknown scope
+  // keeps drawing off entirely rather than writing to a global bucket.
+  const drawingController = useMemo(
+    () => (instrumentEpic && resolution ? new DrawingController({ storageKey: null }) : null),
+    [instrumentEpic, resolution],
+  );
+
   /** LWC chart handle (controller.getChart()), memoized for the ScrollToLatest button. */
   const lwcChart = useMemo<ChartApi | null>(() => {
     if (!chartApi?.controller) return null;
@@ -1517,6 +1615,45 @@ export function TradingChart({
   // prepend repaint; ViewportBridge restores it on the bus-"data" event that
   // follows the setData — the user stays visually anchored on the same candles.
   const preserveRangeRef = useRef<{ from: number; to: number } | null>(null);
+  /**
+   * LIVE-EDGE ANCHOR across a genuine timeframe/scope change.
+   *
+   * A bucket-width change is the ONLY thing that ever raises this flag. It is
+   * evaluated HERE — before the replacement dataset is applied — because at this
+   * point the series, `candles` and the PREVIOUS `bucketSec` still describe
+   * exactly what the user is looking at (the mid-switch dataset is frozen, see
+   * `historyScopeCurrent`). Inferring the pre-switch state after `setData` would
+   * be meaningless: the bar layout has already been replaced by then.
+   *
+   * One-shot by construction: `ViewportBridge` clears the flag BEFORE calling
+   * `scrollToRealTime()`, and live ticks / rollovers repaint through
+   * `updateBar` — they never emit the bus-"data" event this rides on. So the
+   * removed continuous auto-follow stays removed.
+   */
+  const pendingLiveEdgeAnchorRef = useRef(false);
+  const prevBucketSecRef = useRef(bucketSec);
+  useEffect(() => {
+    const previousBucketSec = prevBucketSecRef.current;
+    if (previousBucketSec === bucketSec) return; // not a scope change
+    prevBucketSecRef.current = bucketSec;
+    let range: { from: number; to: number } | null = null;
+    try {
+      const chart = chartApi?.controller.getChart() as unknown as ChartApi | null;
+      range = chart?.timeScale().getVisibleRange() ?? null;
+    } catch {
+      /* older LWC / no chart yet — treat as "not at the edge" (no re-anchor) */
+    }
+    const last = candles[candles.length - 1];
+    const latestSec = last ? Math.floor(last.ts / 1000) : 0;
+    // Time-based, using the PREVIOUS scope's grid — never a logical bar index,
+    // which is meaningless across two different (non-nesting) candle grids.
+    pendingLiveEdgeAnchorRef.current = planScopeChangeAnchor({
+      previousBucketSec,
+      nextBucketSec: bucketSec,
+      range,
+      latestSec,
+    });
+  }, [bucketSec, chartApi, candles]);
   const [nearEdge, setNearEdge] = useState(false);
   const handleLoadMore = useCallback(() => {
     if (session || !onLoadMoreHistory || !data.length) return;
@@ -1694,6 +1831,12 @@ export function TradingChart({
       // slice (warmup would be future data relative to the replay cutoff).
       return visibleBars;
     }
+    // Mid-switch scope mismatch: the indicator bridges must keep reading the
+    // previous timeframe's VALID series. Re-gridding foreign-scope bars here
+    // would feed Pine/EMA/SMA duplicate timestamps on the wrong grid for the
+    // duration of the switch. Replay above still wins (its slice is its own
+    // frozen, scope-consistent dataset).
+    if (!historyScopeCurrent) return frozenBridgeBarsRef.current ?? liveCandles;
     // Live: prepend warmup candles (real-only, strictly older than visible)
     // so Pine/EMA/SMA have sufficient lookback from the first visible bar.
     // warmupCandles are NOT in `candles` (the display state) — they exist only
@@ -1727,7 +1870,7 @@ export function TradingChart({
     // sorts its history + ledger merge; this re-asserts the same contract for
     // the whole bridge array — a no-op in the already-ordered case, and the
     // merge already returned a fresh array, so no state is mutated.
-    return mergeBridgeBars(
+    const bridged = mergeBridgeBars(
       candles.length > 0
         ? [...warmupBars, ...candles.map((c) => asBar({ ...c, ts: alignToBucketStart(c.ts, bucketSec) }))]
         : liveCandles,
@@ -1735,7 +1878,9 @@ export function TradingChart({
       null, // forming candle painted live, never part of bridge bars
       bucketSec,
     ).sort((a, b) => a.ts - b.ts);
-  }, [session, candles, bucketSec, liveCandles, closedLiveLedger, visibleBars, warmupCandles]);
+    frozenBridgeBarsRef.current = bridged;
+    return bridged;
+  }, [session, candles, bucketSec, liveCandles, closedLiveLedger, visibleBars, warmupCandles, historyScopeCurrent]);
 
   // ── Unified-header reporting (the old bottom `.chart-footer` is gone) ──────
   // Quote candle (crosshair ?? replay cursor ?? latest) is pushed UP to App,
@@ -1771,6 +1916,15 @@ export function TradingChart({
           showVolume={false}
           autoFit={false}
           chartOptions={manilaChartOptions}
+          drawing={drawingController}
+          // NATIVE measurement ruler (CandleKit 0.1.0 MeasurementController).
+          // A STABLE `true` is deliberate: ChartView's plugin effect is keyed on
+          // this prop's identity, and a changing identity would tear the DRAWING
+          // controller down too (its cleanup removes `drawingCtl`), silently
+          // killing DrawingEngine's listeners — i.e. drawing persistence.
+          // Enabling it arms the library's own Shift-drag handler; every value
+          // (%, points, bars, elapsed time) is computed by computeMeasurement().
+          measurement={true}
           onReady={setChartApi}
         >
           <LiveBarBridge
@@ -1785,6 +1939,7 @@ export function TradingChart({
             bucketSec={bucketSec}
             onCrosshairCandle={setCrosshairCandle}
             preserveRangeRef={preserveRangeRef}
+            pendingLiveEdgeAnchorRef={pendingLiveEdgeAnchorRef}
             onNearHistoryEdge={setNearEdge}
           />
           {/* Visual price-scale inversion ("Invert Scale") — native LWC
@@ -1882,6 +2037,22 @@ export function TradingChart({
             calendar={marketCalendar}
             formingBucketSec={liveCandle?.time ?? null}
           />
+          {/* NATIVE measurement readout — CandleKit's own MeasurementOverlay,
+              fed by MeasurementController.subscribe(). It renders NOTHING until
+              a Shift-drag measurement exists and is pointer-transparent
+              (.ck-measure-layer { pointer-events: none }), so it can never eat
+              a click meant for the chart or the drawing tools. */}
+          <MeasurementOverlay />
+          {/* DRAWING TOOLS — CandleKit's engine + AURA's persistence bridge.
+              Restores the scope's persisted drawings before the toolbar shows,
+              coalesces every change into one debounced save, hides the tools
+              while a Replay session owns the chart. */}
+          <DrawingLayer
+            controller={drawingController}
+            epic={instrumentEpic}
+            timeframe={resolution}
+            replayActive={session !== null}
+          />
         </ChartView>
         {/* Upper-left indicator legend — compact TradingView-style control
             overlay for currently-active indicators. Lives inside the chart
@@ -1946,6 +2117,21 @@ export function TradingChart({
           replayActive={session !== null}
           resetKey={`${replaySymbol ?? ""}|${bucketSec}|${session ? "replay" : "live"}`}
           rightInset={priceScaleInset}
+          overlays={listBuiltInOverlayControls(emaSettings, smaSettings)}
+          onToggleOverlay={(id, visible) => {
+            // The SAME action the chart legend's eye uses — one source of truth.
+            const patch = setIndicatorVisible(emaSettings, smaSettings, pineIndicators ?? [], id, visible);
+            if (patch.ema) onEmaChange?.(patch.ema);
+            if (patch.sma && smaSettings) onSmaChange?.(patch.sma);
+          }}
+          onAddOverlay={(id) => {
+            // Re-add a REMOVED built-in overlay, restoring its preserved
+            // period/color/width. This only affects the chart overlay — the
+            // panel's own structural calculation is untouched.
+            const patch = setIndicatorActive(emaSettings, smaSettings, true, id);
+            if (patch.ema) onEmaChange?.(patch.ema);
+            if (patch.sma && smaSettings) onSmaChange?.(patch.sma);
+          }}
         />
         {/* Replay dock — CandleKit's native ReplayControls + Exit, floating
             bottom-center INSIDE the plot area so the top header chrome and the

@@ -60,6 +60,29 @@ export function isNewerLivePositionVisual(
   return frame.sequence > prior.sequence;
 }
 
+/**
+ * May this frame advance the ACCEPTED ordering token AND be applied?
+ *
+ * The authority gate runs FIRST, deliberately. `livePositionVisualOrderRef`
+ * documents itself as "the last ACCEPTED ordering token for its key" — so a
+ * frame that is thrown away because its ticket is not yet in the authoritative
+ * set must not advance it. The ordering of these two checks is the whole point:
+ * a burst of `tradeVisual` frames arrives WHILE `accountState` is still
+ * catching up with a freshly opened position, and if those frames consume the
+ * token, the pill stays pinned to the snapshot value instead of following
+ * price once the ticket becomes authoritative.
+ */
+export function shouldAcceptLivePositionVisual(
+  previous: LivePositionVisualOrderMap,
+  frame: Pick<LivePositionVisualFrame, "accountId" | "ticket" | "sourceId" | "sourceSequence" | "sequence">,
+  authoritativeKeys: ReadonlySet<string>,
+): boolean {
+  const key = livePositionVisualKey(frame.accountId, frame.ticket);
+  if (!key) return false;
+  if (!authoritativeKeys.has(key)) return false;
+  return isNewerLivePositionVisual(previous, frame);
+}
+
 /** Validate an untrusted relay frame before it can enter React state. */
 export function parseLivePositionVisualFrame(raw: unknown): LivePositionVisualFrame | null {
   if (!raw || typeof raw !== "object") return null;

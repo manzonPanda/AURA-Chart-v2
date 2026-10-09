@@ -8,12 +8,42 @@
  * tokens beyond its own PushSubscription.
  */
 
+import { TIMEFRAMES } from "../config/chart.ts";
+
 /** Shared types mirror the backend model in backend/src/emaAlert/emaAlertConfig.ts. */
 
 const API_BASE = "/api";
 
 export type ConfirmationCandles = 1 | 2 | 3 | 4 | 5;
-export type EmaAlertTimeframe = "MINUTE_1" | "MINUTE_3";
+
+/**
+ * Alert timeframes the engine runs a detector for — mirrors the backend's
+ * `EMA_ALERT_TIMEFRAMES` (backend/src/emaAlert/emaAlertConfig.ts), which is
+ * the runtime source of truth.
+ *
+ * DATA-DRIVEN BY DESIGN: the settings UI maps over this list to render its
+ * checkboxes and labels. It used to hardcode two JSX blocks plus a
+ * `Record<"MINUTE_1" | "MINUTE_3", string>` label map, so a third timeframe
+ * needed three hand-edits and was silently missing until it was added. Adding
+ * a row here (and in the backend list) is now the whole change.
+ */
+export const EMA_ALERT_TIMEFRAMES = ["MINUTE_1", "MINUTE_3", "MINUTE_5"] as const;
+
+export type EmaAlertTimeframe = (typeof EMA_ALERT_TIMEFRAMES)[number];
+
+/** True when `key` is a timeframe the alert engine can detect on. */
+export function isAlertTimeframe(key: string): key is EmaAlertTimeframe {
+  return (EMA_ALERT_TIMEFRAMES as readonly string[]).includes(key);
+}
+
+/**
+ * Display label for an alert timeframe ("1m" / "3m" / "5m"), derived from the
+ * chart's canonical TIMEFRAMES table. Returns the raw key for anything unknown
+ * so the UI can never render an `undefined` label.
+ */
+export function alertTimeframeLabel(timeframe: string): string {
+  return TIMEFRAMES.find((tf) => tf.key === timeframe)?.label ?? timeframe;
+}
 
 export interface EmaAlertSettings {
   enabled: boolean;
@@ -59,7 +89,9 @@ export type EmaAlertStateMsg = EmaAlertState;
 
 export const DEFAULT_EMA_ALERT_SETTINGS: EmaAlertSettings = {
   enabled: false,
-  alertTimeframes: ["MINUTE_1", "MINUTE_3"],
+  // Every supported detector is on by default — mirrors the backend's
+  // DEFAULT_ALERT_TIMEFRAMES, so a fresh install never silently omits 5m.
+  alertTimeframes: [...EMA_ALERT_TIMEFRAMES],
   confirmationCandles: 2,
   bullishEnabled: true,
   bearishEnabled: true,

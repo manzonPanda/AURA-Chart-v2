@@ -6,8 +6,28 @@
  * instrument guard, the clean-switch stream reset) lives here; the React hook
  * (useRealtimeStream in ./realtime.ts) consumes these pure pieces.
  */
+import { TIMEFRAMES } from "../config/chart.ts";
 import { type EmaAlertStateMsg } from "./emaAlertApi.ts";
 import type { LivePositionVisualFrame } from "./livePositionVisual.ts";
+
+/**
+ * TIMEFRAME → BUCKET WIDTH — the single frontend source of truth.
+ *
+ * Derived from the canonical `config/chart.ts` TIMEFRAMES[] table (which
+ * mirrors the backend registry, `backend/src/streaming/timeframes.ts` — the
+ * real authority). It used to be hand-written HERE *and* in config/chart.ts
+ * with a `?? 180` fallback; adding a timeframe to only one copy failed
+ * SILENTLY, with every bucketSec consumer (gaps, whitespace, Pine warmup,
+ * trade-overlay geometry) computing on the 3m grid while the chart drew the
+ * new timeframe. Deriving from TIMEFRAMES makes that impossible.
+ *
+ * Declared here (the framework-free layer) rather than in services/realtime.ts
+ * because the Node test runner cannot import that module (React + auth), and
+ * the non-React consumers need the same map.
+ */
+const RESOLUTION_BUCKET_SEC: Readonly<Record<string, number>> = Object.freeze(
+  Object.fromEntries(TIMEFRAMES.map((tf) => [tf.key, tf.bucketSec])),
+);
 
 /** Connection states reported by the BACKEND (mirrors IG Lightstreamer). */
 export type RealtimeStatus = "CONNECTING" | "LIVE" | "RECONNECTING" | "DISCONNECTED";
@@ -165,6 +185,53 @@ export function mergeClosedFrame(
   return next.length > MAX_CLOSED_LEDGER
     ? next.slice(next.length - MAX_CLOSED_LEDGER)
     : next;
+}
+
+/**
+ * Timeframe → bucket width, derived from the SINGLE canonical frontend table
+ * (`config/chart.ts` TIMEFRAMES[]) — which mirrors the backend registry
+ * (`backend/src/streaming/timeframes.ts`, the real source of truth).
+ *
+ * WHY THIS LIVES HERE: this module is framework-free and importable by the
+ * Node test runner, whereas services/realtime.ts imports React + the auth
+ * module. The bucket map is used by every non-React consumer too (gap regions,
+ * whitespace rows, Pine warmup, trade-overlay geometry), so it belongs in the
+ * the pure layer.
+ *
+ * WHY THE DUPLICATE MAP IS GONE: it used to be hand-written here AND in
+ * config/chart.ts, with a `?? 180` fallback. Adding a timeframe to only one
+ * copy failed SILENTLY — the chart drew the new timeframe's candles while all
+ * bucketSec consumers computed on the 3m grid. Deriving from TIMEFRAMES makes
+ * that class of bug impossible: there is only one list to add a row to.
+ */
+
+/**
+ * Bucket width used when a timeframe key is NOT in the table. Preserves the
+ * historic `?? 180` behaviour exactly, so no existing rendering path changes —
+ * but callers can now detect the situation with {@link isSupportedTimeFrame}
+ * instead of silently inheriting 3m geometry.
+ */
+export const DEFAULT_BUCKET_SEC = 180;
+
+/** True when `key` is a timeframe the chart actually supports. */
+export function isSupportedTimeFrame(key: string): key is (typeof TIMEFRAMES)[number]["key"] {
+  return Object.prototype.hasOwnProperty.call(RESOLUTION_BUCKET_SEC, key);
+}
+
+/** Bucket width in seconds for a timeframe key (default: {@link DEFAULT_BUCKET_SEC}). */
+export function resolutionToBucketSec(resolution: string): number {
+  return RESOLUTION_BUCKET_SEC[resolution] ?? DEFAULT_BUCKET_SEC;
+}
+
+/**
+ * Floor an epoch-ms timestamp to the start of its timeframe bucket (epoch ms).
+ *
+ * Pure epoch grid — no timezone, no session alignment; the same rule as the
+ * backend `bucketOf()`. Re-exported from services/realtime.ts.
+ */
+export function alignToBucketStart(tsMs: number, bucketSec: number): number {
+  const bucketMs = bucketSec * 1000;
+  return Math.floor(tsMs / bucketMs) * bucketMs;
 }
 
 /** Build the backend relay URL for ONE instrument + timeframe. */

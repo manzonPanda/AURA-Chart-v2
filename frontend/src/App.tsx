@@ -31,6 +31,7 @@ import {
   DEFAULT_TEMPLATE_ID,
   type ChartSettings,
 } from "./config/chartSettings";
+import { loadTimeFrame, saveTimeFrame } from "./services/timeframeSelection";
 import {
   activeTemplate,
   BUILT_IN_DEFAULT_TEMPLATE,
@@ -77,9 +78,9 @@ import {
   applyLivePositionVisual,
   applyLivePositionVisualsToOverlays,
   clearLivePositionVisuals,
-  isNewerLivePositionVisual,
   livePositionVisualKey,
   reconcileLivePositionVisuals,
+  shouldAcceptLivePositionVisual,
   type LivePositionVisualMap,
   type LivePositionVisualOrderMap,
 } from "./services/livePositionVisual";
@@ -228,6 +229,24 @@ function computeActiveWarmupBars(
 
 export default function App() {
   const [candles, setCandles] = useState<Candle[]>([]);
+  /**
+   * The bucket width the CURRENTLY LOADED `candles` belong to — the scope they
+   * were fetched on.
+   *
+   * A timeframe click flips `timeframe` synchronously, but `candles` keeps
+   * holding the PREVIOUS timeframe's bars until the new history request
+   * resolves. Without this tag the chart would re-align those old bars onto the
+   * INCOMING grid (3m bars floor onto the 5m grid: 0,180,360… → 0,0,300…),
+   * emitting duplicate timestamps and a malformed interim series.
+   *
+   * It is written in the SAME commit as `setCandles` (React batches them), so
+   * the loaded dataset and its grid can never disagree. `loading` is NOT used
+   * for this: it flips one render LATER than `timeframe`, so the malformed
+   * frame would already have been painted.
+   */
+  const [historyBucketSec, setHistoryBucketSec] = useState(() =>
+    resolutionToBucketSec(DEFAULT_TIME_FRAME),
+  );
   // Warmup candles — real candles fetched BEFORE the visible horizon so Pine
   // indicators have sufficient lookback on the first visible bar. These are
   // fed to Pine (via TradingChart's bridgeBars) but are NOT displayed, NOT part
@@ -386,7 +405,19 @@ export default function App() {
   const [health, setHealth] = useState<{ configured: boolean; environment: string } | null>(null);
   const [streamEpoch, setStreamEpoch] = useState(0);
   const [nowTick, setNowTick] = useState(() => Date.now());
-  const [timeframe, setTimeframe] = useState<TimeFrameKey>(DEFAULT_TIME_FRAME);
+  // Selected timeframe — restored from `aura.timeframe.v1` on FIRST render via a
+  // lazy initializer, so the stored preference is already in effect for the
+  // initial history load and the initial WS `res=` subscription. A hydration
+  // effect would paint one timeframe and immediately refetch another. A missing,
+  // corrupted or unregistered stored value falls back to the default through
+  // `sanitizeTimeFrame` (services/timeframeSelection.ts).
+  const [timeframe, setTimeframe] = useState<TimeFrameKey>(loadTimeFrame);
+  // Every selector click persists the pick, so a refresh restores the same
+  // timeframe. Storage failures are swallowed by `saveTimeFrame`.
+  const selectTimeframe = useCallback((key: TimeFrameKey): void => {
+    saveTimeFrame(key);
+    setTimeframe(key);
+  }, []);
   // Chart display settings (e.g. Invert Scale) — localStorage-persisted in
   // App, frontend-only presentation state that never touches candle data.
   // ⚠ TEMP debug hook (?debugInvert): `?invert=1|0` seeds/forces the setting so
@@ -824,7 +855,22 @@ export default function App() {
     const selected = String(selectedAccountId ?? "").trim();
     if (!selected || visual.accountId !== selected) return;
     const key = livePositionVisualKey(visual.accountId, visual.ticket);
-    if (!key || !isNewerLivePositionVisual(livePositionVisualOrderRef.current, visual)) return;
+    // AUTHORITY GATE BEFORE THE ORDERING TOKEN. `livePositionVisualOrderRef`
+    // means "the newest frame we actually accepted", so a frame that is about to
+    // be discarded for an unknown ticket must not advance it. The burst that
+    // accompanies a live ENTRY lands while `accountState` is still catching up;
+    // consuming the token there pinned the pill to the snapshot value and it
+    // stopped following price.
+    if (
+      !key ||
+      !shouldAcceptLivePositionVisual(
+        livePositionVisualOrderRef.current,
+        visual,
+        authoritativeLivePositionKeys,
+      )
+    ) {
+      return;
+    }
     const nextOrder = new Map(livePositionVisualOrderRef.current);
     nextOrder.set(key, {
       sourceId: visual.sourceId,
@@ -832,7 +878,6 @@ export default function App() {
       sequence: visual.sequence,
     });
     livePositionVisualOrderRef.current = nextOrder;
-    if (!authoritativeLivePositionKeys.has(key)) return;
     setLivePositionVisuals((previous) => applyLivePositionVisual(
       previous,
       visual,
@@ -1328,6 +1373,10 @@ export default function App() {
       // this freshly-loaded dataset.
       moreHistorySeq.current++;
       setHistoryEpic(finalizedEpic);
+      // The grid tag is committed WITH the dataset (React batches both), so the
+      // chart never receives bars interpreted under a bucket width they were not
+      // fetched on. See the `historyBucketSec` declaration.
+      setHistoryBucketSec(resolutionToBucketSec(timeframe));
       setCandles(loaded);
       // Revalidate gaps against the freshly loaded dataset — a backfill/reconcile
       // that filled a previously-missing bucket must erase its gap here (Rule C)
@@ -1654,7 +1703,7 @@ export default function App() {
                 aria-selected={timeframe === tf.key}
                 className={`tf-btn ${timeframe === tf.key ? "active" : ""}`}
                 title={`${tf.label} timeframe (${tf.bucketSec}s buckets)`}
-                onClick={() => setTimeframe(tf.key)}
+                onClick={() => selectTimeframe(tf.key)}
               >
                 {tf.label}
               </button>
@@ -1799,6 +1848,7 @@ export default function App() {
       <main className="chart-area">
         <TradingChart
           candles={candles}
+          historyBucketSec={historyBucketSec}
           warmupCandles={warmupCandles}
           gaps={gaps}
           tradeOverlays={tradeOverlays}

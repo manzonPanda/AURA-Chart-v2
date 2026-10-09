@@ -18,6 +18,16 @@ import { DEFAULT_PRICE_SOURCE, isPriceSource, type PriceSource } from "../servic
 
 export interface SmaConfig {
   enabled: boolean;
+  /**
+   * Whether this overlay is part of the ACTIVE indicator list — mirrors
+   * `EmaConfig.active` exactly:
+   *   - `active: false` → removed from the legend entirely, with its
+   *     period / color / width / source preserved for re-adding.
+   *   - `active: true, enabled: false` → listed but hidden (the eye toggle).
+   *
+   * A missing stored value defaults to `true`, so existing users are unchanged.
+   */
+  active: boolean;
   /** Positive integer — constrained to the SMA_PERIODS menu. */
   period: number;
   /** Price series the SMA averages (Pine `input.source` analogue). */
@@ -52,6 +62,7 @@ const HEX_COLOR_RE = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
  */
 export const DEFAULT_SMA_SETTINGS: SmaSettings = {
   enabled: true,
+  active: true,
   period: 20,
   source: DEFAULT_PRICE_SOURCE,
   color: "#a78bfa",
@@ -68,6 +79,7 @@ function sanitizeSmaConfig(raw: unknown, fallback: SmaConfig): SmaConfig {
   if (!raw || typeof raw !== "object") return out;
   const r = raw as Record<string, unknown>;
   if (typeof r.enabled === "boolean") out.enabled = r.enabled;
+  if (typeof r.active === "boolean") out.active = r.active;
   if (isValidSmaPeriod(r.period)) out.period = r.period;
   if (isPriceSource(r.source)) out.source = r.source;
   if (typeof r.color === "string") {

@@ -33,6 +33,7 @@ import {
 } from "./pineSeries.ts";
 import type {
   PineBar,
+  PineLinePoint,
   PineLiveCandle,
   PinePoint,
   PineScriptSpec,
@@ -41,6 +42,21 @@ import type {
 } from "./pineEngineTypes.ts";
 import type { PineEngineStage, PineScriptEngine, PineVisualRun } from "./pineEngineTypes.ts";
 import { PINE_INDICATORS } from "./pineIndicators.ts";
+
+/**
+ * Line visual rows → the plain `PinePoint[]` the legacy registry/series
+ * contract promises (EMA 9/20 shim, `computeSeries`).
+ *
+ * A row WITHOUT a value is a `plot.style_linebr` WHITESPACE marker, not a
+ * point — it carries no price, so it is dropped here. Those consumers have no
+ * concept of a break, and their contract is `PinePoint[]` (value required).
+ * Returns the ORIGINAL array identity when there is nothing to drop, so the
+ * overwhelmingly common non-linebr path allocates nothing.
+ */
+function toPlainPoints(data: readonly PineLinePoint[]): PinePoint[] {
+  if (!data.some((p) => typeof p.value !== "number")) return data as PinePoint[];
+  return data.filter((p): p is PinePoint & { value: number } => typeof p.value === "number");
+}
 
 /** Per-script request serialization — newest request wins, never interleaved. */
 function runSerial<T>(chain: Map<string, Promise<unknown>>, key: string, fn: () => Promise<T>): Promise<T> {
@@ -211,7 +227,7 @@ export class PinerPineEngine implements PineScriptEngine {
         outMap.set(v.key, {
           key: v.key,
           title: v.title,
-          points: v.data,
+          points: toPlainPoints(v.data),
           ...(v.lineWidth ? { linewidth: v.lineWidth } : {}),
           ...(v.color ? { color: v.color } : {}),
         });
@@ -254,10 +270,10 @@ export class PinerPineEngine implements PineScriptEngine {
       for (const v of out.visuals) {
         if (v.type !== "line" || v.stepLine) continue;
         if (v.title === wanted || v.key === wanted) {
-          chosen = { key: v.key, title: v.title, points: v.data };
+          chosen = { key: v.key, title: v.title, points: toPlainPoints(v.data) };
           break;
         }
-        chosen ??= { key: v.key, title: v.title, points: v.data };
+        chosen ??= { key: v.key, title: v.title, points: toPlainPoints(v.data) };
       }
       const pts = chosen?.points ?? [];
       this.resultCache.set(key, pts);

@@ -1,5 +1,6 @@
 import { Hono, type Context } from "hono";
 import type { CandleBackend, PersistedCandle } from "../db/candleStore.js";
+import { MAX_CANDLE_STORE_ROWS } from "../db/candleStore.js";
 import { instrumentMetaFor, type InstrumentMeta } from "../market/instruments.js";
 import { detectGaps, deriveGapIntervals } from "../market/gapDetector.js";
 import { RECONCILE_GRACE_FALLBACK_SEC } from "../backfill/reconcile.js";
@@ -88,6 +89,39 @@ export function filterSettledGaps<T extends { start: number }>(gaps: readonly T[
   return gaps.filter((g) => Number.isFinite(g.start) && Math.floor(g.start / 1000) < settledToSec);
 }
 
+/**
+ * How many underlying 1m rows a DERIVED timeframe needs in order to return
+ * `limit` complete macro candles: `limit * minutes`, plus `minutes` of head-room
+ * so the still-forming newest bucket can be dropped (it belongs to the live WS
+ * overlay, not to history), plus 1 for the cursor boundary.
+ */
+export function derivedOneMinRequest(limit: number, minutes: number): number {
+  return limit * minutes + minutes + 1;
+}
+
+/**
+ * The largest macro-candle limit whose underlying 1m fetch the store can
+ * actually satisfy.
+ *
+ * The store silently clamps any single `loadCandles` to
+ * {@link MAX_CANDLE_STORE_ROWS}. A derived request that exceeded it would come
+ * back short, the `raw.length >= requested1m` test would report `hasMore:
+ * false`, and the chart would stop paginating early — silently, with every
+ * returned candle still correct. MINUTE_5 at limit=2000 needed 10006 rows
+ * against a 10000 cap.
+ *
+ * Clamping here keeps the request honest: it is always a row count the store can
+ * really return, so `hasMore` keeps its original meaning. A no-op for the
+ * timeframes that already fit (1m, and 3m up to limit 3331).
+ *
+ * DERIVED timeframes only — the 1m stored-row path passes `limit` straight
+ * through to the store and is deliberately untouched.
+ */
+export function effectiveDerivedLimit(limit: number, minutes: number): number {
+  const maxLimit = Math.floor((MAX_CANDLE_STORE_ROWS - minutes - 1) / minutes);
+  return Math.min(limit, maxLimit);
+}
+
 /** Load chart-history candles for a timeframe WITHOUT touching IG historical
  *  REST (see the header above). Never reads a stored 3m series.
  *
@@ -124,7 +158,13 @@ async function loadTimeframeCandles(
   // N complete macro candles require N*minutes closed 1m rows; fetch a little
   // head-room so the newest (still-forming) macro bucket can be dropped — it
   // belongs to the live WS overlay, not to history.
-  const requested1m = limit * minutes + minutes + 1;
+  //
+  // The effective limit is clamped so that request can never exceed what the
+  // store will actually return (MAX_CANDLE_STORE_ROWS). Without this a MINUTE_5
+  // request at limit=2000 asks for 10006 rows, the store returns 10000, and the
+  // `hasMore` comparison below would wrongly conclude there is no older history.
+  // Clamping is a no-op for 1m and for 3m at ordinary limits.
+  const requested1m = derivedOneMinRequest(effectiveDerivedLimit(limit, minutes), minutes);
   const raw = await store.loadCandles(epic, CANONICAL_TIMEFRAME, requested1m, beforeSec);
   const oneMin: Candle[] = raw.map((r) => ({
     ts: r.time * 1000,

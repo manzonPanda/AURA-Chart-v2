@@ -33,6 +33,14 @@ export const TIMEFRAME_BUCKET_SEC: Readonly<Record<string, number>> = {
    * persisted, never requested from IG separately, never stored as a series.
    */
   MINUTE_3: 180,
+  /**
+   * Same contract as MINUTE_3: history derived on read from the persisted 1m
+   * rows + an in-memory live overlay. Never persisted, never a stored series.
+   * The 300 s grid is a pure epoch floor, so 5m buckets align to
+   * :00/:05/:10/… and deliberately do NOT nest with the 3m grid — every
+   * timeframe derives from the same 1m rows independently.
+   */
+  MINUTE_5: 300,
 };
 
 /** The canonical persisted timeframe — the ONLY one written to ohlc_candles. */

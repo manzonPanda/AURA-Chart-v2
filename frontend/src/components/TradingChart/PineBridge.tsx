@@ -73,6 +73,12 @@ type DataEntry = {
   series: ISeriesApi<"Line"> | ISeriesApi<"Histogram"> | ISeriesApi<"Area">;
   kind: "line" | "histogram" | "area";
   stepLine: boolean;
+  /**
+   * Pine `plot.style_linebr`. Tracked like `stepLine` so a script edit that
+   * flips the style re-creates the entry instead of reusing one whose cached
+   * `painted` shape guard was built for the other data shape.
+   */
+  breakOnNa: boolean;
   /** Painted-shape guard: setData (shape change) vs update (forming tick). */
   painted: { count: number; firstTs: number; lastTs: number } | null;
 };
@@ -307,9 +313,16 @@ export function PineBridge({
 
   // ── creation helpers ───────────────────────────────────────────────────────
 
-  const toLineData = (p: { ts: number; value: number; color?: string }, stripColor = false) => ({
+  const toLineData = (
+    p: { ts: number; value?: number; color?: string },
+    stripColor = false,
+  ) => ({
     time: (p.ts / 1000) as UTCTimestamp,
-    value: p.value,
+    // NO value => a pure WHITESPACE row ({ time } only). That is LWC's native
+    // line-break mechanism: nothing is drawn across the bar, so the points
+    // either side are NEVER joined — exactly Pine's `plot.style_linebr`.
+    // Non-linebr plots emit no such rows, so their payload is unchanged.
+    ...(typeof p.value === "number" ? { value: p.value } : {}),
     // A uniform color override replaces per-bar script colors entirely.
     ...(!stripColor && p.color ? { color: p.color } : {}),
   });
@@ -407,6 +420,7 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
           !entry ||
           entry.kind !== v.type ||
           (v.type === "line" && entry.stepLine !== v.stepLine) ||
+          (v.type === "line" && entry.breakOnNa !== (v.breakOnNa ?? false)) ||
           styleChanged
         ) {
           if (entry) {
@@ -442,10 +456,10 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
                 },
                 st.paneIndex,
               );
-              entry = { series: s, kind: "line", stepLine: v.stepLine, painted: null };
+              entry = { series: s, kind: "line", stepLine: v.stepLine, breakOnNa: v.breakOnNa ?? false, painted: null };
             } else if (v.type === "histogram") {
               const s = chart.addSeries(HistogramSeries, { ...base, color }, st.paneIndex);
-              entry = { series: s, kind: "histogram", stepLine: false, painted: null };
+              entry = { series: s, kind: "histogram", stepLine: false, breakOnNa: false, painted: null };
             } else {
               const s = chart.addSeries(
                 AreaSeries,
@@ -458,7 +472,7 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
                 },
                 st.paneIndex,
               );
-              entry = { series: s, kind: "area", stepLine: false, painted: null };
+              entry = { series: s, kind: "area", stepLine: false, breakOnNa: false, painted: null };
             }
             st.data.set(ident, entry);
           } catch {

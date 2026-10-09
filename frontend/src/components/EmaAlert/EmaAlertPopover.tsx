@@ -5,6 +5,7 @@
  * single dependency direction (Control → Popover, no cycle).
  */
 import type { ConfirmationCandles, EmaAlertSettings, EmaAlertState, EmaAlertTimeframe, EmaAlertUnitState } from "../../services/emaAlertApi";
+import { EMA_ALERT_TIMEFRAMES, alertTimeframeLabel } from "../../services/emaAlertApi";
 import type { SessionDisplay } from "../../services/sessionTimes";
 import type { PushAvailability } from "../../services/pushClient";
 
@@ -45,14 +46,15 @@ export function EmaAlertPopover(props: {
   onTestPush: () => void;
 }) {
   const { state, settings, timeframe, unitState, saving, session, pushAvailability, pushSubscribed, pushWorking, pushMessage } = props;
-    const tf = timeframe as "MINUTE_1" | "MINUTE_3";
-  const timeframeLabel: Record<"MINUTE_1" | "MINUTE_3", string> = { MINUTE_1: "1m", MINUTE_3: "3m" };
-  const toggleTimeframe = (tf: "MINUTE_1" | "MINUTE_3", checked: boolean): void => {
-    const cur: string[] = settings?.alertTimeframes ?? [];
-        const next: string[] = checked
+  // Labels + the selectable list are DATA-DRIVEN from the canonical tables
+  // (emaAlertApi.EMA_ALERT_TIMEFRAMES / alertTimeframeLabel), so adding a
+  // timeframe no longer means hand-editing JSX and a Record<union, string>.
+  const toggleTimeframe = (tf: EmaAlertTimeframe, checked: boolean): void => {
+    const cur: EmaAlertTimeframe[] = settings?.alertTimeframes ?? [];
+    const next: EmaAlertTimeframe[] = checked
       ? Array.from(new Set([...cur, tf]))
       : cur.filter((t) => t !== tf);
-    props.onSettingsChange({ alertTimeframes: next as EmaAlertTimeframe[] });
+    props.onSettingsChange({ alertTimeframes: next });
   };
   return (
     <div className="ema-alert-pop" role="dialog" aria-label="EMA Alert settings">
@@ -69,29 +71,22 @@ export function EmaAlertPopover(props: {
       <label className="ema-row">
         <span>Timeframes</span>
         <div className="ema-dir">
-          <label>
-            <input
-              type="checkbox"
-              checked={settings?.alertTimeframes?.includes("MINUTE_1") ?? false}
-              disabled={saving || !settings}
-                            onChange={(e) => toggleTimeframe("MINUTE_1", e.target.checked)}
-            />
-            1m
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={settings?.alertTimeframes?.includes("MINUTE_3") ?? false}
-              disabled={saving || !settings}
-                            onChange={(e) => toggleTimeframe("MINUTE_3", e.target.checked)}
-            />
-            3m
-          </label>
+          {EMA_ALERT_TIMEFRAMES.map((key) => (
+            <label key={key}>
+              <input
+                type="checkbox"
+                checked={settings?.alertTimeframes?.includes(key) ?? false}
+                disabled={saving || !settings}
+                onChange={(e) => toggleTimeframe(key, e.target.checked)}
+              />
+              {alertTimeframeLabel(key)}
+            </label>
+          ))}
         </div>
       </label>
 
       <div className={`ema-status ${unitState?.pending ? "pending" : ""}`}>{emaAlertStatusText(unitState)}</div>
-      <div className="ema-note">Listening on: {timeframeLabel[tf] ?? timeframe}</div>
+      <div className="ema-note">Listening on: {alertTimeframeLabel(timeframe)}</div>
       {state && state.enabled && !state.sessionOpenNow && (
         <div className="ema-note">Outside the New York session — no notifications are generated.</div>
       )}

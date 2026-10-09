@@ -53,7 +53,9 @@ import type { PineCandle } from "./pineSeries.ts";
 // contracts shared with the engine boundary module (pineEngineTypes.ts) —
 // type-only, erased at build time, so the worker bundle stays engine-only.
 import type {
+  PineLinePoint,
   PineMarkerPoint,
+  PinePoint,
   PineRuntimeDiagnostics,
   PineSymbolMeta,
   PineVisual,
@@ -199,29 +201,59 @@ export async function pinerRunVisuals(args: {
       if (uniform === undefined) uniform = c;
       else if (uniform !== c) dynamic = true;
     }
-    const points: { ts: number; value: number; color?: string }[] = [];
+    // Style is resolved BEFORE the rows so `style_linebr` can preserve its na
+    // bars. Piner 0.13.0 encodes Pine `na` as `NaN` in `data[]` (probe:
+    // tests/probe-linebr.mjs) — indistinguishable from a sentinel value, which
+    // is why every style historically DROPPED them and the gap silently closed.
+    const style = typeof opts.style === "string" ? opts.style : "line";
+    const breaksOnNa = style === "linebr";
+    // `points` = today's behaviour for EVERY current style (na dropped, so a
+    // gap collapses). `breaks` additionally keeps each na bar as a value-less
+    // WHITESPACE row and is used ONLY by style_linebr. Building both keeps the
+    // other five styles provably unchanged.
+    const points: PinePoint[] = [];
+    const breaks: PineLinePoint[] = [];
+    let valued = 0;
     for (let i = 0; i < p.data.length && i < klines.length; i++) {
       const v = p.data[i];
+      const c = colors[i];
+      const perBarColor = dynamic && typeof c === "string" && c.length > 0 ? c : undefined;
       // Warmup na rows AND sentinel-magnitude values (±1e10-class) are both
       // dropped here — see PINE_VALUE_SANITY_LIMIT for the autoscale rationale.
-      if (typeof v !== "number" || !Number.isFinite(v) || Math.abs(v) > PINE_VALUE_SANITY_LIMIT) continue;
-      const c = colors[i];
-      if (dynamic && typeof c === "string" && c.length > 0) points.push({ ts: tsAt(i), value: v, color: c });
-      else points.push({ ts: tsAt(i), value: v });
+      if (typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= PINE_VALUE_SANITY_LIMIT) {
+        const row: PinePoint = { ts: tsAt(i), value: v, ...(perBarColor ? { color: perBarColor } : {}) };
+        points.push(row);
+        breaks.push(row);
+        valued += 1;
+        continue;
+      }
+      if (breaksOnNa) {
+        // Pine `plot.style_linebr`: KEEP the bar as a value-less WHITESPACE
+        // row. Lightweight Charts renders no line across it, so bar i-1 is
+        // never connected to bar i+1 — the real Pine line-break semantics.
+        breaks.push({ ts: tsAt(i), ...(perBarColor ? { color: perBarColor } : {}) });
+      }
     }
-    if (points.length === 0) continue; // warmup-only plot — nothing to draw
+    if (valued === 0) continue; // warmup-only / all-na plot — nothing to draw
     const lineWidth =
       typeof opts.linewidth === "number" && Number.isInteger(opts.linewidth)
         ? Math.max(1, Math.min(4, opts.linewidth))
         : undefined;
     const color = dynamic ? undefined : uniform;
-    const style = typeof opts.style === "string" ? opts.style : "line";
     // Keys follow the title-keyed contract (key = plot title, so
     // persisted plotMeta reconciles across runs); untitled → stable plot:N.
     const plotTitle = typeof p.title === "string" && p.title.length > 0 ? p.title : `plot:${p.id}`;
     const key = plotTitle;
     if (style === "stepline") {
       visuals.push({ type: "line", key, title: plotTitle, ...(color ? { color } : {}), ...(lineWidth ? { lineWidth } : {}), stepLine: true, data: points });
+    } else if (breaksOnNa) {
+      // Pine `plot.style_linebr` — a plain LWC line whose na bars are REAL
+      // whitespace rows, so the renderer breaks the line instead of joining
+      // across the gap. Deliberately NOT folded into the `style` arm below:
+      // aliasing it to style_line would silence the diagnostic while
+      // producing visually incorrect Pine behaviour. Everything else about the
+      // plot (key/title/color/lineWidth/visibility/offset) is untouched.
+      visuals.push({ type: "line", key, title: plotTitle, ...(color ? { color } : {}), ...(lineWidth ? { lineWidth } : {}), stepLine: false, breakOnNa: true, data: breaks });
     } else if (style === "histogram" || style === "columns") {
       visuals.push({ type: "histogram", key, title: plotTitle, ...(color ? { color } : {}), data: points });
     } else if (style === "area") {

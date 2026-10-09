@@ -30,21 +30,14 @@ export { buildRealtimeWsUrl, buildTradeAuthFrame, initialStream, isFrameForInstr
 // message shape mirrors the REST state exactly (single source of truth).
 export type { EmaAlertStateMsg, EmaAlertUnitState } from "./emaAlertApi.js";
 
-/** Mirrors the backend RESOLUTION_BUCKET_SEC map (single source of truth is the server). */
-const RESOLUTION_BUCKET_SEC: Record<string, number> = {
-  MINUTE_1: 60,
-  MINUTE_3: 180,
-};
-
-export function resolutionToBucketSec(resolution: string): number {
-  return RESOLUTION_BUCKET_SEC[resolution] ?? 180;
-}
-
-/** Floor an epoch-ms timestamp to the start of its timeframe bucket (epoch ms). */
-export function alignToBucketStart(tsMs: number, bucketSec: number): number {
-  const bucketMs = bucketSec * 1000;
-  return Math.floor(tsMs / bucketMs) * bucketMs;
-}
+// Timeframe → bucket width now lives in realtimeCore.ts, derived from the
+// canonical config/chart.ts TIMEFRAMES[] table. The hand-maintained
+// RESOLUTION_BUCKET_SEC map that used to sit here (with its `?? 180` fallback)
+// is GONE: two copies could drift, and a timeframe added to only one of them
+// failed silently — the chart drew the new timeframe while every bucketSec
+// consumer kept computing on the 3m grid. Re-exported here so existing
+// importers of ./realtime are unchanged.
+export { resolutionToBucketSec, isSupportedTimeFrame, DEFAULT_BUCKET_SEC, alignToBucketStart } from "./realtimeCore.js";
 
 /**
  * Opens the backend realtime relay (`/ws`, proxied by Vite). The browser never

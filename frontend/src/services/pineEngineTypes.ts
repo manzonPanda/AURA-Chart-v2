@@ -43,6 +43,22 @@ export interface PinePoint {
   color?: string;
 }
 
+/**
+ * One point of a LINE visual. `value` is OPTIONAL: a row WITHOUT one is a
+ * WHITESPACE row — Lightweight Charts' native line-break marker, and the
+ * faithful representation of Pine's `plot.style_linebr` (the points either
+ * side of it are never connected).
+ *
+ * Every other plot style keeps emitting rows that ALWAYS carry a value, so
+ * `PinePoint` stays the exact type for histogram/area/marker data.
+ */
+export interface PineLinePoint {
+  ts: number;
+  /** Absent ⇒ whitespace: no line is drawn across this bar. */
+  value?: number;
+  color?: string;
+}
+
 /** One extracted plot series (imported-indicator path). */
 export interface PineSeries {
   /** `ctx.plots` key (the plot title, or "#N" for untitled plots). */
@@ -93,7 +109,15 @@ export type PineVisual =
       lineWidth?: number;
       /** Stepped rendering (LWC `LineType.WithSteps`). */
       stepLine: boolean;
-      data: PinePoint[];
+      /**
+       * Pine `plot.style_linebr` — the line BREAKS across na bars. When true,
+       * `data` carries a value-less WHITESPACE row for every na bar, which
+       * Lightweight Charts renders as a genuine break (it never joins the
+       * points either side). This is NOT an alias of `style_line`: the break
+       * is the entire semantic difference.
+       */
+      breakOnNa?: boolean;
+      data: PineLinePoint[];
     }
   | { type: "histogram"; key: string; title: string; color?: string; data: PinePoint[] }
   | { type: "area"; key: string; title: string; color?: string; lineWidth?: number; data: PinePoint[] }

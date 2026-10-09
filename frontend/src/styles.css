@@ -574,7 +574,14 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   pointer-events: none;
 }
 .ma-structure-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.ma-structure-title { color: var(--accent); font-size: 0.6rem; font-weight: 800; letter-spacing: 0.12em; }
+.ma-structure-title {
+  color: var(--accent); font-size: 0.6rem; font-weight: 800; letter-spacing: 0.12em;
+  /* The user types the panel name in their own casing ("AURA MA Structure");
+     the UPPERCASE look stays a pure presentation transform here, so the stored
+     value is never rewritten. */
+  text-transform: uppercase;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
 /* Badge + eye share the header's right slot (the row keeps its space-between
    baseline, so the title never shifts). */
 .ma-structure-head-right { display: inline-flex; align-items: center; gap: 7px; flex: none; }
@@ -652,6 +659,100 @@ button:focus-visible, select:focus-visible, input:focus-visible {
 }
 .ma-structure-restore:hover .ma-structure-restore-label,
 .ma-structure-restore:focus-visible .ma-structure-restore-label { color: var(--accent); }
+
+/* ── MA Structure panel settings popover ───────────────────
+   A small panel-local editor (title + the panel's own structural periods).
+   Opens INSIDE the panel under its header, so it can never overlap the price
+   axis or the scroll-to-latest control. `pointer-events: auto` is required
+   because the panel container is `none`. Period inputs reuse the chart's EMA /
+   SMA bounds; nothing here reads or writes chart indicator state. */
+.ma-structure-settings {
+  position: absolute; top: 100%; right: 0; z-index: 6;
+  display: flex; flex-direction: column; gap: 7px;
+  margin-top: 6px; padding: 10px 11px 10px;
+  width: 236px;
+  background: rgba(9, 13, 20, 0.97);
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+  cursor: default;
+  font-variant-numeric: tabular-nums;
+}
+.ma-structure-settings-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ma-structure-settings-title { color: var(--accent); font-size: 0.6rem; font-weight: 800; letter-spacing: 0.12em; }
+.ma-structure-settings-x {
+  width: 18px; height: 18px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: 3px;
+  background: transparent; color: var(--muted); cursor: pointer; line-height: 1;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.ma-structure-settings-x:hover,
+.ma-structure-settings-x:focus-visible { color: var(--accent); background: var(--accent-soft); outline: none; }
+.ma-structure-settings-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ma-structure-settings-label { color: var(--muted); font-size: 0.64rem; font-weight: 700; letter-spacing: 0.06em; }
+.ma-structure-settings-input {
+  width: 88px; padding: 4px 6px;
+  color: var(--text); background: rgba(4, 9, 15, 0.55);
+  border: 1px solid var(--border); border-radius: 5px;
+  font-size: 0.72rem;
+}
+.ma-structure-settings-input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ma-structure-settings-note { margin: 1px 0 0; color: var(--muted); font-size: 0.56rem; line-height: 1.4; opacity: 0.8; }
+.ma-structure-settings-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 2px; }
+.ma-structure-settings-btn {
+  padding: 4px 11px;
+  color: var(--muted); background: transparent;
+  border: 1px solid var(--border); border-radius: 5px;
+  font-size: 0.66rem; font-weight: 700; letter-spacing: 0.06em; cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.ma-structure-settings-btn:hover,
+.ma-structure-settings-btn:focus-visible { color: var(--text); border-color: var(--border-strong); outline: none; }
+.ma-structure-settings-btn.is-primary { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.ma-structure-settings-btn.is-primary:hover,
+.ma-structure-settings-btn.is-primary:focus-visible { background: rgba(71, 199, 255, 0.2); }
+/* Overlays block — hide / re-add the chart's built-in EMA + SMA lines from the
+   same popover. Rows are quiet; the eye reuses the header toggle's language. */
+.ma-structure-settings-group {
+  margin-top: 3px; padding-top: 7px;
+  border-top: 1px solid var(--border);
+  color: var(--muted); font-size: 0.55rem; font-weight: 800; letter-spacing: 0.12em;
+}
+.ma-structure-overlay-row {
+  display: flex; align-items: center; gap: 7px; min-height: 20px;
+}
+.ma-structure-overlay-row[data-active=""] { opacity: 1; }
+.ma-structure-overlay-swatch { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.ma-structure-overlay-name {
+  flex: 1; min-width: 0; color: var(--text); font-size: 0.66rem; font-weight: 700;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ma-structure-overlay-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 18px; padding: 0;
+  border: 1px solid transparent; border-radius: 3px;
+  background: transparent; color: var(--muted); cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.ma-structure-overlay-btn svg { display: block; }
+.ma-structure-overlay-btn:hover:not(:disabled),
+.ma-structure-overlay-btn:focus-visible:not(:disabled) {
+  color: var(--accent); border-color: var(--border-strong); background: var(--accent-soft); outline: none;
+}
+.ma-structure-overlay-btn:disabled,
+.ma-structure-overlay-add:disabled { opacity: 0.4; cursor: default; }
+.ma-structure-overlay-add {
+  padding: 2px 7px;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: transparent; color: var(--muted);
+  font-size: 0.58rem; font-weight: 700; letter-spacing: 0.04em; cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.ma-structure-overlay-add:hover:not(:disabled),
+.ma-structure-overlay-add:focus-visible:not(:disabled) {
+  color: var(--accent); border-color: var(--accent); background: var(--accent-soft); outline: none;
+}
 .ma-structure-sub { margin-top: 2px; color: var(--muted); font-size: 0.6rem; letter-spacing: 0.07em; }
 .ma-structure-section { margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--border); }
 .ma-structure-kicker { color: var(--muted); font-size: 0.55rem; font-weight: 800; letter-spacing: 0.12em; }
@@ -933,6 +1034,111 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   .replay-dock-exit {
     padding: 0 9px;
   }
+}
+
+/* ── Drawing tools (CandleKit DrawingToolbar + AURA chrome) ─────────────────
+   Bottom-left overlay INSIDE the plot area (.chart-canvas-wrap is the
+   positioning context). Bottom-left — not the library default top-left —
+   because the upper-left corner belongs to the indicator legend
+   (.active-indicators) and the history-edge pill. The wrapper only
+   positions: pointer-events stay off it so chart pan/drag/crosshair pass
+   through everywhere the children don't cover. CandleKit's own button skin
+   (.ck-toolbar-btn, themed via the --ck-* palette above) is reused unchanged;
+   the library's absolute .ck-toolbar layout is swapped for our row through
+   `display: contents`. */
+.drawing-layer {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 16px);
+  flex-wrap: wrap;
+  pointer-events: none;
+}
+.drawing-layer > * { pointer-events: auto; }
+
+.drawing-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--ck-bg);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+}
+/* Melt CandleKit's toolbar root into our row — our className replaces the
+   library's `.ck-toolbar` selector, so its absolute top-left rule never
+   applies. */
+.drawing-toolbar-ck { display: contents; }
+
+/* Cursor/Select — AURA chrome next to CandleKit's tools; identical skin so
+   the row reads as one control strip. */
+.drawing-tool-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: var(--ck-fg);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.drawing-tool-btn:hover { background: rgba(127, 127, 127, 0.14); }
+.drawing-tool-btn.is-active {
+  background: var(--ck-accent);
+  color: var(--ck-accent-fg);
+}
+.drawing-tool-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.drawing-tool-btn:disabled:hover { background: transparent; }
+
+/* Hairline between the three DRAWING tools and the three ACTIONS, so the strip
+   reads as "pick a tool" | "edit what's there" without a second toolbar. */
+.drawing-toolbar-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 4px;
+  background: var(--border);
+}
+
+/* Sync chip — sits beside the toolbar (or alone while loading / on error). */
+.drawing-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 0.72rem;
+  color: var(--muted);
+  background: var(--ck-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  backdrop-filter: blur(6px);
+  white-space: nowrap;
+}
+.drawing-status--ok {
+  color: var(--up);
+  border-color: rgba(53, 208, 178, 0.4);
+}
+.drawing-status--error {
+  color: var(--down);
+  border-color: rgba(255, 107, 114, 0.45);
+  background: rgba(255, 107, 114, 0.08);
+  cursor: pointer;
+}
+.drawing-status--error:hover,
+.drawing-status--error:focus-visible {
+  border-color: var(--down);
+  outline: none;
 }
 
 /* Upper-left indicator legend — compact TradingView-style overlay inside the

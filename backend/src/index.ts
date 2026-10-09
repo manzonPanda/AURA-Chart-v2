@@ -21,6 +21,8 @@ import {
   uiInstruments,
 } from "./market/instruments.js";
 import { createCandlesDbRouter } from "./routes/candlesDb.js";
+import { createChartDrawingsRouter } from "./routes/chartDrawings.js";
+import { PgChartDrawingStore } from "./db/chartDrawingStore.js";
 import { CapitalReconciler, supportsReconciliation } from "./backfill/reconcile.js";
 import { createEmaAlertRouter } from "./routes/emaAlert.js";
 import { createInstrumentsRouter } from "./routes/instruments.js";
@@ -222,6 +224,23 @@ app.route("/api", createEmaAlertRouter(emaAlertEngine));
 const dashboardClient = new DashboardClient(config.dashboard.baseUrl, config.dashboard.timeoutMs);
 app.route("/api", createAuthRouter(dashboardClient));
 app.route("/api", createTradingRouter(dashboardClient));
+
+// ── Chart drawing persistence (TradingView-style, per-user) ───────────────────
+// GET/PUT/DELETE /api/drawings — CandleKit drawing tools backed by PostgreSQL
+// `public.chart_drawings`, scoped to (session user, instrument × timeframe).
+// The store is the SAME pgPool as the candles (null when PostgreSQL is
+// unconfigured → 503); the session is validated by the SAME DashboardClient
+// (the single authentication authority), so the owning user id is always
+// resolved server-side — the browser never touches the database and can never
+// name another user's scope.
+app.route(
+  "/api",
+  createChartDrawingsRouter({
+    store: pgPool ? new PgChartDrawingStore(pgPool) : null,
+    instruments: uiInstruments(config),
+    sessions: dashboardClient,
+  }),
+);
 
 // P3-C — LIVE MT5 TRADE EVENT RELAY. Server-side subscriber to the existing
 // aura-backend SSE bus (GET /api/events, user-filtered) per VALIDATED session;

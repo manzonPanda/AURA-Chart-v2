@@ -248,7 +248,7 @@ test("wiring: hidden state UNMOUNTS the contents instead of making them transpar
   const guard = PANEL.indexOf("if (!visible) {");
   const collapsed = PANEL.indexOf("ma-structure--collapsed");
   const snapshot = PANEL.indexOf("const { snapshot } = evaluation;");
-  const title = PANEL.indexOf("MOVING AVERAGE STRUCTURE");
+  const title = PANEL.indexOf('className="ma-structure-title"');
   assert.notEqual(guard, -1, "missing the hidden early return");
   assert.ok(guard < collapsed, "collapsed shell must be inside the hidden branch");
   assert.ok(collapsed < snapshot, "hidden branch returns before the panel body is rendered");
@@ -263,7 +263,7 @@ test("wiring: hidden state UNMOUNTS the contents instead of making them transpar
 test("wiring: visibility state is NOT an input to the MA derivation", () => {
   // The useMemo computing EMA9/EMA20/SMA20 keeps its original deps, so a toggle
   // cannot trigger an indicator recalculation.
-  assert.match(PANEL, /\}, \[bars, liveCandle, bucketSec\]\);/);
+  assert.match(PANEL, /\}, \[bars, liveCandle, bucketSec, periodsKey, settings\.title\]\);/);
   // Only the persist effect observes `visible`.
   assert.match(PANEL, /saveMaStructureVisible\(visible\);[\s\S]{0,40}\}, \[visible\]\);/);
 });
@@ -285,22 +285,34 @@ test("7a. the toggle path can reach no chart, data, timeframe or websocket API",
   for (const token of forbidden) {
     assert.ok(!PANEL.includes(token), `panel must not touch ${token}`);
   }
-  // The click handlers do exactly two things: keep the chart from seeing the
-  // press, and flip visibility.
+  // The VISIBILITY click handlers (hide + restore) do exactly two things: keep
+  // the chart from seeing the press, and flip visibility. The settings gear is
+  // a third handler and is asserted separately below.
   const handlers = PANEL.match(/onClick=\{\(e\) => \{[\s\S]*?\}\}/g) ?? [];
-  assert.equal(handlers.length, 2, "expected exactly the hide + restore click handlers");
-  for (const h of handlers) {
+  assert.equal(handlers.length, 3, "expected the hide + restore + settings handlers");
+  const visHandlers = handlers.filter((h) => h.includes("toggleVisible();"));
+  assert.equal(visHandlers.length, 2, "exactly two handlers flip visibility");
+  for (const h of visHandlers) {
     assert.match(h, /e\.stopPropagation\(\);/);
     assert.match(h, /toggleVisible\(\);/);
   }
 });
 
-test("7b. no preventDefault — mouse and touch activation stay native", () => {
-  assert.ok(!PANEL.includes("preventDefault"), "panel must never preventDefault");
-  // Both controls stop the press reaching the chart (a pointerdown would
-  // otherwise pan the plot or start a replay candle-pick).
-  assert.equal((PANEL.match(/onPointerDown=\{stopChartPointer\}/g) ?? []).length, 2);
-  assert.equal((PANEL.match(/onDoubleClick=\{stopChartPointer\}/g) ?? []).length, 2);
+test("7b. no preventDefault on the controls — mouse and touch activation stay native", () => {
+  // No pointer/click handler may preventDefault. The ONE legitimate use is the
+  // settings <form onSubmit>, which stops a page navigation on Enter.
+  const pointerHandlers = PANEL.match(/on(?:Click|PointerDown|DoubleClick)=\{[\s\S]*?\}\}?/g) ?? [];
+  for (const h of pointerHandlers) {
+    assert.ok(!h.includes("preventDefault"), `a control handler must not preventDefault: ${h.slice(0, 60)}`);
+  }
+  const preventDefaults = PANEL.match(/preventDefault\(\)/g) ?? [];
+  assert.equal(preventDefaults.length, 1, "exactly one preventDefault — the form submit guard");
+  assert.match(PANEL, /const submit = \(e: FormEvent\): void => \{\s*e\.preventDefault\(\);/);
+  // All three BUTTONS (hide, restore, settings gear) — plus the settings form —
+  // stop the press reaching the chart; a pointerdown would otherwise pan the
+  // plot or start a replay candle-pick.
+  assert.equal((PANEL.match(/onPointerDown=\{stopChartPointer\}/g) ?? []).length, 4);
+  assert.equal((PANEL.match(/onDoubleClick=\{stopChartPointer\}/g) ?? []).length, 4);
   assert.match(PANEL, /const stopChartPointer = \(e: \{ stopPropagation: \(\) => void \}\): void => \{/);
 });
 
@@ -326,9 +338,15 @@ test("7c. TradingChart wiring is unchanged — same props, no visibility prop, n
 test("7d. the panel still exposes the same live region and unchanged content", () => {
   assert.match(PANEL, /role="status"/);
   assert.match(PANEL, /aria-label="Moving Average Structure"/);
-  for (const text of ["CURRENT STRUCTURE", "LIVE RELATIONSHIPS", "EMA9 • EMA20 • SMA20", "SLOPE"]) {
+  // The subtitle is now derived from the panel's configured periods, so the
+  // literal "EMA9 • EMA20 • SMA20" must be GONE (it would pin the panel to 9/20/20).
+  for (const text of ["CURRENT STRUCTURE", "LIVE RELATIONSHIPS", "SLOPE"]) {
     assert.ok(PANEL.includes(text), `panel content changed — missing ${text}`);
   }
+  assert.ok(!PANEL.includes("EMA9 • EMA20 • SMA20"), "the subtitle must follow the settings");
+  assert.match(PANEL, /maSeriesLabel\("fast", settings\)/);
+  assert.match(PANEL, /maSeriesLabel\("slow", settings\)/);
+  assert.match(PANEL, /maSeriesLabel\("sma", settings\)/);
 });
 
 test("7e. the toggle reuses the chart's EXISTING eye iconography, out of the a11y tree", () => {
@@ -400,6 +418,9 @@ test("visual: the header groups badge + eye without redesigning the panel", () =
   assert.match(cssRule(".ma-structure-head-right"), /flex: none;/);
   assert.match(
     CSS,
-    /\.ma-structure-title \{ color: var\(--accent\); font-size: 0\.6rem; font-weight: 800; letter-spacing: 0\.12em; \}/,
+    /\.ma-structure-title \{[^}]*color: var\(--accent\); font-size: 0\.6rem; font-weight: 800; letter-spacing: 0\.12em;/,
   );
+  // The uppercase look is a CSS transform — the STORED title keeps the user's
+  // own casing.
+  assert.match(cssRule(".ma-structure-title"), /text-transform: uppercase;/);
 });

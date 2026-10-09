@@ -143,3 +143,57 @@ export function shouldShowScrollToLatest(opts: {
 }): boolean {
   return !!opts.hasCandles && !opts.replayActive && !opts.atEdge;
 }
+
+// ── Scope consistency across a timeframe switch ───────────────────────────────
+
+/**
+ * True when the loaded REST history belongs to the ACTIVE timeframe's grid.
+ *
+ * A timeframe click flips the selected timeframe synchronously, but the loaded
+ * candles only catch up when the matching history request resolves. While the
+ * two disagree the bars belong to a different grid, and re-aligning them onto
+ * the incoming one fabricates duplicate timestamps (3m bars floor onto the 5m
+ * grid: 0,180,360… → 0,0,300…).
+ *
+ * `undefined` means "not tagged" and is read as "same scope" — the historic
+ * single-timeframe behavior, where the dataset always matches the selector.
+ */
+export function isSameHistoryScope(
+  historyBucketSec: number | undefined,
+  activeBucketSec: number,
+): boolean {
+  return typeof historyBucketSec !== "number" || historyBucketSec === activeBucketSec;
+}
+
+// ── Live-edge anchoring across a scope change ─────────────────────────────────
+
+/**
+ * Whether a timeframe/scope change must re-anchor the viewport to the live edge.
+ *
+ * `range` and `latestSec` MUST describe the PRE-switch viewport: capture them
+ * before the replacement dataset is applied, because after `setData` the bar
+ * layout no longer reflects what the user was looking at.
+ *
+ * Returns false (no forced scroll) when:
+ *   - the bucket width did not actually change (not a scope change),
+ *   - there is no usable data to anchor to, or
+ *   - the user had deliberately scrolled back into history — they are left
+ *     exactly where they are rather than yanked to the live edge.
+ *
+ * Time-based throughout: no logical bar index is used, so it stays correct
+ * across two different, non-nesting candle grids (3m vs 5m).
+ */
+export function planScopeChangeAnchor(opts: {
+  /** Bucket width before the change. */
+  previousBucketSec: number;
+  /** Bucket width after the change. */
+  nextBucketSec: number;
+  /** Pre-switch LWC visible range (epoch seconds), or null when unavailable. */
+  range: { from: number; to: number } | null;
+  /** Epoch SECONDS of the newest candle of the pre-switch dataset. */
+  latestSec: number;
+}): boolean {
+  if (opts.previousBucketSec === opts.nextBucketSec) return false;
+  if (!Number.isFinite(opts.latestSec) || opts.latestSec <= 0) return false;
+  return isAtLatestEdge(opts.range, opts.latestSec, opts.previousBucketSec);
+}

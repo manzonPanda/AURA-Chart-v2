@@ -28,12 +28,14 @@ const SEC = (ms: number): number => Math.floor(ms / 1000);
 
 // ── closeMsOf: per-timeframe close instants (spec item 5) ──────────────────
 
-test("closeMsOf derives +60s for MINUTE_1 and +180s for MINUTE_3 (no hardcoded 60s)", () => {
+test("closeMsOf derives +60s for MINUTE_1, +180s for MINUTE_3 and +300s for MINUTE_5 (no hardcoded 60s)", () => {
   const bucket = SEC(UTC(2025, 1, 15, 14, 30));
   assert.equal(closeMsOf("MINUTE_1", bucket), (bucket + 60) * 1000);
   assert.equal(closeMsOf("MINUTE_3", bucket), (bucket + 180) * 1000);
-  // Unknown timeframe falls back to the canonical 1m width.
-  assert.equal(closeMsOf("MINUTE_5", bucket), (bucket + 60) * 1000);
+  // MINUTE_5 is a REGISTERED timeframe: it closes +300 s, not the 1m fallback.
+  assert.equal(closeMsOf("MINUTE_5", bucket), (bucket + 300) * 1000);
+  // A genuinely unknown timeframe still falls back to the canonical 1m width.
+  assert.equal(closeMsOf("MINUTE_15", bucket), (bucket + 60) * 1000);
 });
 
 // ── pipeline-level 3m state machine (same machine, 3m buckets) ─────────────

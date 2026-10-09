@@ -80,6 +80,29 @@ export type MaStructureState =
   | "BULLISH_HOLDING";
 
 /** The three tracked pairs, in fixed display order. */
+/**
+ * DISPLAY-ONLY overrides for the three structural series. The MA Structure
+ * panel lets the user configure its periods, so the rendered text must follow
+ * them ("EMA8 / EMA21 / SMA50") instead of the default identities.
+ *
+ * The identities themselves (`MaSeriesId` = "EMA9" | "EMA20" | "SMA20") are
+ * UNCHANGED — they are the stable internal keys for `TIE_PRIORITY`,
+ * `ORDERING_TO_STATE`, `MA_PAIR_KEYS` and the persisted `MaGapHistory`. Only
+ * the strings a human reads are remapped, so no classification, gap, trend or
+ * convergence math is affected.
+ */
+export interface MaSeriesLabels {
+  EMA9?: string;
+  EMA20?: string;
+  SMA20?: string;
+}
+
+/** The label a series renders under, falling back to its stable identity. */
+export function resolveSeriesLabel(id: MaSeriesId, labels?: MaSeriesLabels): string {
+  const raw = labels?.[id];
+  return typeof raw === "string" && raw.length > 0 ? raw : id;
+}
+
 export type MaPairKey = "EMA9_EMA20" | "EMA9_SMA20" | "EMA20_SMA20";
 
 /** Whether a pair's gap is closing, opening, or statistically unchanged. */
@@ -211,10 +234,13 @@ export function structureOrderLabel(
   ema20: number | null,
   sma20: number | null,
   eps: number = DEFAULT_STRUCTURE_EPSILON,
+  labels?: MaSeriesLabels,
 ): string | null {
   if (ema9 === null || ema20 === null || sma20 === null) return null;
   if (!isTripleFinite(ema9, ema20, sma20)) return null;
-  return resolveOrdering(ema9, ema20, sma20, eps).join(" > ");
+  return resolveOrdering(ema9, ema20, sma20, eps)
+    .map((id) => resolveSeriesLabel(id, labels))
+    .join(" > ");
 }
 
 export const STRUCTURE_CYCLE: readonly MaStructureState[] = [
@@ -535,8 +561,14 @@ export function emptyGapHistory(): MaGapHistory {
 /** One pair's live relationship (null fields = direction not established). */
 export interface PairRelationship {
   pair: MaPairKey;
-  firstLabel: MaSeriesId;
-  secondLabel: MaSeriesId;
+  /** Stable identity of the first series (unchanged — the gap-history key). */
+  firstId: MaSeriesId;
+  /** Stable identity of the second series. */
+  secondId: MaSeriesId;
+  /** Display text for `firstId` — follows the panel's configured periods. */
+  firstLabel: string;
+  /** Display text for `secondId`. */
+  secondLabel: string;
   /** first − second (points; sign = direction). */
   signedGap: number;
   /** |signedGap| — how close the pair is to crossing. */
@@ -586,6 +618,13 @@ export interface MaStructureInput extends MaTriple {
    * that only classify values: slopes read "--" and history is never seeded.
    */
   series?: MaSeriesInput;
+  /**
+   * Optional DISPLAY-ONLY label overrides (see `MaSeriesLabels`). Lets the
+   * panel render "EMA8 / EMA21 / SMA50" from its configured periods while every
+   * identity, key and calculation stays exactly as before. Omit ⇒ the default
+   * identities render ("EMA9" / "EMA20" / "SMA20").
+   */
+  labels?: MaSeriesLabels;
 }
 
 /**
@@ -622,12 +661,12 @@ const SERIES_VALUE: Record<MaSeriesId, (t: MaTriple) => number | null> = {
  * cannot corrupt the trend window.
  */
 export function evaluateMaStructure(input: MaStructureInput): MaStructureEvaluation {
-  const { ema9, ema20, sma20, ts, history, series } = input;
+  const { ema9, ema20, sma20, ts, history, series, labels } = input;
   const triple: MaTriple = { ema9, ema20, sma20 };
 
   const structure = classifyStructure(ema9, ema20, sma20);
   const structureMeta = structure !== null ? STRUCTURE_META[structure] : null;
-  const orderLabel = structureOrderLabel(ema9, ema20, sma20);
+  const orderLabel = structureOrderLabel(ema9, ema20, sma20, DEFAULT_STRUCTURE_EPSILON, labels);
 
   // Fresh (pristine) histories seed their closed-bucket gap windows from the
   // loaded series, so trend/convergence render immediately after history load
@@ -691,8 +730,10 @@ export function evaluateMaStructure(input: MaStructureInput): MaStructureEvaluat
       const meta = status !== null ? RELATIONSHIP_META[status] : null;
     return {
       pair: key,
-      firstLabel: first,
-      secondLabel: second,
+      firstId: first,
+      secondId: second,
+      firstLabel: resolveSeriesLabel(first, labels),
+      secondLabel: resolveSeriesLabel(second, labels),
       signedGap,
       distance,
       distanceDelta,

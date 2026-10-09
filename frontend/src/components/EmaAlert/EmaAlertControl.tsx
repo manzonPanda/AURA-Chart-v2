@@ -15,6 +15,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import type { EmaAlertSettings, EmaAlertState, EmaAlertUnitState } from "../../services/emaAlertApi";
+import { isAlertTimeframe } from "../../services/emaAlertApi";
 import { sessionDisplay } from "../../services/sessionTimes";
 import type { PushAvailability } from "../../services/pushClient";
 import { EmaAlertPopover, emaAlertStatusText } from "./EmaAlertPopover";
@@ -78,7 +79,11 @@ export function EmaAlertControl({
 
   const unitState: EmaAlertUnitState | null = state?.states?.[timeframe] ?? null;
   const enabled = settings?.enabled ?? state?.enabled ?? false;
-  const timeframeEnabled = settings?.alertTimeframes?.includes(timeframe as "MINUTE_1" | "MINUTE_3") ?? false;
+  // `isAlertTimeframe` narrows the string prop to the alert union — no cast to
+  // a hardcoded "MINUTE_1" | "MINUTE_3", which would have silently excluded 5m.
+  const timeframeEnabled = isAlertTimeframe(timeframe)
+    ? (settings?.alertTimeframes?.includes(timeframe) ?? false)
+    : false;
   const pending = unitState?.pending ?? null;
   const buttonClass = `ema-alert-btn ${enabled && timeframeEnabled ? (pending ? "pending" : "on") : "off"}`;
   const session = sessionDisplay(clock, settings?.sessionStart ?? "09:30", settings?.sessionEnd ?? "16:00");

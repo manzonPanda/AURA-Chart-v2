@@ -1,0 +1,1830 @@
+//@version=6
+indicator("A.U.R.A v2 | JakeJames", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=2500, max_bars_back=500)
+
+// ═══════════════════════════════════════════════════════
+// A.U.R.A v2 — Automated Ultimate Setup
+// Symbol: IG:DAX  (configurable)
+// Timeframe: 3-minute
+//
+// WORKFLOW:
+// EMA, EMA 2 + SMA overlays
+// ═══════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════
+// SETTINGS
+// ═══════════════════════════════════════════════════════
+var G_EMA = "EMA Settings"
+ema_length    = input.int(9, "EMA Length", minval=1, group=G_EMA)
+ema_src       = input.source(close, "EMA Source", group=G_EMA)
+ema_offset    = input.int(0, "EMA Offset", minval=-500, maxval=500, group=G_EMA, display=display.none)
+ema_color     = input.color(color.green, "EMA Color", group=G_EMA)
+
+var G_EMA2 = "EMA 2 Settings"
+ema2_length    = input.int(20, "EMA 2 Length", minval=1, group=G_EMA2)
+ema2_src       = input.source(close, "EMA 2 Source", group=G_EMA2)
+ema2_offset    = input.int(0, "EMA 2 Offset", minval=-500, maxval=500, group=G_EMA2, display=display.none)
+ema2_color     = input.color(color.red, "EMA 2 Color", group=G_EMA2)
+
+var G_SMA = "SMA Settings"
+sma_length    = input.int(20, "SMA Length", minval=1, group=G_SMA)
+sma_src       = input.source(close, "SMA Source", group=G_SMA)
+sma_offset    = input.int(0, "SMA Offset", minval=-500, maxval=500, group=G_SMA, display=display.none)
+sma_color     = input.color(color.blue, "SMA Color", group=G_SMA)
+
+// ═══════════════════════════════════════════════════════
+// EMA (Moving Average Exponential)
+// ═══════════════════════════════════════════════════════
+ema_out = ta.ema(ema_src, ema_length)
+plot(ema_out, title="EMA", color=ema_color, offset=ema_offset)
+
+// ═══════════════════════════════════════════════════════
+// EMA 2 (Second Moving Average Exponential)
+// ═══════════════════════════════════════════════════════
+ema2_out = ta.ema(ema2_src, ema2_length)
+plot(ema2_out, title="EMA 2", color=ema2_color, offset=ema2_offset)
+
+// ═══════════════════════════════════════════════════════
+// SMA (Simple Moving Average)
+// ═══════════════════════════════════════════════════════
+sma_out = ta.sma(sma_src, sma_length)
+plot(sma_out, title="SMA", color=sma_color, offset=sma_offset)
+
+// ═══════════════════════════════════════════════════════════════════════════╗
+// ║  INTEGRATED: ICT Killzones & Macros  (v1.3.1)                            ║
+// ║  Merged into A.U.R.A v2 — provides session time-based killzones and      ║
+// ║  macro windows with high/low tracking, next-window previews, and         ║
+// ║  opening-price lines. Uses its own timezone setting (default NY).        ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+//──────────────────────────────────────────────────────────────────────────────
+// Version & Changelog
+// v1.3.1  • Minor fixes and improvements. Added more opening prices with defaults.
+// v1.3.0  • Alerts: Macro/Killzone pre-start and range-cross (one-shot); dynamic runtime messages.
+// v1.1.3  • Feature 3: High/Low lines for current Macro/Killzone windows, with optional extension
+// v1.1.2  • Add a next killzone preview that works identicle to the next macro feature.
+// v1.1.0  • Update defaults: 5 Killzones, 8 Macros (all macros default gray).
+//         • No snap-to-killzone (kept removed).
+// v1.0.0  • Removed macro→killzone header snap; independent rendering.
+//──────────────────────────────────────────────────────────────────────────────
+ICT_VERSION = "v1.3.1"
+
+//#region Inputs
+group_general = "General (ICT KZ and Macro)"
+tzInput = input.string("America/New_York", "Timezone (IANA, DST-aware)", group = group_general, tooltip = "IANA zone used to interpret sessions (e.g., America/New_York).")
+sessionsToShow = input.int(20, "Sessions to show (per window)", group = group_general, minval = 1, maxval = 365, tooltip = "Keeps only the last N completed windows per Macro/Killzone.")
+
+//──────────────────────────────────────────────────────────────────────────────
+// Header (global) + Next previews
+//──────────────────────────────────────────────────────────────────────────────
+group_header = "Header (ICT KZ and Macro)"
+hdrHeightTicks   = input.int(40, "Header height (ticks)", minval = 1, maxval = 1000, group = group_header)
+hdrGapTicks      = input.int(15, "Header gap (ticks)",   minval = 0, maxval = 1000, group = group_header, tooltip = "Vertical gap between main box top and header.")
+hdrBorderWidthIn = input.float(0.0, "Header border width", minval = 0.0, maxval = 6.0, group = group_header, tooltip = "< 1 disables borders.")
+hdrBorderStyleIn = input.string("Solid", "Header border style", options = ["Solid","Dashed","Dotted"], group = group_header)
+hdrFillOpacity   = input.int(75, "Header fill opacity (0–100)", minval = 0, maxval = 100, group = group_header)
+hdrTextSize      = input.string("normal", "Header text size", options = ["tiny","small","normal","large"], group = group_header)
+hdrTextColor     = input.color(color.black, "Header text color", group = group_header)
+hdrBorderPx      = hdrBorderWidthIn < 1.0 ? 0 : int(math.round(hdrBorderWidthIn))
+
+//──────────────────────────────────────────────────────────────────────────────
+// Main box (global style) — used by Macros AND Killzones for the price-action box
+//──────────────────────────────────────────────────────────────────────────────
+group_macro = "Macro Box (ICT KZ and Macro)"
+macroFillOpacity   = input.int(85, "Box fill opacity (0–100)", minval = 0, maxval = 100, group = group_macro)
+macroBorderWidthIn = input.float(0.0, "Box border width", minval = 0.0, maxval = 6.0, group = group_macro, tooltip = "< 1 disables borders.")
+macroBorderStyleIn = input.string("Solid", "Box border style", options = ["Solid","Dashed","Dotted"], group = group_macro)
+macroBorderPx      = macroBorderWidthIn < 1.0 ? 0 : int(math.round(macroBorderWidthIn))
+
+//──────────────────────────────────────────────────────────────────────────────
+// High/Low Lines
+//──────────────────────────────────────────────────────────────────────────────
+group_hl = "High/Low Lines"
+showHL       = input.bool(true,  "Show High/Low Lines", group = group_hl)
+hlStyleIn    = input.string("Solid", "High/Low Lines Style", options = ["Solid","Dashed","Dotted"], group = group_hl)
+extendHL     = input.bool(true,  "Extend High/Low", group = group_hl, tooltip = "Extend after window ends until price crosses the level or the trading day rolls in the chosen timezone.")
+extendStyleIn= input.string("Solid", "Extend High/Low Style", options = ["Solid","Dashed","Dotted"], group = group_hl)
+extendAcrossDays = input.bool(true, "Extend across days", group = group_hl, tooltip = "If enabled, extended lines continue beyond day roll until price crosses.")
+extendWidth      = input.int(2, "Extend line width", minval = 1, maxval = 6, group = group_hl)
+showExtLabels    = input.bool(true, "Show ext lines labels", group = group_hl, tooltip = "Show small labels at the live end of unbroken extended lines. H: above, L: below. Hides automatically once price crosses or extension stops.")
+
+hlStyle      = hlStyleIn == "Dashed" ? line.style_dashed : hlStyleIn == "Dotted" ? line.style_dotted : line.style_solid
+extendStyle  = extendStyleIn == "Dashed" ? line.style_dashed : extendStyleIn == "Dotted" ? line.style_dotted : line.style_solid
+
+//──────────────────────────────────────────────────────────────────────────────
+// Opening Prices
+//──────────────────────────────────────────────────────────────────────────────
+group_op = "Opening Prices"
+opEnableT1 = input.bool(false,  "Time 1", group = group_op)
+opTime1    = input.string("03:00", "Time 1 (HH:MM)", group = group_op)
+opColorT1  = input.color(color.new(color.gray, 0),   "Time 1 Color", group = group_op)
+
+opEnableT2 = input.bool(false,  "Time 2", group = group_op)
+opTime2    = input.string("08:30", "Time 2 (HH:MM)", group = group_op)
+opColorT2  = input.color(color.new(color.gray, 0), "Time 2 Color", group = group_op)
+
+opEnableT3 = input.bool(false, "Time 3", group = group_op)
+opTime3    = input.string("11:30", "Time 3 (HH:MM)", group = group_op)
+opColorT3  = input.color(color.new(color.gray, 0), "Time 3 Color", group = group_op)
+
+opSession  = input.session("1600-1515", "Opening Prices Session", group = group_op, tooltip = "Lines only plot within this session and are removed when the session ends.")
+opStyleIn  = input.string("Dotted", "Opening Prices Style", options = ["Solid","Dashed","Dotted"], group = group_op)
+opStyle    = opStyleIn == "Dashed" ? line.style_dashed : opStyleIn == "Dotted" ? line.style_dotted : line.style_solid
+opWidth    = input.int(1, "Opening Prices Width", minval = 1, maxval = 6, group = group_op)
+opLblXFactor = input.float(4, "Label horizontal gap (bar fraction)", minval = 0.0, maxval = 5.0, step = 0.05, group = group_op, tooltip = "Multiply last bar duration to offset label to the right of line end.")
+opLblYTicks  = input.int(10, "Label vertical offset (ticks)", minval = -50, maxval = 50, group = group_op, tooltip = "Positive moves label down, negative up, in ticks from line level.")
+
+opShowMidnight   = input.bool(false, "Midnight", group = group_op, tooltip = "Plots a line at 00:00 price inside the session window.")
+opColorMidnight  = input.color(color.new(color.gray, 0), "Midnight Color", group = group_op)
+opShowNYOpen     = input.bool(true, "NY Open (09:30)", group = group_op, tooltip = "Plots a line at 09:30 New York time.")
+opColorNYOpen    = input.color(color.new(color.green, 0), "NY Open Color", group = group_op)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Previews — Next Macro/Killzone header toggles
+//──────────────────────────────────────────────────────────────────────────────
+group_previews = "Previews"
+showNextHeader   = input.bool(true, "Show next macro header", group = group_previews)
+showNextKZHeader = input.bool(true, "Show next killzone header", group = group_previews)
+
+// Opening Prices — state (single lines only)
+var line opT1 = na
+var line opT2 = na
+var line opT3 = na
+// Lightweight text labels at the right end
+var label opT1Lbl = na
+var label opT2Lbl = na
+var label opT3Lbl = na
+// Store line levels for quick y positioning
+var float opT1Y = na
+var float opT2Y = na
+var float opT3Y = na
+
+// Built-in lines: state
+var line  opMidnight   = na
+var line  opNYOpen     = na
+var label opMidnightLbl   = na
+var label opNYOpenLbl     = na
+var float opMidnightY   = na
+var float opNYOpenY     = na
+// Track session membership is no longer needed for built-ins; retain a flag if needed later
+var bool  opWasInSession = false
+// Track last opening-prices session start to purge lines on rollover even if no out-of-session bars
+var int   opPrevSessStart = na
+
+//──────────────────────────────────────────────────────────────────────────────
+// Macro inputs (Macro 1..8) — all default gray
+//──────────────────────────────────────────────────────────────────────────────
+group_m1 = "Macro 1"
+m1Label  = input.string("Macro", "Label", group = group_m1)
+m1Enable = input.bool(true, "Enable", group = group_m1)
+m1Sess   = input.session("0950-1010", "Session", group = group_m1)
+m1Fill   = input.color(color.black, "Fill", group = group_m1)
+
+group_m2 = "Macro 2"
+m2Label  = input.string("Macro", "Label", group = group_m2)
+m2Enable = input.bool(true, "Enable", group = group_m2)
+m2Sess   = input.session("1050-1110", "Session", group = group_m2)
+m2Fill   = input.color(color.black, "Fill", group = group_m2)
+
+group_m3 = "Macro 3"
+m3Label  = input.string("Macro", "Label", group = group_m3)
+m3Enable = input.bool(true, "Enable", group = group_m3)
+m3Sess   = input.session("1150-1210", "Session", group = group_m3)
+m3Fill   = input.color(color.black, "Fill", group = group_m3)
+
+group_m4 = "Macro 4"
+m4Label  = input.string("Macro", "Label", group = group_m4)
+m4Enable = input.bool(false, "Enable", group = group_m4)
+m4Sess   = input.session("0230-0300", "Session", group = group_m4)
+m4Fill   = input.color(color.black, "Fill", group = group_m4)
+
+group_m5 = "Macro 5"
+m5Label  = input.string("Macro", "Label", group = group_m5)
+m5Enable = input.bool(true, "Enable", group = group_m5)
+m5Sess   = input.session("1450-1510", "Session", group = group_m5)
+m5Fill   = input.color(color.black, "Fill", group = group_m5)
+
+group_m6 = "Macro 6"
+m6Label  = input.string("Macro", "Label", group = group_m6)
+m6Enable = input.bool(true, "Enable", group = group_m6)
+m6Sess   = input.session("0850-0910", "Session", group = group_m6)
+m6Fill   = input.color(color.black, "Fill", group = group_m6)
+
+group_m7 = "Macro 7"
+m7Label  = input.string("End Day", "Label", group = group_m7)
+m7Enable = input.bool(false, "Enable", group = group_m7)
+m7Sess   = input.session("1700-1703", "Session", group = group_m7)
+m7Fill   = input.color(color.red, "Fill", group = group_m7)
+
+group_m8 = "Macro 8"
+m8Label  = input.string("Macro", "Label", group = group_m8)
+m8Enable = input.bool(false, "Enable", group = group_m8)
+m8Sess   = input.session("1350-1410", "Session", group = group_m8)
+m8Fill   = input.color(color.black, "Fill", group = group_m8)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Killzone inputs (KZ 1..5)
+//──────────────────────────────────────────────────────────────────────────────
+group_k1 = "Killzone 1"
+k1Label  = input.string("Asia", "Label", group = group_k1)
+k1Enable = input.bool(true, "Enable", group = group_k1)
+k1Sess   = input.session("2000-0000", "Session", group = group_k1)
+k1Fill   = input.color(color.blue, "Fill", group = group_k1)
+
+group_k2 = "Killzone 2"
+k2Label  = input.string("London", "Label", group = group_k2)
+k2Enable = input.bool(true, "Enable", group = group_k2)
+k2Sess   = input.session("0200-0500", "Session", group = group_k2)
+k2Fill   = input.color(color.red, "Fill", group = group_k2)
+
+group_k3 = "Killzone 3"
+k3Label  = input.string("NY AM", "Label", group = group_k3)
+k3Enable = input.bool(true, "Enable", group = group_k3)
+k3Sess   = input.session("0930-1100", "Session", group = group_k3)
+k3Fill   = input.color(color.green, "Fill", group = group_k3)
+
+group_k4 = "Killzone 4"
+k4Label  = input.string("NY Lunch", "Label", group = group_k4)
+k4Enable = input.bool(true, "Enable", group = group_k4)
+k4Sess   = input.session("1200-1300", "Session", group = group_k4)
+k4Fill   = input.color(color.orange, "Fill", group = group_k4)
+
+group_k5 = "Killzone 5"
+k5Label  = input.string("NY PM", "Label", group = group_k5)
+k5Enable = input.bool(true, "Enable", group = group_k5)
+k5Sess   = input.session("1330-1600", "Session", group = group_k5)
+k5Fill   = input.color(color.purple, "Fill", group = group_k5)
+//#endregion
+
+//#region Utilities
+//@function Returns true if the current bar is within the given session in tzInput.
+//@param sess  (string session) e.g., "0930-1600" or cross-midnight "1900-0200".
+//@returns     (bool) True if the current bar time falls inside the session.
+inWindow(sess) => not na(time(timeframe.period, sess, timezone = tzInput))
+
+//@function Extracts the HHMM start from a TradingView session string.
+//@param sess  (string) "HHMM-HHMM".
+//@returns     (string) Four-digit start HHMM; defaults to "0000" if missing.
+sessionStartHHMM(sess) =>
+    parts = str.split(sess, "-")
+    array.size(parts) >= 1 ? array.get(parts, 0) : "0000"
+
+//@function Extracts the HHMM end from a TradingView session string.
+//@param sess  (string) "HHMM-HHMM".
+//@returns     (string) Four-digit end HHMM; defaults to "0000" if missing.
+sessionEndHHMM(sess) =>
+    parts = str.split(sess, "-")
+    array.size(parts) >= 2 ? array.get(parts, 1) : "0000"
+
+//@function Converts a four-digit HHMM string to hour and minute integers.
+//@param hhmmText  (string) e.g., "0930".
+//@returns         (int,int) [hour, minute] clamped to valid ranges.
+hhmmToInts(hhmmText) =>
+    hhStr = str.substring(hhmmText, 0, 2)
+    mmStr = str.substring(hhmmText, 2, 4)
+    hh = math.min(math.max(int(nz(str.tonumber(hhStr), 0)), 0), 23)
+    mm = math.min(math.max(int(nz(str.tonumber(mmStr), 0)), 0), 59)
+    [hh, mm]
+
+//@function Parses a string formatted as "HH:MM" into hour and minute integers.
+//@param t   (string) e.g., "08:30".
+//@returns   (int,int) [hour, minute].
+parseTimeStrToHM(t) =>
+    hhmm = str.replace(t, ":", "")
+    hhmmToInts(hhmm)
+
+//@function Returns the timestamp of the session start for the day of the current bar.
+//@param sess  (string session) e.g., "0930-1600".
+//@returns     (int timestamp ms) Start-of-session in tzInput for current day.
+sessionAnchorForBar(sess) =>
+    startHHMM = sessionStartHHMM(sess)
+    [hh, mm] = hhmmToInts(startHHMM)
+    y  = year(time, tzInput)
+    mo = month(time, tzInput)
+    d  = dayofmonth(time, tzInput)
+    timestamp(tzInput, y, mo, d, hh, mm)
+
+// Next occurrence strictly in the future (handles roll; used for macros selection)
+//@function Computes the next [start,end] timestamps for a session relative to now.
+//@param sess  (string session)
+//@returns     (int,int) [nextStart, nextEnd] timestamps (ms).
+nextStartEndTs(sess) =>
+    sHH = sessionStartHHMM(sess)
+    eHH = sessionEndHHMM(sess)
+    [sh, sm] = hhmmToInts(sHH)
+    [eh, em] = hhmmToInts(eHH)
+    y  = year(time, tzInput), mo = month(time, tzInput), d = dayofmonth(time, tzInput)
+    todayS = timestamp(tzInput, y, mo, d, sh, sm)
+    todayE = timestamp(tzInput, y, mo, d, eh, em)
+    isFutureToday = time < todayS
+    ty = year(time + 24*60*60*1000, tzInput)
+    tmo = month(time + 24*60*60*1000, tzInput)
+    td = dayofmonth(time + 24*60*60*1000, tzInput)
+    nS = isFutureToday ? todayS : timestamp(tzInput, ty, tmo, td, sh, sm)
+    nE = isFutureToday ? todayE : timestamp(tzInput, ty, tmo, td, eh, em)
+    [nS, nE]
+
+//@function Determines if now is inside the provided session by absolute timestamps.
+//@param sess  (string session)
+//@returns     (bool) True if current time is within the session boundaries (handles midnight crossing).
+isCurrentByClock(sess) =>
+    sHH = sessionStartHHMM(sess)
+    eHH = sessionEndHHMM(sess)
+    [sh, sm] = hhmmToInts(sHH)
+    [eh, em] = hhmmToInts(eHH)
+    y  = year(time, tzInput)
+    mo = month(time, tzInput)
+    d  = dayofmonth(time, tzInput)
+    dayMs = 24 * 60 * 60 * 1000
+
+    int todayS = timestamp(tzInput, y, mo, d, sh, sm)
+    int todayE = timestamp(tzInput, y, mo, d, eh, em)
+    cross = todayS > todayE
+
+    bool inNow = false
+    if not cross
+        inNow := (time >= todayS) and (time < todayE)
+    else
+        int nextE = timestamp(tzInput, year(time + dayMs, tzInput), month(time + dayMs, tzInput), dayofmonth(time + dayMs, tzInput), eh, em)
+        bool inA = (time >= todayS) and (time < nextE) // today→tomorrow
+        int ystS = timestamp(tzInput, year(time - dayMs, tzInput), month(time - dayMs, tzInput), dayofmonth(time - dayMs, tzInput), sh, sm)
+        bool inB = (time >= ystS) and (time < todayE)  // yesterday→today
+        inNow := inA or inB
+    inNow
+
+//@function Clock-robust computation of the next [start,end] timestamps for a session.
+//@param sess  (string session)
+//@returns     (int,int) [nextStart, nextEnd] timestamps (ms), handling cross-midnight sessions.
+nextStartEndTsClock(sess) =>
+    sHH = sessionStartHHMM(sess)
+    eHH = sessionEndHHMM(sess)
+    [sh, sm] = hhmmToInts(sHH)
+    [eh, em] = hhmmToInts(eHH)
+
+    y  = year(time, tzInput)
+    mo = month(time, tzInput)
+    d  = dayofmonth(time, tzInput)
+    dayMs = 24 * 60 * 60 * 1000
+
+    int todayS = timestamp(tzInput, y, mo, d, sh, sm)
+    int todayE = timestamp(tzInput, y, mo, d, eh, em)
+    cross = todayS > todayE
+    bool curActive = isCurrentByClock(sess)
+
+    int nextStart = na
+    if curActive or time >= todayS
+        int ty = year(time + dayMs, tzInput)
+        int tm = month(time + dayMs, tzInput)
+        int td = dayofmonth(time + dayMs, tzInput)
+        nextStart := timestamp(tzInput, ty, tm, td, sh, sm)
+    else
+        nextStart := todayS
+
+    int nextEnd = na
+    if cross
+        int ty2 = year(nextStart + dayMs, tzInput)
+        int tm2 = month(nextStart + dayMs, tzInput)
+        int td2 = dayofmonth(nextStart + dayMs, tzInput)
+        nextEnd := timestamp(tzInput, ty2, tm2, td2, eh, em)
+    else
+        int ey = year(nextStart, tzInput)
+        int emn = month(nextStart, tzInput)
+        int ed = dayofmonth(nextStart, tzInput)
+        nextEnd := timestamp(tzInput, ey, emn, ed, eh, em)
+    [nextStart, nextEnd]
+
+//@function Computes the [start,end] timestamps for the session window aligned around "now".
+//@description For cross-midnight sessions (e.g., 18:00–17:15), this returns yesterday→today when
+//@            the current time-of-day is before the end time, and today→tomorrow when it is after
+//@            the start time. For non-crossing sessions, it returns today's window.
+//@param sess  (string session)
+//@returns     (int,int) [startTs, endTs] timestamps (ms) for the window that logically surrounds now.
+currentStartEndTsClock(sess) =>
+    sHH = sessionStartHHMM(sess)
+    eHH = sessionEndHHMM(sess)
+    [sh, sm] = hhmmToInts(sHH)
+    [eh, em] = hhmmToInts(eHH)
+
+    y  = year(time, tzInput)
+    mo = month(time, tzInput)
+    d  = dayofmonth(time, tzInput)
+    dayMs = 24 * 60 * 60 * 1000
+
+    int todayS = timestamp(tzInput, y, mo, d, sh, sm)
+    int todayE = timestamp(tzInput, y, mo, d, eh, em)
+    cross = todayS > todayE
+
+    if not cross
+        [todayS, todayE]
+    else
+        // If we're after today's start, window is today -> tomorrow end; otherwise yesterday -> today end
+        bool afterStart = time >= todayS
+        if afterStart
+            int ty = year(time + dayMs, tzInput)
+            int tm = month(time + dayMs, tzInput)
+            int td = dayofmonth(time + dayMs, tzInput)
+            [todayS, timestamp(tzInput, ty, tm, td, eh, em)]
+        else
+            int yy = year(time - dayMs, tzInput)
+            int ym = month(time - dayMs, tzInput)
+            int yd = dayofmonth(time - dayMs, tzInput)
+            [timestamp(tzInput, yy, ym, yd, sh, sm), todayE]
+
+//@function Maps a user-friendly style string to a line.style_* constant.
+//@param s   (string) "Solid" | "Dashed" | "Dotted".
+//@returns   (const) line.style_solid | line.style_dashed | line.style_dotted.
+styleFromString(s) =>
+    s == "Dashed" ? line.style_dashed : s == "Dotted" ? line.style_dotted : line.style_solid
+
+//@function Computes a slightly lighter transparency from a base fill opacity.
+//@param base  (int 0–100)
+//@returns     (int 0–100) min(base+2, 100).
+bgTransp(base) =>
+    int(math.min(100, base + 2))
+
+//@function Converts a timestamp into a short day-of-week name using tzInput.
+//@param ts   (int timestamp ms)
+//@returns    (string) "Mon".."Sun".
+dowShortName(ts) =>
+    d = dayofweek(ts, tzInput)
+    string n = "Sun"
+    if d == dayofweek.monday
+        n := "Mon"
+    else if d == dayofweek.tuesday
+        n := "Tue"
+    else if d == dayofweek.wednesday
+        n := "Wed"
+    else if d == dayofweek.thursday
+        n := "Thu"
+    else if d == dayofweek.friday
+        n := "Fri"
+    else if d == dayofweek.saturday
+        n := "Sat"
+    n
+
+// Box helpers (readability) — shared for Macros and Killzones
+//──────────────────────────────────────────────────────────────────────────────
+type HeaderGeom
+    float top
+    float bottom
+
+//@function Computes header box top/bottom from a given window high using current inputs
+//@param hi (float) Current window high
+//@returns  (HeaderGeom) Precomputed top/bottom for header box
+headerGeomFromHi(hi) =>
+    offs = hdrGapTicks * syminfo.mintick
+    h = hdrHeightTicks * syminfo.mintick
+    hb = hi + offs
+    ht = hb + h
+    HeaderGeom.new(ht, hb)
+
+//@function Creates a main session box with time-based full width (session start→end)
+//@returns (box) New main box handle
+createMainBoxTime(leftTs, rightTs, hi, lo, fill) =>
+    b = box.new(left = leftTs, right = rightTs, top = hi, bottom = lo, xloc = xloc.bar_time, bgcolor = color.new(fill, macroFillOpacity))
+    box.set_border_width(b, macroBorderPx)
+    box.set_border_color(b, color.new(fill, 0))
+    box.set_border_style(b, styleFromString(macroBorderStyleIn))
+    b
+
+//@function Updates a main session box (time-based full width)
+updateMainBoxTime(b, leftTs, rightTs, hi, lo, fill) =>
+    if not na(b)
+        box.set_left(b, leftTs)
+        box.set_right(b, rightTs)
+        box.set_top(b, hi)
+        box.set_bottom(b, lo)
+        box.set_border_width(b, macroBorderPx)
+        box.set_border_color(b, color.new(fill, 0))
+        box.set_border_style(b, styleFromString(macroBorderStyleIn))
+
+//@function Creates a header box with time-based full width
+createHeaderBoxTime(leftTs, rightTs, geom, fill, textLabel) =>
+    hb = box.new(left = leftTs, right = rightTs, top = geom.top, bottom = geom.bottom, xloc = xloc.bar_time, bgcolor = color.new(fill, hdrFillOpacity))
+    box.set_border_color(hb, color.new(fill, 0))
+    box.set_border_width(hb, hdrBorderPx)
+    box.set_border_style(hb, styleFromString(hdrBorderStyleIn))
+    box.set_text(hb, textLabel)
+    box.set_text_color(hb, hdrTextColor)
+    box.set_text_size(hb, hdrTextSize)
+    box.set_text_halign(hb, text.align_center)
+    box.set_text_valign(hb, text.align_center)
+    hb
+
+//@function Updates an existing header box (time-based full width)
+updateHeaderBoxTime(hb, leftTs, rightTs, geom, fill, textLabel) =>
+    if not na(hb)
+        box.set_left(hb, leftTs)
+        box.set_right(hb, rightTs)
+        box.set_top(hb, geom.top)
+        box.set_bottom(hb, geom.bottom)
+        box.set_bgcolor(hb, color.new(fill, hdrFillOpacity))
+        box.set_border_color(hb, color.new(fill, 0))
+        box.set_border_width(hb, hdrBorderPx)
+        box.set_border_style(hb, styleFromString(hdrBorderStyleIn))
+        box.set_text(hb, textLabel)
+        box.set_text_color(hb, hdrTextColor)
+        box.set_text_size(hb, hdrTextSize)
+        box.set_text_halign(hb, text.align_center)
+        box.set_text_valign(hb, text.align_center)
+
+//@function Creates a live HL line with shared style
+createHLLine(startX, y, fill) =>
+    ln = line.new(startX, y, bar_index, y, xloc = xloc.bar_index, extend = extend.none, color = color.new(fill, 0), style = hlStyle, width = 1)
+    ln
+
+//@function Updates an existing live HL line
+updateHLLine(ln, startX, y, fill) =>
+    if not na(ln)
+        line.set_xy1(ln, startX, y)
+        line.set_xy2(ln, bar_index, y)
+        line.set_style(ln, hlStyle)
+        line.set_color(ln, color.new(fill, 0))
+
+//@function Creates a static HL line at window completion
+createStaticHLLine(startX, y, fill) =>
+    line.new(startX, y, bar_index, y, xloc = xloc.bar_index, extend = extend.none, color = color.new(fill, 0), style = hlStyle, width = 1)
+
+//──────────────────────────────────────────────────────────────────────────────
+// Next preview helpers
+//──────────────────────────────────────────────────────────────────────────────
+//@function Computes yTop/yBot around mid price for header height
+previewHeaderYBounds() =>
+    h = hdrHeightTicks * syminfo.mintick
+    yMid = close
+    [yMid + h / 2.0, yMid - h / 2.0]
+
+//@function Creates or updates a preview header box
+ensurePreviewHeader(existing, leftTs, rightTs, fill, textLabel) =>
+    [yTop, yBot] = previewHeaderYBounds()
+    if na(existing)
+        b = box.new(left = leftTs, right = rightTs, top = yTop, bottom = yBot, xloc = xloc.bar_time, bgcolor = color.new(fill, hdrFillOpacity))
+        box.set_border_color(b, color.new(fill, 0))
+        box.set_border_width(b, hdrBorderPx)
+        box.set_border_style(b, styleFromString(hdrBorderStyleIn))
+        box.set_text(b, textLabel)
+        box.set_text_color(b, hdrTextColor)
+        box.set_text_size(b, hdrTextSize)
+        box.set_text_halign(b, text.align_center)
+        box.set_text_valign(b, text.align_center)
+        b
+    else
+        box.set_left(existing, leftTs)
+        box.set_right(existing, rightTs)
+        box.set_top(existing, yTop)
+        box.set_bottom(existing, yBot)
+        box.set_bgcolor(existing, color.new(fill, hdrFillOpacity))
+        box.set_border_color(existing, color.new(fill, 0))
+        box.set_border_width(existing, hdrBorderPx)
+        box.set_border_style(existing, styleFromString(hdrBorderStyleIn))
+        box.set_text(existing, textLabel)
+        box.set_text_color(existing, hdrTextColor)
+        box.set_text_size(existing, hdrTextSize)
+        box.set_text_halign(existing, text.align_center)
+        box.set_text_valign(existing, text.align_center)
+        existing
+
+//@function Creates or updates the background band shown behind the next-window preview
+//@param bandTop    (float) Upper bound of the band
+//@param bandBottom (float) Lower bound of the band
+//@description The band is bounded to the recent price envelope instead of ±1e10 sentinel
+//             values. Pine drawings participate in the chart's y-axis auto-fit, so the old
+//             ±1e10 boxes expanded the price scale to ±billions when double-clicking the axis.
+ensurePreviewBg(existing, leftTs, rightTs, fill, bandTop, bandBottom) =>
+    int t = bgTransp(macroFillOpacity)
+    if na(existing)
+        b = box.new(left = leftTs, right = rightTs, top = bandTop, bottom = bandBottom, xloc = xloc.bar_time, bgcolor = color.new(fill, t))
+        box.set_border_width(b, 0)
+        box.set_border_color(b, color.new(fill, 100))
+        b
+    else
+        box.set_left(existing, leftTs)
+        box.set_right(existing, rightTs)
+        box.set_top(existing, bandTop)
+        box.set_bottom(existing, bandBottom)
+        box.set_bgcolor(existing, color.new(fill, t))
+        box.set_border_width(existing, 0)
+        box.set_border_color(existing, color.new(fill, 100))
+        existing
+
+//──────────────────────────────────────────────────────────────────────────────
+// Opening Prices — helper functions (reduce duplication)
+//──────────────────────────────────────────────────────────────────────────────
+//@function Creates an Opening Price line and lightweight label when entering the configured time during session.
+//@param ts           (int) Target timestamp for the opening time
+//@param tsSessStart  (int) Session start timestamp
+//@param tsSessEnd    (int) Session end timestamp
+//@param enabled      (bool) Whether this time is enabled
+//@param timeText     (string) Label text (HH:MM)
+//@param col          (color) Line/label color
+//@param curL         (line) Existing line handle (or na)
+//@param curLbl       (label) Existing label handle (or na)
+//@returns            (line, label, float) New/updated handles and the line price (newY) when created; else newY=na.
+opMaybeCreate(ts, tsSessStart, tsSessEnd, enabled, timeText, col, curL, curLbl) =>
+    line newL = curL
+    label newLbl = curLbl
+    float newY = na
+    if enabled and time >= ts and time[1] < ts and ts >= tsSessStart and ts < tsSessEnd
+        px = open
+        newL := line.new(ts, px, ts, px, xloc = xloc.bar_time, extend = extend.none, color = col, style = opStyle, width = opWidth)
+        newY := px
+        if not na(newLbl)
+            label.delete(newLbl)
+        offMs = math.max(1, int((time - time[1]) * opLblXFactor))
+        initX = math.min(tsSessEnd, ts + offMs)
+        yLab = px - float(opLblYTicks) * syminfo.mintick
+        newLbl := label.new(initX, yLab, timeText, xloc = xloc.bar_time, style = label.style_none, textcolor = col, size = size.small)
+        label.set_textalign(newLbl, text.align_left)
+    [newL, newLbl, newY]
+
+//@function Updates the Opening Price line right edge and repositions the label to the right with vertical centering.
+//@param curL      (line) Line handle
+//@param curLbl    (label) Label handle (may be na)
+//@param y         (float) Line price level
+//@param tsSessEnd (int) Session end timestamp
+//@param timeText  (string) Label text
+//@param col       (color) Color
+//@returns         (label) Updated/created label handle.
+opUpdate(curL, curLbl, y, tsSessEnd, timeText, col) =>
+    label newLbl = curLbl
+    if not na(curL)
+        line.set_x2(curL, math.min(time, tsSessEnd))
+        line.set_style(curL, opStyle)
+        line.set_color(curL, col)
+        line.set_width(curL, opWidth)
+        endX = math.min(time, tsSessEnd)
+        ofs  = math.max(1, int((time - time[1]) * opLblXFactor))
+        lblX = math.min(tsSessEnd, endX + ofs)
+        endY = y - float(opLblYTicks) * syminfo.mintick
+        if na(newLbl)
+            newLbl := label.new(lblX, endY, timeText, xloc = xloc.bar_time, style = label.style_none, textcolor = col, size = size.small)
+        else
+            label.set_x(newLbl, lblX)
+            label.set_y(newLbl, endY)
+            label.set_text(newLbl, timeText)
+            label.set_textcolor(newLbl, col)
+            label.set_textalign(newLbl, text.align_left)
+            label.set_size(newLbl, size.small)
+    newLbl
+
+//@function Deletes an Opening Price line and its label if present.
+//@param curL   (line) Line handle (may be na)
+//@param curLbl (label) Label handle (may be na)
+//@returns      (line, label) Both na after deletion.
+opDelete(curL, curLbl) =>
+    line newL = curL
+    label newLbl = curLbl
+    if not na(newL)
+        line.delete(newL)
+        newL := na
+    if not na(newLbl)
+        label.delete(newLbl)
+        newLbl := na
+    [newL, newLbl]
+
+//@function Creates an Opening Price line at a fixed y level with lightweight label.
+//@param tsStart  (int) Session start timestamp (for initial x)
+//@param y        (float) Price level
+//@param enabled  (bool) Toggle
+//@param timeText (string) Text label
+//@param col      (color) Color
+//@param curL     (line) Existing line
+//@param curLbl   (label) Existing label
+//@returns        (line, label) Handles (new or updated)
+opEnsureAtY(tsStart, y, enabled, timeText, col, curL, curLbl) =>
+    line newL = curL
+    label newLbl = curLbl
+    if enabled and not na(y)
+        if na(newL)
+            newL := line.new(tsStart, y, tsStart, y, xloc = xloc.bar_time, extend = extend.none, color = col, style = opStyle, width = opWidth)
+        // update style regardless
+        line.set_style(newL, opStyle)
+        line.set_color(newL, col)
+        line.set_width(newL, opWidth)
+        // label
+        offMs = math.max(1, int((time - time[1]) * opLblXFactor))
+        initX = tsStart + offMs
+        yLab = y - float(opLblYTicks) * syminfo.mintick
+        if na(newLbl)
+            newLbl := label.new(initX, yLab, timeText, xloc = xloc.bar_time, style = label.style_none, textcolor = col, size = size.small)
+        else
+            label.set_x(newLbl, initX)
+            label.set_y(newLbl, yLab)
+            label.set_text(newLbl, timeText)
+            label.set_textcolor(newLbl, col)
+            label.set_size(newLbl, size.small)
+            label.set_textalign(newLbl, text.align_left)
+    [newL, newLbl]
+
+//@function Deletes a main box and its header box if present.
+//@param mainBox   (box) Main session box
+//@param headerBox (box) Header box
+//@returns         (void)
+deleteWindow(mainBox, headerBox) =>
+    if not na(mainBox)
+        box.delete(mainBox)
+    if not na(headerBox)
+        box.delete(headerBox)
+
+//@function Trims arrays of completed windows for a given id, deleting boxes and headers beyond keepN.
+//@param gBox       (array<box>)
+//@param gId        (array<int>)
+//@param gAnchor    (array<int>)
+//@param gHeaderBox (array<box>)
+//@param id         (int) Type id
+//@param keepN      (int) Number of windows to keep
+//@returns          (void)
+trimForId(gBox, gId, gAnchor, gHeaderBox, id, keepN) =>
+    idxs = array.new_int()
+    for i = 0 to array.size(gId) - 1
+        if array.get(gId, i) == id
+            array.push(idxs, i)
+    while array.size(idxs) > keepN
+        delIndex = array.shift(idxs)
+        deleteWindow(array.get(gBox, delIndex), array.get(gHeaderBox, delIndex))
+        array.remove(gBox, delIndex)
+        array.remove(gId, delIndex)
+        array.remove(gAnchor, delIndex)
+        array.remove(gHeaderBox, delIndex)
+        for j = 0 to array.size(idxs) - 1
+            if array.get(idxs, j) > delIndex
+                array.set(idxs, j, array.get(idxs, j) - 1)
+
+//@function Trims completed windows and deletes static H/L lines and boxes; keeps arrays aligned.
+//@param gBox, gId, gAnchor, gHeaderBox (arrays) Window tracking arrays
+//@param gHiLines  (array<line>) High lines
+//@param gLoLines  (array<line>) Low lines
+//@param id        (int) Type id
+//@param keepN     (int) Number of windows to keep
+//@returns         (void)
+trimWithLines(gBox, gId, gAnchor, gHeaderBox, gHiLines, gLoLines, id, keepN) =>
+    idxs = array.new_int()
+    for i = 0 to array.size(gId) - 1
+        if array.get(gId, i) == id
+            array.push(idxs, i)
+    while array.size(idxs) > keepN
+        delIndex = array.shift(idxs)
+        // delete main/header boxes
+        deleteWindow(array.get(gBox, delIndex), array.get(gHeaderBox, delIndex))
+        // delete static lines if any
+        lnH = array.get(gHiLines, delIndex)
+        lnL = array.get(gLoLines, delIndex)
+        if not na(lnH)
+            line.delete(lnH)
+        if not na(lnL)
+            line.delete(lnL)
+        // remove from arrays
+        array.remove(gBox, delIndex)
+        array.remove(gId, delIndex)
+        array.remove(gAnchor, delIndex)
+        array.remove(gHeaderBox, delIndex)
+        array.remove(gHiLines, delIndex)
+        array.remove(gLoLines, delIndex)
+        // compact idxs
+        for j = 0 to array.size(idxs) - 1
+            if array.get(idxs, j) > delIndex
+                array.set(idxs, j, array.get(idxs, j) - 1)
+
+//@function Trims completed windows and deletes static and extension lines; keeps arrays aligned.
+//@param gBox..gExtEndDay (arrays) Window data and extension tracking arrays
+//@param id        (int) Type id
+//@param keepN     (int) Number of windows to keep
+//@returns         (void)
+trimWithLinesAndExt(gBox, gId, gAnchor, gHeaderBox, gHiLines, gLoLines, gHiExt, gLoExt, gHiExtActive, gLoExtActive, gHiLevel, gLoLevel, gExtEndDay, id, keepN) =>
+    idxs = array.new_int()
+    for i = 0 to array.size(gId) - 1
+        if array.get(gId, i) == id
+            array.push(idxs, i)
+    while array.size(idxs) > keepN
+        delIndex = array.shift(idxs)
+        // delete main/header boxes
+        deleteWindow(array.get(gBox, delIndex), array.get(gHeaderBox, delIndex))
+        // delete static lines
+        lnH = array.get(gHiLines, delIndex)
+        lnL = array.get(gLoLines, delIndex)
+        if not na(lnH)
+            line.delete(lnH)
+        if not na(lnL)
+            line.delete(lnL)
+        // delete extensions
+        exH = array.get(gHiExt, delIndex)
+        exL = array.get(gLoExt, delIndex)
+        if not na(exH)
+            line.delete(exH)
+        if not na(exL)
+            line.delete(exL)
+        // delete labels if any (arrays may not be provided by caller)
+        // Use runtime checks to see if parallel label arrays exist in outer scope and match size
+        // Macros
+        if na(gBox) // dummy branch to keep Pine's offside rule happy when labels aren't passed
+            na
+        // remove from arrays
+        array.remove(gBox, delIndex)
+        array.remove(gId, delIndex)
+        array.remove(gAnchor, delIndex)
+        array.remove(gHeaderBox, delIndex)
+        array.remove(gHiLines, delIndex)
+        array.remove(gLoLines, delIndex)
+        array.remove(gHiExt, delIndex)
+        array.remove(gLoExt, delIndex)
+        array.remove(gHiExtActive, delIndex)
+        array.remove(gLoExtActive, delIndex)
+        array.remove(gHiLevel, delIndex)
+        array.remove(gLoLevel, delIndex)
+        array.remove(gExtEndDay, delIndex)
+        // compact idx trackers
+        for j = 0 to array.size(idxs) - 1
+            if array.get(idxs, j) > delIndex
+                array.set(idxs, j, array.get(idxs, j) - 1)
+
+//@function Trims completed windows and deletes static lines, extension lines, and labels; keeps arrays aligned.
+//@param gBox..gLoExtLbl (arrays) Window, lines, extensions, labels, and timestamps
+//@param id        (int) Type id
+//@param keepN     (int) Number of windows to keep
+//@returns         (void)
+trimWithLinesExtAndLabels(gBox, gId, gAnchor, gHeaderBox, gHiLines, gLoLines, gHiExt, gLoExt, gHiExtActive, gLoExtActive, gHiLevel, gLoLevel, gExtEndDay, gEndTs, gHiExtLbl, gLoExtLbl, id, keepN) =>
+    idxs = array.new_int()
+    for i = 0 to array.size(gId) - 1
+        if array.get(gId, i) == id
+            array.push(idxs, i)
+    while array.size(idxs) > keepN
+        delIndex = array.shift(idxs)
+        // delete main/header boxes
+        deleteWindow(array.get(gBox, delIndex), array.get(gHeaderBox, delIndex))
+        // delete static lines
+        lnH = array.get(gHiLines, delIndex)
+        lnL = array.get(gLoLines, delIndex)
+        if not na(lnH)
+            line.delete(lnH)
+        if not na(lnL)
+            line.delete(lnL)
+        // delete extensions
+        exH = array.get(gHiExt, delIndex)
+        exL = array.get(gLoExt, delIndex)
+        if not na(exH)
+            line.delete(exH)
+        if not na(exL)
+            line.delete(exL)
+        // delete labels
+        lbH = array.get(gHiExtLbl, delIndex)
+        lbL = array.get(gLoExtLbl, delIndex)
+        if not na(lbH)
+            label.delete(lbH)
+        if not na(lbL)
+            label.delete(lbL)
+        // remove from arrays
+        array.remove(gBox, delIndex)
+        array.remove(gId, delIndex)
+        array.remove(gAnchor, delIndex)
+        array.remove(gHeaderBox, delIndex)
+        array.remove(gHiLines, delIndex)
+        array.remove(gLoLines, delIndex)
+        array.remove(gHiExt, delIndex)
+        array.remove(gLoExt, delIndex)
+        array.remove(gHiExtActive, delIndex)
+        array.remove(gLoExtActive, delIndex)
+        array.remove(gHiLevel, delIndex)
+        array.remove(gLoLevel, delIndex)
+        array.remove(gExtEndDay, delIndex)
+        array.remove(gEndTs, delIndex)
+        array.remove(gHiExtLbl, delIndex)
+        array.remove(gLoExtLbl, delIndex)
+        // compact idx trackers
+        for j = 0 to array.size(idxs) - 1
+            if array.get(idxs, j) > delIndex
+                array.set(idxs, j, array.get(idxs, j) - 1)
+//#endregion
+
+//#region Macros — state (8)
+MACROS = 8
+var bool[]   mEnabled = array.new_bool()
+var string[] mSessIn  = array.new_string()
+var color[]  mFills   = array.new_color()
+var string[] mLabels  = array.new_string()
+if barstate.isfirst
+    array.push(mEnabled, m1Enable), array.push(mSessIn, m1Sess), array.push(mFills, m1Fill), array.push(mLabels, m1Label)
+    array.push(mEnabled, m2Enable), array.push(mSessIn, m2Sess), array.push(mFills, m2Fill), array.push(mLabels, m2Label)
+    array.push(mEnabled, m3Enable), array.push(mSessIn, m3Sess), array.push(mFills, m3Fill), array.push(mLabels, m3Label)
+    array.push(mEnabled, m4Enable), array.push(mSessIn, m4Sess), array.push(mFills, m4Fill), array.push(mLabels, m4Label)
+    array.push(mEnabled, m5Enable), array.push(mSessIn, m5Sess), array.push(mFills, m5Fill), array.push(mLabels, m5Label)
+    array.push(mEnabled, m6Enable), array.push(mSessIn, m6Sess), array.push(mFills, m6Fill), array.push(mLabels, m6Label)
+    array.push(mEnabled, m7Enable), array.push(mSessIn, m7Sess), array.push(mFills, m7Fill), array.push(mLabels, m7Label)
+    array.push(mEnabled, m8Enable), array.push(mSessIn, m8Sess), array.push(mFills, m8Fill), array.push(mLabels, m8Label)
+
+var bool[]  mWasIn       = array.new_bool(MACROS, false)
+var int[]   mStartIdx    = array.new_int(MACROS, na)
+var float[] mHiArr       = array.new_float(MACROS, na)
+var float[] mLoArr       = array.new_float(MACROS, na)
+var int[]   mCntArr      = array.new_int(MACROS, 0)
+var int[]   mAnchor      = array.new_int(MACROS, na)
+var box[]   mActiveMain  = array.new_box(MACROS)
+var box[]   mActiveHdr   = array.new_box(MACROS)
+// Current Macro full-height background boxes
+var box[]   mActiveBg    = array.new_box(MACROS)
+// Completed windows (for trimming)
+var box[]   mGBoxes      = array.new_box()
+var int[]   mGId         = array.new_int()
+var int[]   mGAnch       = array.new_int()
+var box[]   mGHdrBoxes   = array.new_box()
+
+// High/Low live lines and extension state (per Macro)
+var line[]  mHiLine      = array.new_line(MACROS)
+var line[]  mLoLine      = array.new_line(MACROS)
+var float[] mHiLevel     = array.new_float(MACROS, na)
+var float[] mLoLevel     = array.new_float(MACROS, na)
+// Track bar index where current window high/low occurred
+var int[]   mHiBarIdx    = array.new_int(MACROS, na)
+var int[]   mLoBarIdx    = array.new_int(MACROS, na)
+
+var line[]  mHiExt       = array.new_line(MACROS)
+var line[]  mLoExt       = array.new_line(MACROS)
+var bool[]  mExtActive   = array.new_bool(MACROS, false)
+var int[]   mExtEndDay   = array.new_int(MACROS, na)   // day-of-month (tzInput) when window ended; use to stop at day roll
+
+// Static lines for completed Macro windows (kept if Extend is OFF)
+var line[]  mGHiLines = array.new_line()
+var line[]  mGLoLines = array.new_line()
+// Per-window extension arrays aligned with kGBoxes
+var line[]  kGHiExt = array.new_line()
+var line[]  kGLoExt = array.new_line()
+var bool[]  kGHiExtActive = array.new_bool()
+var bool[]  kGLoExtActive = array.new_bool()
+var float[] kGHiLevel = array.new_float()
+var float[] kGLoLevel = array.new_float()
+var int[]   kGExtEndDay = array.new_int()
+
+// Extension activity flags — track Hi/Lo independently
+var bool[]  mHiExtActive = array.new_bool(MACROS, false)
+// Per-window extension arrays aligned with mGBoxes
+var line[]  mGHiExt = array.new_line()
+var line[]  mGLoExt = array.new_line()
+var bool[]  mGHiExtActive = array.new_bool()
+var bool[]  mGLoExtActive = array.new_bool()
+var float[] mGHiLevel = array.new_float()
+var float[] mGLoLevel = array.new_float()
+var int[]   mGExtEndDay = array.new_int()
+var bool[]  mLoExtActive = array.new_bool(MACROS, false)
+// Per-window end timestamp (for label DOW)
+var int[]   mGEndTs = array.new_int()
+// Per-window labels for extended lines
+var label[] mGHiExtLbl = array.new_label()
+var label[] mGLoExtLbl = array.new_label()
+//#endregion
+
+//#region Killzones — state (5)
+KZS = 5
+var bool[]   kEnabled = array.new_bool()
+var string[] kSessIn  = array.new_string()
+var color[]  kFills   = array.new_color()
+var string[] kLabels  = array.new_string()
+if barstate.isfirst
+    array.push(kEnabled, k1Enable), array.push(kSessIn, k1Sess), array.push(kFills, k1Fill), array.push(kLabels, k1Label)
+    array.push(kEnabled, k2Enable), array.push(kSessIn, k2Sess), array.push(kFills, k2Fill), array.push(kLabels, k2Label)
+    array.push(kEnabled, k3Enable), array.push(kSessIn, k3Sess), array.push(kFills, k3Fill), array.push(kLabels, k3Label)
+    array.push(kEnabled, k4Enable), array.push(kSessIn, k4Sess), array.push(kFills, k4Fill), array.push(kLabels, k4Label)
+    array.push(kEnabled, k5Enable), array.push(kSessIn, k5Sess), array.push(kFills, k5Fill), array.push(kLabels, k5Label)
+
+var bool[]  kWasIn      = array.new_bool(KZS, false)
+var int[]   kStartIdx   = array.new_int(KZS, na)
+var float[] kHiArr      = array.new_float(KZS, na)
+var float[] kLoArr      = array.new_float(KZS, na)
+var int[]   kCntArr     = array.new_int(KZS, 0)
+var int[]   kAnchor     = array.new_int(KZS, na)
+var box[]   kActiveMain = array.new_box(KZS)
+var box[]   kActiveHdr  = array.new_box(KZS)
+var box[]   kGBoxes     = array.new_box()
+var int[]   kGId        = array.new_int()
+var int[]   kGAnch      = array.new_int()
+var box[]   kGHdrBoxes  = array.new_box()
+
+// High/Low live lines and extension state (per KZ)
+var line[]  kHiLine      = array.new_line(KZS)
+var line[]  kLoLine      = array.new_line(KZS)
+var float[] kHiLevel     = array.new_float(KZS, na)
+var float[] kLoLevel     = array.new_float(KZS, na)
+// Track bar index where current window high/low occurred
+var int[]   kHiBarIdx    = array.new_int(KZS, na)
+var int[]   kLoBarIdx    = array.new_int(KZS, na)
+
+var line[]  kHiExt       = array.new_line(KZS)
+var line[]  kLoExt       = array.new_line(KZS)
+var bool[]  kExtActive   = array.new_bool(KZS, false)
+var int[]   kExtEndDay   = array.new_int(KZS, na)
+
+// Static lines for completed Killzone windows (kept if Extend is OFF)
+var line[]  kGHiLines = array.new_line()
+var line[]  kGLoLines = array.new_line()
+// Per-window end timestamp (for label DOW)
+var int[]   kGEndTs = array.new_int()
+// Per-window labels for extended lines
+var label[] kGHiExtLbl = array.new_label()
+var label[] kGLoExtLbl = array.new_label()
+
+// Extension activity flags — track Hi/Lo independently
+var bool[]  kHiExtActive = array.new_bool(KZS, false)
+var bool[]  kLoExtActive = array.new_bool(KZS, false)
+//#endregion
+
+//#region Engine — Killzones
+//──────────────────────────────────────────────────────────────────────────────
+// Engine — Killzones
+//──────────────────────────────────────────────────────────────────────────────
+for i = 0 to KZS - 1
+    en   = array.get(kEnabled, i)
+    sess = array.get(kSessIn, i)
+    fill = array.get(kFills, i)
+    nowIn = en and inWindow(sess)
+
+    was  = array.get(kWasIn, i)
+    sIdx = array.get(kStartIdx, i)
+    hi   = array.get(kHiArr, i)
+    lo   = array.get(kLoArr, i)
+    cnt  = array.get(kCntArr, i)
+    anch = array.get(kAnchor, i)
+    mainLive = array.get(kActiveMain, i)
+    hdrLive  = array.get(kActiveHdr, i)
+
+    // HL state refs
+    hiL = array.get(kHiLine, i)
+    loL = array.get(kLoLine, i)
+    hiLv = array.get(kHiLevel, i)
+    loLv = array.get(kLoLevel, i)
+    hiLEX = array.get(kHiExt, i)
+    loLEX = array.get(kLoExt, i)
+    extA  = array.get(kExtActive, i)
+    endDay= array.get(kExtEndDay, i)
+
+    if not was and nowIn
+        sIdx := bar_index
+        hi := high
+        lo := low
+        cnt := 1
+        anch := sessionAnchorForBar(sess)
+        // Initialize high/low bar indices at start
+        array.set(kHiBarIdx, i, bar_index)
+        array.set(kLoBarIdx, i, bar_index)
+
+        // Create boxes using time-based full width (session start→end)
+        [curS, curE] = currentStartEndTsClock(sess)
+        mainLive := createMainBoxTime(curS, curE, hi, lo, fill)
+        kHdrGeom = headerGeomFromHi(hi)
+        hdrLive := createHeaderBoxTime(curS, curE, kHdrGeom, fill, array.get(kLabels, i))
+
+        // HL live lines
+        if showHL
+            hiLv := hi
+            loLv := lo
+            hiStart = nz(array.get(kHiBarIdx, i), sIdx)
+            loStart = nz(array.get(kLoBarIdx, i), sIdx)
+            hiL := createHLLine(hiStart, hiLv, fill)
+            loL := createHLLine(loStart, loLv, fill)
+
+        // cleanup any previous extensions
+        if not na(hiLEX)
+            line.delete(hiLEX), hiLEX := na
+        if not na(loLEX)
+            line.delete(loLEX), loLEX := na
+        extA := false
+        endDay := na
+
+    if nowIn
+        prevHi = hi
+        prevLo = lo
+        hi := math.max(hi, high)
+        lo := math.min(lo, low)
+        // Update bar indices when new extremes are set (prefer first occurrence on ties)
+        if high > prevHi
+            array.set(kHiBarIdx, i, bar_index)
+        if low < prevLo
+            array.set(kLoBarIdx, i, bar_index)
+        cnt += 1
+
+        if not na(mainLive)
+            [curS, curE] = currentStartEndTsClock(sess)
+            updateMainBoxTime(mainLive, curS, curE, hi, lo, fill)
+
+        if not na(hdrLive)
+            kHdrGeomUpd = headerGeomFromHi(hi)
+            [curS, curE] = currentStartEndTsClock(sess)
+            updateHeaderBoxTime(hdrLive, curS, curE, kHdrGeomUpd, fill, array.get(kLabels, i))
+
+        // HL live update
+        if showHL
+            hiLv := hi
+            loLv := lo
+            if not na(hiL)
+                hiStart = nz(array.get(kHiBarIdx, i), sIdx)
+                updateHLLine(hiL, hiStart, hiLv, fill)
+            if not na(loL)
+                loStart = nz(array.get(kLoBarIdx, i), sIdx)
+                updateHLLine(loL, loStart, loLv, fill)
+
+    if was and not nowIn and cnt > 0
+        // Persist boxes
+        array.push(kGBoxes, mainLive)
+        array.push(kGId, i)
+        array.push(kGAnch, anch)
+        array.push(kGHdrBoxes, hdrLive)
+
+        // ALWAYS draw static H/L lines across the finished window width when HL enabled
+        line lnH_static = na
+        line lnL_static = na
+        if showHL
+            startHi = nz(array.get(kHiBarIdx, i), sIdx)
+            startLo = nz(array.get(kLoBarIdx, i), sIdx)
+            lnH_static := createStaticHLLine(startHi, hi, fill)
+            lnL_static := createStaticHLLine(startLo, lo, fill)
+
+        // Start per-window extensions beyond window end (optional)
+        line extH = na
+        line extL = na
+        bool extHActive = false
+        bool extLActive = false
+        int  endDayWindow = na
+        if showHL and extendHL
+            endDayWindow := dayofmonth(time, tzInput)
+            if not na(hiL)
+                extH := line.new(bar_index, hi, bar_index, hi, xloc = xloc.bar_index, extend = extend.none, color = color.new(fill, 0), style = extendStyle, width = extendWidth)
+                extHActive := true
+            if not na(loL)
+                extL := line.new(bar_index, lo, bar_index, lo, xloc = xloc.bar_index, extend = extend.none, color = color.new(fill, 0), style = extendStyle, width = extendWidth)
+                extLActive := true
+
+        // cleanup live lines
+        if not na(hiL)
+            line.delete(hiL), hiL := na
+        if not na(loL)
+            line.delete(loL), loL := na
+
+        // store static lines (even if na), extension arrays, then trim with boxes
+        array.push(kGHiLines, lnH_static)
+        array.push(kGLoLines, lnL_static)
+        array.push(kGHiExt, extH)
+        array.push(kGLoExt, extL)
+        array.push(kGHiExtActive, extHActive)
+        array.push(kGLoExtActive, extLActive)
+        array.push(kGHiLevel, hi)
+        array.push(kGLoLevel, lo)
+        array.push(kGExtEndDay, endDayWindow)
+        array.push(kGEndTs, time)
+        array.push(kGHiExtLbl, na)
+        array.push(kGLoExtLbl, na)
+        trimWithLinesExtAndLabels(kGBoxes, kGId, kGAnch, kGHdrBoxes, kGHiLines, kGLoLines, kGHiExt, kGLoExt, kGHiExtActive, kGLoExtActive, kGHiLevel, kGLoLevel, kGExtEndDay, kGEndTs, kGHiExtLbl, kGLoExtLbl, i, sessionsToShow)
+
+        // reset counters
+        cnt := 0
+        mainLive := na
+        hdrLive  := na
+
+
+    // persist KZ state
+    array.set(kWasIn, i, nowIn)
+    array.set(kStartIdx, i, sIdx)
+    array.set(kHiArr, i, hi)
+    array.set(kLoArr, i, lo)
+    array.set(kCntArr, i, cnt)
+    array.set(kAnchor, i, anch)
+    array.set(kActiveMain, i, mainLive)
+    array.set(kActiveHdr, i, hdrLive)
+
+    array.set(kHiLine, i, hiL)
+    array.set(kLoLine, i, loL)
+    array.set(kHiLevel, i, hiLv)
+    array.set(kLoLevel, i, loLv)
+    array.set(kHiExt, i, hiLEX)
+    array.set(kLoExt, i, loLEX)
+    array.set(kExtActive, i, extA)
+    array.set(kExtEndDay, i, endDay)
+//#endregion
+
+//#region Engine — Macros
+//──────────────────────────────────────────────────────────────────────────────
+// Engine — Macros
+//──────────────────────────────────────────────────────────────────────────────
+for i = 0 to MACROS - 1
+    en   = array.get(mEnabled, i)
+    sess = array.get(mSessIn, i)
+    fill = array.get(mFills, i)
+    nowIn = en and inWindow(sess)
+
+    was  = array.get(mWasIn, i)
+    sIdx = array.get(mStartIdx, i)
+    hi   = array.get(mHiArr, i)
+    lo   = array.get(mLoArr, i)
+    cnt  = array.get(mCntArr, i)
+    anch = array.get(mAnchor, i)
+    mainLive = array.get(mActiveMain, i)
+    hdrLive  = array.get(mActiveHdr, i)
+
+    // HL state refs
+    hiL = array.get(mHiLine, i)
+    loL = array.get(mLoLine, i)
+    hiLv = array.get(mHiLevel, i)
+    loLv = array.get(mLoLevel, i)
+    hiLEX = array.get(mHiExt, i)
+    loLEX = array.get(mLoExt, i)
+    extA  = array.get(mExtActive, i)
+    endDay= array.get(mExtEndDay, i)
+
+    if not was and nowIn
+        sIdx := bar_index
+        hi := high
+        lo := low
+        cnt := 1
+        anch := sessionAnchorForBar(sess)
+        // Initialize high/low bar indices at start
+        array.set(mHiBarIdx, i, bar_index)
+        array.set(mLoBarIdx, i, bar_index)
+
+        // Create boxes using time-based full width (session start→end)
+        [curS, curE] = currentStartEndTsClock(sess)
+        mainLive := createMainBoxTime(curS, curE, hi, lo, fill)
+        mHdrGeom = headerGeomFromHi(hi)
+        hdrLive := createHeaderBoxTime(curS, curE, mHdrGeom, fill, array.get(mLabels, i))
+
+        // HL live lines
+        if showHL
+            hiLv := hi
+            loLv := lo
+            hiStart = nz(array.get(mHiBarIdx, i), sIdx)
+            loStart = nz(array.get(mLoBarIdx, i), sIdx)
+            hiL := createHLLine(hiStart, hiLv, fill)
+            loL := createHLLine(loStart, loLv, fill)
+
+        // cleanup any previous extensions
+        if not na(hiLEX)
+            line.delete(hiLEX), hiLEX := na
+        if not na(loLEX)
+            line.delete(loLEX), loLEX := na
+        extA := false
+        endDay := na
+
+    if nowIn
+        prevHi = hi
+        prevLo = lo
+        hi := math.max(hi, high)
+        lo := math.min(lo, low)
+        // Update bar indices when new extremes are set (prefer first occurrence on ties)
+        if high > prevHi
+            array.set(mHiBarIdx, i, bar_index)
+        if low < prevLo
+            array.set(mLoBarIdx, i, bar_index)
+        cnt += 1
+
+        if not na(mainLive)
+            [curS, curE] = currentStartEndTsClock(sess)
+            updateMainBoxTime(mainLive, curS, curE, hi, lo, fill)
+
+        if not na(hdrLive)
+            mHdrGeomUpd = headerGeomFromHi(hi)
+            [curS, curE] = currentStartEndTsClock(sess)
+            updateHeaderBoxTime(hdrLive, curS, curE, mHdrGeomUpd, fill, array.get(mLabels, i))
+
+        // HL live update
+        if showHL
+            hiLv := hi
+            loLv := lo
+            if not na(hiL)
+                hiStart = nz(array.get(mHiBarIdx, i), sIdx)
+                updateHLLine(hiL, hiStart, hiLv, fill)
+            if not na(loL)
+                loStart = nz(array.get(mLoBarIdx, i), sIdx)
+                updateHLLine(loL, loStart, loLv, fill)
+
+    if was and not nowIn and cnt > 0
+        // Persist boxes
+        array.push(mGBoxes, mainLive)
+        array.push(mGId, i)
+        array.push(mGAnch, anch)
+        array.push(mGHdrBoxes, hdrLive)
+
+        // ALWAYS draw static H/L lines across the finished window width when HL enabled
+        line lnH_static = na
+        line lnL_static = na
+        if showHL
+            startHi = nz(array.get(mHiBarIdx, i), sIdx)
+            startLo = nz(array.get(mLoBarIdx, i), sIdx)
+            lnH_static := createStaticHLLine(startHi, hi, fill)
+            lnL_static := createStaticHLLine(startLo, lo, fill)
+
+        // Start per-window extensions beyond window end (optional)
+        line extH = na
+        line extL = na
+        bool extHActive = false
+        bool extLActive = false
+        int  endDayWindow = na
+        if showHL and extendHL
+            endDayWindow := dayofmonth(time, tzInput)
+            if not na(hiL)
+                extH := line.new(bar_index, hi, bar_index, hi, xloc = xloc.bar_index, extend = extend.none, color = color.new(fill, 0), style = extendStyle, width = extendWidth)
+                extHActive := true
+            if not na(loL)
+                extL := line.new(bar_index, lo, bar_index, lo, xloc = xloc.bar_index, extend = extend.none, color = color.new(fill, 0), style = extendStyle, width = extendWidth)
+                extLActive := true
+
+        // cleanup live lines
+        if not na(hiL)
+            line.delete(hiL), hiL := na
+        if not na(loL)
+            line.delete(loL), loL := na
+
+        // store static lines (even if na), extension arrays, then trim with boxes
+        array.push(mGHiLines, lnH_static)
+        array.push(mGLoLines, lnL_static)
+        array.push(mGHiExt, extH)
+        array.push(mGLoExt, extL)
+        array.push(mGHiExtActive, extHActive)
+        array.push(mGLoExtActive, extLActive)
+        array.push(mGHiLevel, hi)
+        array.push(mGLoLevel, lo)
+        array.push(mGExtEndDay, endDayWindow)
+        array.push(mGEndTs, time)
+        array.push(mGHiExtLbl, na)
+        array.push(mGLoExtLbl, na)
+        trimWithLinesExtAndLabels(mGBoxes, mGId, mGAnch, mGHdrBoxes, mGHiLines, mGLoLines, mGHiExt, mGLoExt, mGHiExtActive, mGLoExtActive, mGHiLevel, mGLoLevel, mGExtEndDay, mGEndTs, mGHiExtLbl, mGLoExtLbl, i, sessionsToShow)
+
+        // reset counters
+        cnt := 0
+        mainLive := na
+        hdrLive  := na
+
+
+    // persist Macro state
+    array.set(mWasIn, i, nowIn)
+    array.set(mStartIdx, i, sIdx)
+    array.set(mHiArr, i, hi)
+    array.set(mLoArr, i, lo)
+    array.set(mCntArr, i, cnt)
+    array.set(mAnchor, i, anch)
+    array.set(mActiveMain, i, mainLive)
+    array.set(mActiveHdr, i, hdrLive)
+
+    array.set(mHiLine, i, hiL)
+    array.set(mLoLine, i, loL)
+    array.set(mHiLevel, i, hiLv)
+    array.set(mLoLevel, i, loLv)
+    array.set(mHiExt, i, hiLEX)
+    array.set(mLoExt, i, loLEX)
+    array.set(mExtActive, i, extA)
+    array.set(mExtEndDay, i, endDay)
+//#endregion
+
+// Full-height band envelope — shared by the live Macro/Killzone background boxes and
+// the next-window preview band. Every background box is bounded to recent price action
+// (highest/lowest of the last 500 bars) instead of the ±1e10 sentinel coordinates that
+// made TradingView's y-axis auto-fit explode to ±billions. Because both bounds are
+// actual traded prices and are recomputed every bar (and pushed into the boxes via
+// box.set_top/box.set_bottom on every update), the boxes keep spanning the full visible
+// price area as price moves, while auto-fit always stays anchored to the real market
+// price range. nz() falls back to the current bar's range for the first 499 bars of
+// loaded history, before the 500-bar window is full.
+float bgBandTop    = nz(ta.highest(high, 500), high)
+float bgBandBottom = nz(ta.lowest(low, 500),  low)
+
+//#region Current Macro Backgrounds — chart-height boxes following active macro windows
+for i = 0 to MACROS - 1
+    en   = array.get(mEnabled, i)
+    sess = array.get(mSessIn, i)
+    bg   = array.get(mActiveBg, i)
+
+    if en and inWindow(sess)
+        fill = array.get(mFills, i)
+        int t = bgTransp(macroFillOpacity)
+        [curS, curE] = currentStartEndTsClock(sess)
+        if na(bg)
+            bg := box.new(left = curS, right = curE, top = bgBandTop, bottom = bgBandBottom, xloc = xloc.bar_time, bgcolor = color.new(fill, t))
+            box.set_border_width(bg, 0)
+            box.set_border_color(bg, color.new(fill, 100))
+        else
+            box.set_left(bg, curS)
+            box.set_right(bg, curE)
+            box.set_top(bg, bgBandTop)
+            box.set_bottom(bg, bgBandBottom)
+            box.set_bgcolor(bg, color.new(fill, t))
+            box.set_border_width(bg, 0)
+            box.set_border_color(bg, color.new(fill, 100))
+        array.set(mActiveBg, i, bg)
+    else
+        if not na(bg)
+            box.delete(bg)
+            array.set(mActiveBg, i, na)
+//#endregion
+
+//#region Current Killzone Backgrounds — chart-height boxes following active KZ windows
+var box[] kActiveBg = array.new_box(KZS)
+for i = 0 to KZS - 1
+    en   = array.get(kEnabled, i)
+    sess = array.get(kSessIn, i)
+    bg   = array.get(kActiveBg, i)
+
+    if en and inWindow(sess)
+        fill = array.get(kFills, i)
+        int t = bgTransp(macroFillOpacity)
+        [curS, curE] = currentStartEndTsClock(sess)
+        if na(bg)
+            bg := box.new(left = curS, right = curE, top = bgBandTop, bottom = bgBandBottom, xloc = xloc.bar_time, bgcolor = color.new(fill, t))
+            box.set_border_width(bg, 0)
+            box.set_border_color(bg, color.new(fill, 100))
+        else
+            box.set_left(bg, curS)
+            box.set_right(bg, curE)
+            box.set_top(bg, bgBandTop)
+            box.set_bottom(bg, bgBandBottom)
+            box.set_bgcolor(bg, color.new(fill, t))
+            box.set_border_width(bg, 0)
+            box.set_border_color(bg, color.new(fill, 100))
+        array.set(kActiveBg, i, bg)
+    else
+        if not na(bg)
+            box.delete(bg)
+            array.set(kActiveBg, i, na)
+//#endregion
+
+//#region Next Macro selection (shared by header + next background)
+int bestIdx = na
+int bestS   = na
+int bestE   = na
+if showNextHeader
+    for i = 0 to MACROS - 1
+        en   = array.get(mEnabled, i)
+        sess = array.get(mSessIn, i)
+        bool isCur = isCurrentByClock(sess)
+        if en and not isCur
+            [ns, ne] = nextStartEndTsClock(sess)
+            if ns > time
+                if na(bestS) or ns < bestS
+                    bestS := ns
+                    bestE := ne
+                    bestIdx := i
+//#endregion
+
+//#region Next Macro Header (preview) — earliest future start
+var box nextHdr = na
+if showNextHeader
+    if not na(bestIdx)
+        txt  = array.get(mLabels, bestIdx)
+        fill = array.get(mFills, bestIdx)
+        nextHdr := ensurePreviewHeader(nextHdr, bestS, bestE, fill, txt)
+    else
+        if not na(nextHdr)
+            box.delete(nextHdr)
+            nextHdr := na
+else
+    if not na(nextHdr)
+        box.delete(nextHdr)
+        nextHdr := na
+//#endregion
+
+//#region NEXT Macro Background (preview) — chart-height band for the next macro window
+// Uses the shared full-height band envelope (bgBandTop / bgBandBottom) computed above.
+var box nextMacroBg = na
+if showNextHeader
+    if not na(bestIdx)
+        fill = array.get(mFills, bestIdx)
+        nextMacroBg := ensurePreviewBg(nextMacroBg, bestS, bestE, fill, bgBandTop, bgBandBottom)
+    else
+        if not na(nextMacroBg)
+            box.delete(nextMacroBg)
+            nextMacroBg := na
+else
+    if not na(nextMacroBg)
+        box.delete(nextMacroBg)
+        nextMacroBg := na
+//#endregion
+
+//#region Next Killzone Header (preview) — earliest future start (clock robust)
+var box nextKZHdr = na
+if showNextKZHeader
+    int bestIdxK = na
+    int bestSK   = na
+    int bestEK   = na
+    for i = 0 to KZS - 1
+        en   = array.get(kEnabled, i)
+        sess = array.get(kSessIn, i)
+        if en
+            bool curActive = isCurrentByClock(sess)
+            if not curActive
+                [ns, ne] = nextStartEndTsClock(sess)
+                if ns > time
+                    if na(bestSK) or ns < bestSK
+                        bestSK := ns
+                        bestEK := ne
+                        bestIdxK := i
+    if not na(bestIdxK)
+        txt = array.get(kLabels, bestIdxK)
+        fill = array.get(kFills, bestIdxK)
+        nextKZHdr := ensurePreviewHeader(nextKZHdr, bestSK, bestEK, fill, txt)
+else
+    if not na(nextKZHdr)
+        box.delete(nextKZHdr)
+        nextKZHdr := na
+//#endregion
+
+//#region Extension updaters — advance extended HL lines until price crosses or day rolls
+if showHL and extendHL
+    dayNow = dayofmonth(time, tzInput)
+
+    // Macros (per-window arrays) — iterate only across aligned items
+    mSize = array.size(mGBoxes)
+    mMin = mSize
+    mMin := math.min(mMin, array.size(mGHiExtActive))
+    mMin := math.min(mMin, array.size(mGLoExtActive))
+    mMin := math.min(mMin, array.size(mGHiExt))
+    mMin := math.min(mMin, array.size(mGLoExt))
+    mMin := math.min(mMin, array.size(mGHiLevel))
+    mMin := math.min(mMin, array.size(mGLoLevel))
+    mMin := math.min(mMin, array.size(mGExtEndDay))
+    mMin := math.min(mMin, array.size(mGEndTs))
+    mMin := math.min(mMin, array.size(mGHiExtLbl))
+    mMin := math.min(mMin, array.size(mGLoExtLbl))
+    if mMin > 0
+        for j = 0 to mMin - 1
+            if array.get(mGHiExtActive, j)
+                hiLEX = array.get(mGHiExt, j)
+                lvl   = array.get(mGHiLevel, j)
+                endD  = array.get(mGExtEndDay, j)
+                endTs = array.get(mGEndTs, j)
+                lbl   = array.get(mGHiExtLbl, j)
+                crossed = high >= lvl and low <= lvl
+                if not na(hiLEX)
+                    // keep width updated
+                    line.set_width(hiLEX, extendWidth)
+                    if (not extendAcrossDays and dayNow != endD) or crossed
+                        line.set_x2(hiLEX, bar_index)
+                        array.set(mGHiExtActive, j, false)
+                        // remove label
+                        if not na(lbl)
+                            label.delete(lbl)
+                            array.set(mGHiExtLbl, j, na)
+                    else
+                        line.set_x2(hiLEX, bar_index)
+                        if showExtLabels
+                            // place label slightly above
+                            y = lvl + 2 * syminfo.mintick
+                            txt = dowShortName(endTs) + " • " + array.get(mLabels, array.get(mGId, j)) + " H"
+                            fillC = array.get(mFills, array.get(mGId, j))
+                            if na(lbl)
+                                lbl := label.new(bar_index, y, txt, xloc = xloc.bar_index, style = label.style_label_right, textcolor = color.white, color = color.new(fillC, 0), size = size.normal)
+                            else
+                                label.set_x(lbl, bar_index)
+                                label.set_y(lbl, y)
+                                label.set_text(lbl, txt)
+                                label.set_color(lbl, color.new(fillC, 0))
+                            array.set(mGHiExtLbl, j, lbl)
+                        else
+                            if not na(lbl)
+                                label.delete(lbl)
+                                array.set(mGHiExtLbl, j, na)
+            if array.get(mGLoExtActive, j)
+                loLEX = array.get(mGLoExt, j)
+                lvl   = array.get(mGLoLevel, j)
+                endD  = array.get(mGExtEndDay, j)
+                endTs = array.get(mGEndTs, j)
+                lbl   = array.get(mGLoExtLbl, j)
+                crossed = high >= lvl and low <= lvl
+                if not na(loLEX)
+                    // keep width updated
+                    line.set_width(loLEX, extendWidth)
+                    if (not extendAcrossDays and dayNow != endD) or crossed
+                        line.set_x2(loLEX, bar_index)
+                        array.set(mGLoExtActive, j, false)
+                        if not na(lbl)
+                            label.delete(lbl)
+                            array.set(mGLoExtLbl, j, na)
+                    else
+                        line.set_x2(loLEX, bar_index)
+                        if showExtLabels
+                            // place label slightly below
+                            y = lvl - 2 * syminfo.mintick
+                            txt = dowShortName(endTs) + " • " + array.get(mLabels, array.get(mGId, j)) + " L"
+                            fillC = array.get(mFills, array.get(mGId, j))
+                            if na(lbl)
+                                lbl := label.new(bar_index, y, txt, xloc = xloc.bar_index, style = label.style_label_right, textcolor = color.white, color = color.new(fillC, 0), size = size.normal)
+                            else
+                                label.set_x(lbl, bar_index)
+                                label.set_y(lbl, y)
+                                label.set_text(lbl, txt)
+                                label.set_color(lbl, color.new(fillC, 0))
+                            array.set(mGLoExtLbl, j, lbl)
+                        else
+                            if not na(lbl)
+                                label.delete(lbl)
+                                array.set(mGLoExtLbl, j, na)
+
+    // Killzones (per-window arrays) — iterate only across aligned items
+    kSize = array.size(kGBoxes)
+    kMin = kSize
+    kMin := math.min(kMin, array.size(kGHiExtActive))
+    kMin := math.min(kMin, array.size(kGLoExtActive))
+    kMin := math.min(kMin, array.size(kGHiExt))
+    kMin := math.min(kMin, array.size(kGLoExt))
+    kMin := math.min(kMin, array.size(kGHiLevel))
+    kMin := math.min(kMin, array.size(kGLoLevel))
+    kMin := math.min(kMin, array.size(kGExtEndDay))
+    kMin := math.min(kMin, array.size(kGEndTs))
+    kMin := math.min(kMin, array.size(kGHiExtLbl))
+    kMin := math.min(kMin, array.size(kGLoExtLbl))
+    if kMin > 0
+        for j = 0 to kMin - 1
+            if array.get(kGHiExtActive, j)
+                hiLEX = array.get(kGHiExt, j)
+                lvl   = array.get(kGHiLevel, j)
+                endD  = array.get(kGExtEndDay, j)
+                endTs = array.get(kGEndTs, j)
+                lbl   = array.get(kGHiExtLbl, j)
+                crossed = high >= lvl and low <= lvl
+                if not na(hiLEX)
+                    line.set_width(hiLEX, extendWidth)
+                    if (not extendAcrossDays and dayNow != endD) or crossed
+                        line.set_x2(hiLEX, bar_index)
+                        array.set(kGHiExtActive, j, false)
+                        if not na(lbl)
+                            label.delete(lbl)
+                            array.set(kGHiExtLbl, j, na)
+                    else
+                        line.set_x2(hiLEX, bar_index)
+                        if showExtLabels
+                            y = lvl + 2 * syminfo.mintick
+                            txt = dowShortName(endTs) + " • " + array.get(kLabels, array.get(kGId, j)) + " H"
+                            fillC = array.get(kFills, array.get(kGId, j))
+                            if na(lbl)
+                                lbl := label.new(bar_index, y, txt, xloc = xloc.bar_index, style = label.style_label_right, textcolor = color.white, color = color.new(fillC, 0), size = size.normal)
+                            else
+                                label.set_x(lbl, bar_index)
+                                label.set_y(lbl, y)
+                                label.set_text(lbl, txt)
+                                label.set_color(lbl, color.new(fillC, 0))
+                            array.set(kGHiExtLbl, j, lbl)
+                        else
+                            if not na(lbl)
+                                label.delete(lbl)
+                                array.set(kGHiExtLbl, j, na)
+            if array.get(kGLoExtActive, j)
+                loLEX = array.get(kGLoExt, j)
+                lvl   = array.get(kGLoLevel, j)
+                endD  = array.get(kGExtEndDay, j)
+                endTs = array.get(kGEndTs, j)
+                lbl   = array.get(kGLoExtLbl, j)
+                crossed = high >= lvl and low <= lvl
+                if not na(loLEX)
+                    line.set_width(loLEX, extendWidth)
+                    if (not extendAcrossDays and dayNow != endD) or crossed
+                        line.set_x2(loLEX, bar_index)
+                        array.set(kGLoExtActive, j, false)
+                        if not na(lbl)
+                            label.delete(lbl)
+                            array.set(kGLoExtLbl, j, na)
+                    else
+                        line.set_x2(loLEX, bar_index)
+                        if showExtLabels
+                            y = lvl - 2 * syminfo.mintick
+                            txt = dowShortName(endTs) + " • " + array.get(kLabels, array.get(kGId, j)) + " L"
+                            fillC = array.get(kFills, array.get(kGId, j))
+                            if na(lbl)
+                                lbl := label.new(bar_index, y, txt, xloc = xloc.bar_index, style = label.style_label_right, textcolor = color.white, color = color.new(fillC, 0), size = size.normal)
+                            else
+                                label.set_x(lbl, bar_index)
+                                label.set_y(lbl, y)
+                                label.set_text(lbl, txt)
+                                label.set_color(lbl, color.new(fillC, 0))
+                            array.set(kGLoExtLbl, j, lbl)
+                        else
+                            if not na(lbl)
+                                label.delete(lbl)
+                                array.set(kGLoExtLbl, j, na)
+//#endregion
+
+//#region Opening Prices — Engine
+// Compute timestamps for today in tzInput, and the selected Opening Prices session bounds
+dayMs = 24 * 60 * 60 * 1000
+yy  = year(time, tzInput)
+mo  = month(time, tzInput)
+dd  = dayofmonth(time, tzInput)
+
+// Parse HH:MM inputs
+[t1h, t1m] = parseTimeStrToHM(opTime1)
+[t2h, t2m] = parseTimeStrToHM(opTime2)
+[t3h, t3m] = parseTimeStrToHM(opTime3)
+tsT1 = timestamp(tzInput, yy, mo, dd, t1h, t1m)
+tsT2 = timestamp(tzInput, yy, mo, dd, t2h, t2m)
+tsT3 = timestamp(tzInput, yy, mo, dd, t3h, t3m)
+
+// Session bounds for opening prices (clock-robust, aligned around now)
+[tsSessStart, tsSessEnd] = currentStartEndTsClock(opSession)
+
+// Is current bar in the configured opening-prices session?
+inOpSession = time >= tsSessStart and time < tsSessEnd
+
+// Hard reset on session rollover (delete all lines/labels regardless of in/out state)
+if na(opPrevSessStart) or tsSessStart != opPrevSessStart
+    [tmpL1, tmpLb1] = opDelete(opT1, opT1Lbl)
+    opT1 := tmpL1
+    opT1Lbl := tmpLb1
+    [tmpL2, tmpLb2] = opDelete(opT2, opT2Lbl)
+    opT2 := tmpL2
+    opT2Lbl := tmpLb2
+    [tmpL3, tmpLb3] = opDelete(opT3, opT3Lbl)
+    opT3 := tmpL3
+    opT3Lbl := tmpLb3
+    [tmpL4, tmpLb4] = opDelete(opMidnight, opMidnightLbl)
+    opMidnight := tmpL4
+    opMidnightLbl := tmpLb4
+    [tmpL5, tmpLb5] = opDelete(opNYOpen, opNYOpenLbl)
+    opNYOpen := tmpL5
+    opNYOpenLbl := tmpLb5
+    // Reset cached levels
+    opT1Y := na
+    opT2Y := na
+    opT3Y := na
+    opMidnightY := na
+    opNYOpenY := na
+    // Update tracker
+    opPrevSessStart := tsSessStart
+
+// remove all opening price lines when session ends or is not active
+if not inOpSession
+    [newL1, newLbl1] = opDelete(opT1, opT1Lbl)
+    opT1 := newL1
+    opT1Lbl := newLbl1
+    [newL2, newLbl2] = opDelete(opT2, opT2Lbl)
+    opT2 := newL2
+    opT2Lbl := newLbl2
+    [newL3, newLbl3] = opDelete(opT3, opT3Lbl)
+    opT3 := newL3
+    opT3Lbl := newLbl3
+    // built-in lines
+    [delL2, delLb2] = opDelete(opMidnight, opMidnightLbl)
+    opMidnight := delL2
+    opMidnightLbl := delLb2
+    [delL3, delLb3] = opDelete(opNYOpen, opNYOpenLbl)
+    opNYOpen := delL3
+    opNYOpenLbl := delLb3
+    // reset cached levels
+    opMidnightY := na
+    opNYOpenY := na
+else
+    // Start a line exactly at/after each configured time if within the session window
+    [cL1, cLbl1, newY1] = opMaybeCreate(tsT1, tsSessStart, tsSessEnd, opEnableT1, opTime1, opColorT1, opT1, opT1Lbl)
+    opT1 := cL1
+    opT1Lbl := cLbl1
+    if not na(newY1)
+        opT1Y := newY1
+    [cL2, cLbl2, newY2] = opMaybeCreate(tsT2, tsSessStart, tsSessEnd, opEnableT2, opTime2, opColorT2, opT2, opT2Lbl)
+    opT2 := cL2
+    opT2Lbl := cLbl2
+    if not na(newY2)
+        opT2Y := newY2
+    [cL3, cLbl3, newY3] = opMaybeCreate(tsT3, tsSessStart, tsSessEnd, opEnableT3, opTime3, opColorT3, opT3, opT3Lbl)
+    opT3 := cL3
+    opT3Lbl := cLbl3
+    if not na(newY3)
+        opT3Y := newY3
+
+    // Update line right edges each bar, capped at session end
+    if not na(opT1)
+        opT1Lbl := opUpdate(opT1, opT1Lbl, opT1Y, tsSessEnd, opTime1, opColorT1)
+    if not na(opT2)
+        opT2Lbl := opUpdate(opT2, opT2Lbl, opT2Y, tsSessEnd, opTime2, opColorT2)
+    if not na(opT3)
+        opT3Lbl := opUpdate(opT3, opT3Lbl, opT3Y, tsSessEnd, opTime3, opColorT3)
+
+    // Built-in timestamps (Midnight and NY Open) for today in tzInput
+    [nyh, nym] = hhmmToInts("0930")
+    tsNYOpen = timestamp(tzInput, yy, mo, dd, nyh, nym)
+    tsMidnight = timestamp(tzInput, yy, mo, dd, 0, 0)
+
+    // Midnight and NY Open Y: trigger when bar steps over those times inside session
+    if opShowMidnight and time >= tsMidnight and time[1] < tsMidnight and tsMidnight >= tsSessStart and tsMidnight < tsSessEnd
+        opMidnightY := open
+    if opShowNYOpen and time >= tsNYOpen and time[1] < tsNYOpen and tsNYOpen >= tsSessStart and tsNYOpen < tsSessEnd
+        opNYOpenY := open
+
+    // Reset per-session built-in levels when entering a session
+    if inOpSession and not opWasInSession
+        opMidnightY := na
+        opNYOpenY := na
+
+    // Ensure/create built-in lines at their levels and update right edge
+    if opShowMidnight and not na(opMidnightY)
+        [ensL2, ensLb2] = opEnsureAtY(tsMidnight, opMidnightY, opShowMidnight, "Midnight", opColorMidnight, opMidnight, opMidnightLbl)
+        opMidnight := ensL2
+        opMidnightLbl := ensLb2
+        opMidnightLbl := opUpdate(opMidnight, opMidnightLbl, opMidnightY, tsSessEnd, "Midnight", opColorMidnight)
+    if opShowNYOpen and not na(opNYOpenY)
+        [ensL3, ensLb3] = opEnsureAtY(tsNYOpen, opNYOpenY, opShowNYOpen, "NY Open", opColorNYOpen, opNYOpen, opNYOpenLbl)
+        opNYOpen := ensL3
+        opNYOpenLbl := ensLb3
+        opNYOpenLbl := opUpdate(opNYOpen, opNYOpenLbl, opNYOpenY, tsSessEnd, "NY Open", opColorNYOpen)
+
+    // If toggles are turned off mid-session, delete corresponding lines
+    if not opShowMidnight and not na(opMidnight)
+        [del2L2, del2Lb2] = opDelete(opMidnight, opMidnightLbl)
+        opMidnight := del2L2
+        opMidnightLbl := del2Lb2
+    if not opShowNYOpen and not na(opNYOpen)
+        [del2L3, del2Lb3] = opDelete(opNYOpen, opNYOpenLbl)
+        opNYOpen := del2L3
+        opNYOpenLbl := del2Lb3
+
+// Track session membership each bar for close latching
+opWasInSession := inOpSession
+opPrevSessStart := tsSessStart
+//#endregion

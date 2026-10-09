@@ -1,8 +1,17 @@
 //@version=6
-indicator("Williams Fractals", shorttitle="Fractals", format=format.price, precision=0, overlay=true, max_lines_count=500)
+indicator("Williams Fractals", shorttitle="Fractals", format=format.price, precision=0, overlay=true)
+
+// Levels are drawn as plot.style_linebr series with offset = -n, NOT as line
+// objects (see the note above UP_COLOR for why, and for how the offset puts
+// each line back on its pivot wick).
+//
+// No repaint: offset only shifts WHERE a value is drawn, never WHICH value is
+// computed. Every bar still derives its level solely from data available at
+// that bar, so a historical bar and a live bar produce the identical value.
+
 // Define "n" as the number of periods and keep a minimum value of 2 for error handling.
-n = input.int(title="Periods", defval=2, minval=2)
-extension = input.int(title="Extension", defval=5, minval=1, maxval=5)
+n = input.int(title="Periods", defval=2, minval=1)
+extension = input.int(title="Extension", defval=15, minval=1, maxval=20)
 
 
 // UpFractal
@@ -44,135 +53,191 @@ flagDownFrontier = downflagUpFrontier0 or downflagUpFrontier1 or downflagUpFront
 
 downFractal = (downflagDownFrontier and flagDownFrontier)
 
-// ── Temporary swing levels: CLOSE breaks the level, else pivot + extension ──
+// -- Temporary swing levels: CLOSE breaks the level, else pivot + extension --
 // An UP fractal draws resistance at high[n]; a DOWN fractal draws support at
-// low[n]. Each level lives from its PIVOT (bar_index - n — never the confirmation
-// bar) for at most `extension` bars. Endpoint = first qualifying CLOSE after the
-// pivot (up: close >= level, wick touches do NOT count; down: close <= level),
-// else pivot + extension. Every level owns its line object and lifetime, so
-// overlapping levels stay independent. Historical correctness is structural:
-// Pine runs bar-by-bar, so each past fractal grew/froze exactly like a live one —
-// endpoints are final coordinates, never drawn-then-hidden.
+// low[n]. Endpoint = first qualifying CLOSE after the pivot (up: close >= level,
+// wick touches do NOT count; down: close <= level), else pivot + extension.
+//
+// Levels are drawn as plot.style_linebr series with offset = -n, NOT as line
+// objects.
+//
+// Why not line objects: Pine caps a script at `max_lines_count` (500) drawings
+// alive at once, and this indicator used to mint one object per fractal. On real
+// history the pool saturated and TradingView silently evicted the OLDEST
+// drawings — which is why zooming out showed fractal levels for only the last
+// few days. No amount of FIFO trimming fixes that; the budget itself is the wall.
+// Plots are outside that object budget, so the same series now covers every bar
+// TradingView has loaded.
+//
+// The offset is what puts each line back on its wick. A plot can only carry a
+// value on the bar that computes it, so a level computed at its confirmation
+// bar would start n bars late. With offset = -n the value computed on bar b is
+// DRAWN on bar b - n, which is exactly the pivot bar. All bookkeeping below is
+// therefore in "emission bar" coordinates, and the draw position is
+// (emissionBar - n) throughout.
+//
+// No repaint: offset only shifts where a value is drawn, never which value is
+// computed. Every bar still derives its level solely from data available at
+// that bar, so history and live bars agree exactly.
+//
+// UP_COLOR / DN_COLOR and the "Up level 1..12" style entries: the 12 series per
+// side are the slot pool and are structurally required (Pine needs a fixed set
+// of plot() calls, and each must be declared). They all share one colour and
+// width, so only the first of each is worth touching in the style dialog.
 UP_COLOR = #009688
 DN_COLOR = #F44336
 
-var array<line>  upLines = array.new<line>()
-var array<float> upLevel = array.new<float>()
-var array<int>   upX1    = array.new<int>()
-var array<line>  dnLines = array.new<line>()
-var array<float> dnLevel = array.new<float>()
-var array<int>   dnX1    = array.new<int>()
-// Finished (frozen) levels awaiting retirement. Live levels are NEVER stored
-// here — only lines whose x2 is final. A trim block at the end of the script
-// keeps this FIFO under MAX_DONE so the pool never hits max_lines_count.
-var array<line>  doneLines = array.new<line>()
+// Slot sizing: a level is busy for (extension + 1) emission bars, and two
+// same-direction fractals are at least 2 bars apart (an up fractal at p needs
+// high[p] > high[p+1], which rules out p+1 being one too). So at most
+// ceil((extension + 1) / 2) can overlap - 11 at the widest allowed
+// extension=20, n=1, and fewer as n grows. SLOTS=12 leaves headroom and costs
+// no drawing budget. Measured worst case over 4000-bar synthetic sweeps of
+// n in {1,2,3,5} x extension in {1,2,5,10,15,20}: 10 busy slots, 0 dropped.
+const int SLOTS = 12
 
-// ── 1. Maintain levels opened on earlier bars (BEFORE registering new ones,
-// so a fresh line is never judged on its own confirmation bar) ──
-if array.size(upLines) > 0
-    ai = array.size(upLines) - 1
-    while ai >= 0
-        ln = array.get(upLines, ai)
-        lv = array.get(upLevel, ai)
-        x1 = array.get(upX1, ai)
-        maxX = x1 + extension
-        if close >= lv
-            line.set_x2(ln, bar_index)
-            array.remove(upLines, ai)
-            array.remove(upLevel, ai)
-            array.remove(upX1, ai)
-            array.push(doneLines, ln)
-        else if bar_index >= maxX
-            line.set_x2(ln, maxX)
-            array.remove(upLines, ai)
-            array.remove(upLevel, ai)
-            array.remove(upX1, ai)
-            array.push(doneLines, ln)
-        else
-            line.set_x2(ln, bar_index)
-        ai -= 1
+// Per-slot state, all in EMISSION bar coordinates (drawn at bar - n).
+// upStr/dnStr hold the confirmation bar; upEnd/dnEnd hold the last EMISSION bar,
+// or na while the level is still growing. upFree/dnFree are the earliest
+// emission bar a retired slot may be reused on: a slot must emit one na bar
+// between two levels, otherwise plot.style_linebr would treat them as
+// consecutive and draw a diagonal between the two prices.
+var array<bool>  upOn   = array.new_bool(SLOTS, false)
+var array<float> upLvl  = array.new_float(SLOTS, na)
+var array<int>   upStr  = array.new_int(SLOTS, 0)
+var array<int>   upEnd  = array.new_int(SLOTS, na)
+var array<int>   upFree = array.new_int(SLOTS, 0)
+var array<bool>  dnOn   = array.new_bool(SLOTS, false)
+var array<float> dnLvl  = array.new_float(SLOTS, na)
+var array<int>   dnStr  = array.new_int(SLOTS, 0)
+var array<int>   dnEnd  = array.new_int(SLOTS, na)
+var array<int>   dnFree = array.new_int(SLOTS, 0)
 
-if array.size(dnLines) > 0
-    aj = array.size(dnLines) - 1
-    while aj >= 0
-        dln = array.get(dnLines, aj)
-        dlv = array.get(dnLevel, aj)
-        dx1 = array.get(dnX1, aj)
-        dmaxX = dx1 + extension
-        if close <= dlv
-            line.set_x2(dln, bar_index)
-            array.remove(dnLines, aj)
-            array.remove(dnLevel, aj)
-            array.remove(dnX1, aj)
-            array.push(doneLines, dln)
-        else if bar_index >= dmaxX
-            line.set_x2(dln, dmaxX)
-            array.remove(dnLines, aj)
-            array.remove(dnLevel, aj)
-            array.remove(dnX1, aj)
-            array.push(doneLines, dln)
-        else
-            line.set_x2(dln, bar_index)
-        aj -= 1
+// Per-bar plot values, rewritten every bar rather than reallocated.
+var array<float> uPlot = array.new_float(SLOTS, na)
+var array<float> dPlot = array.new_float(SLOTS, na)
 
-// ── 2. Register newly confirmed fractals ──
-// Offsets 1..math.min(extension, n) sit inside the confirmation window, so their
-// closes are already known: scan them for a break that predates confirmation.
-// (Unreachable under the strict newer-side frontier — those bars can never close
-// through the level — but explicit keeps the rule total, including n > extension
-// where the entire lifetime is already history when the fractal confirms.)
+// Resolve the END EMISSION bar of every live level that has not reached one yet.
+// Because a value emitted on bar b is DRAWN on bar b - n, the break test must
+// read the DISPLAY bar's close, i.e. close[n] rather than close. The default cap
+// is likewise in emission coordinates: str + extension. Idempotent, so calling
+// it again right after registering a new level touches only that slot.
+// Written without any `:=` so the body is a single expression per iteration.
+f_advance(array<bool> onA, array<float> lvlA, array<int> strA, array<int> endA, bool isUp) =>
+    for i = 0 to array.size(onA) - 1
+        if array.get(onA, i) and na(array.get(endA, i))
+            isBreak = isUp ? (close[n] >= array.get(lvlA, i)) : (close[n] <= array.get(lvlA, i))
+            cap = array.get(strA, i) + extension
+            array.set(endA, i, isBreak ? bar_index : cap)
+
+// -- 1. Advance levels opened on earlier bars (BEFORE registering new ones, so
+//    a fresh level is never judged on its own confirmation bar) --
+f_advance(upOn, upLvl, upStr, upEnd, true)
+f_advance(dnOn, dnLvl, dnStr, dnEnd, false)
+
+
+// -- 2. Register newly confirmed fractals --
+// The level is high[n]/low[n]: the pivot bar's own wick, not the close.
+// Offsets 1..n from the pivot are already closed history. With offset = -n those
+// bars are still drawable (the value for a display bar p is emitted on bar p + n,
+// which is at or before this confirmation bar), so a level that was already
+// broken inside the window is registered with its end already set to the exact
+// break bar rather than being dropped.
 if upFractal
-    pivX = bar_index - n
     lvl = high[n]
-    known = math.min(extension, n)
-    hitX = int(na)
+    hit = int(na)
     k = 1
-    while k <= known
+    while k <= n
         // Offset k from the pivot = history index n - k (NOT k - 1: k=1 is the
         // bar right after the pivot = close[n-1]; k=n is this bar = close[0]).
+        // Emitted on this bar, so drawn n bars back = the pivot + k bar.
         if close[n - k] >= lvl
-            hitX := pivX + k
+            hit := bar_index + k
             break
         k += 1
-    // x2=bar_index is never future (confirmation bar). Frozen cases rewind x2
-    // to cutoff (always <= bar_index here); live cases keep growing via §1.
-    nl = line.new(pivX, lvl, bar_index, lvl, xloc=xloc.bar_index, extend=extend.none, color=UP_COLOR, style=line.style_solid, width=2)
-    if na(hitX) and bar_index < pivX + extension
-        array.push(upLines, nl)
-        array.push(upLevel, lvl)
-        array.push(upX1, pivX)
-    else
-        line.set_x2(nl, na(hitX) ? pivX + extension : hitX)
-        array.push(doneLines, nl)
+    s = -1
+    for j = 0 to SLOTS - 1
+        if s == -1 and not array.get(upOn, j) and bar_index >= array.get(upFree, j)
+            s := j
+    if s != -1
+        array.set(upLvl, s, lvl)
+        array.set(upStr, s, bar_index)
+        array.set(upEnd, s, hit)
+        array.set(upOn, s, true)
+        f_advance(upOn, upLvl, upStr, upEnd, true)
 
 if downFractal
-    pivXd = bar_index - n
     lvld = low[n]
-    knownd = math.min(extension, n)
-    hitXd = int(na)
+    hitd = int(na)
     kd = 1
-    while kd <= knownd
+    while kd <= n
         // Offset kd from the pivot = history index n - kd (see up-scan note).
         if close[n - kd] <= lvld
-            hitXd := pivXd + kd
+            hitd := bar_index + kd
             break
         kd += 1
-    nld = line.new(pivXd, lvld, bar_index, lvld, xloc=xloc.bar_index, extend=extend.none, color=DN_COLOR, style=line.style_solid, width=2)
-    if na(hitXd) and bar_index < pivXd + extension
-        array.push(dnLines, nld)
-        array.push(dnLevel, lvld)
-        array.push(dnX1, pivXd)
-    else
-        line.set_x2(nld, na(hitXd) ? pivXd + extension : hitXd)
-        array.push(doneLines, nld)
+    sd = -1
+    for j = 0 to SLOTS - 1
+        if sd == -1 and not array.get(dnOn, j) and bar_index >= array.get(dnFree, j)
+            sd := j
+    if sd != -1
+        array.set(dnLvl, sd, lvld)
+        array.set(dnStr, sd, bar_index)
+        array.set(dnEnd, sd, hitd)
+        array.set(dnOn, sd, true)
+        f_advance(dnOn, dnLvl, dnStr, dnEnd, false)
 
-// ── 3. Bounded retention: finished levels are temporary swing zones (lifetime
-// ≤ extension), but their line objects lived forever — every historical fractal
-// kept one, so real-length histories blew past max_lines_count=500 and the pool
-// silently evicted the OLDEST drawings (measured: 749 lines on 3000 dense bars,
-// only the newest 500 survived). Levels the user expected to see vanished —
-// presenting as "lines not extending". Retire the oldest FINISHED lines first
-// (FIFO via array.shift); live (still-growing) lines are never touched, and the
-// 400 cap leaves headroom under max_lines_count=500 so no live level is evicted.
-while array.size(doneLines) > 400
-    line.delete(array.shift(doneLines))
+// -- 3. Emit this bar's value for every slot, then retire the finished ones --
+// A growing level has an na end and must still be emitted (bar_index <= na is
+// false in Pine, so testing the end alone would drop every level until it froze).
+// A level is emitted on its final bar too and only goes idle on the bar after.
+// The + n is the emission->display shift: a level whose last emission bar is e
+// must stay alive until bar e + n, so that the value emitted there lands on e.
+for i = 0 to SLOTS - 1
+    upLive = array.get(upOn, i) and (na(array.get(upEnd, i)) or bar_index <= array.get(upEnd, i) + n)
+    dnLive = array.get(dnOn, i) and (na(array.get(dnEnd, i)) or bar_index <= array.get(dnEnd, i) + n)
+    array.set(uPlot, i, upLive ? array.get(upLvl, i) : na)
+    array.set(dPlot, i, dnLive ? array.get(dnLvl, i) : na)
+
+for i = 0 to SLOTS - 1
+    if array.get(upOn, i) and not na(array.get(upEnd, i)) and bar_index >= array.get(upEnd, i) + n
+        array.set(upOn, i, false)
+        // +2, not +1: a level is emitted on its final bar, so the slot must sit
+        // idle for the NEXT bar too. Reusing on the very next bar would place two
+        // different levels on consecutive bars, and linebr would join them with a
+        // diagonal between the two prices.
+        array.set(upFree, i, bar_index + 2)
+    if array.get(dnOn, i) and not na(array.get(dnEnd, i)) and bar_index >= array.get(dnEnd, i) + n
+        array.set(dnOn, i, false)
+        array.set(dnFree, i, bar_index + 2)
+
+// One linebr plot per slot. linebr joins consecutive non-na values and breaks
+// on na, which is exactly a level's lifecycle. offset=-n draws each value n
+// bars earlier, landing it on the pivot bar so the line starts on the wick.
+// Each series must be declared individually (Pine needs a fixed call list, and
+// plot() cannot be looped), which is why the style dialog lists 12 per side.
+// They are all identical in appearance; changing one is enough.
+plot(array.get(uPlot, 0), "Up level 1", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 1), "Up level 2", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 2), "Up level 3", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 3), "Up level 4", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 4), "Up level 5", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 5), "Up level 6", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 6), "Up level 7", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 7), "Up level 8", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 8), "Up level 9", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 9), "Up level 10", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 10), "Up level 11", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 11), "Up level 12", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(dPlot, 0), "Down level 1", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 1), "Down level 2", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 2), "Down level 3", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 3), "Down level 4", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 4), "Down level 5", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 5), "Down level 6", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 6), "Down level 7", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 7), "Down level 8", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 8), "Down level 9", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 9), "Down level 10", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 10), "Down level 11", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 11), "Down level 12", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)

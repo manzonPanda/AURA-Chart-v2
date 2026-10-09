@@ -20,6 +20,21 @@ export type EmaSlotId = "ema9" | "ema20";
 /** One configurable EMA slot. */
 export interface EmaConfig {
   enabled: boolean;
+  /**
+   * Whether this overlay is part of the ACTIVE indicator list.
+   *
+   * Distinct from `enabled`:
+   *   - `active: false` → the slot is REMOVED: it disappears from the
+   *     upper-left indicator legend entirely, but its period / color / width /
+   *     source are PRESERVED so re-adding restores the user's configuration
+   *     instead of resetting it.
+   *   - `active: true, enabled: false` → listed but hidden (the eye toggle).
+   *
+   * Absence of a stored value defaults to `true`, so every existing user sees
+   * exactly the list they see today. `enabled` keeps its original meaning
+   * everywhere else (it is the only flag EmaBridge consults when painting).
+   */
+  active: boolean;
   /** Positive integer (1–500). */
   period: number;
   /** Price series the EMA averages (Pine `input.source` analogue). */
@@ -55,13 +70,13 @@ export const EMA_SLOTS: readonly EmaSlot[] = [
     id: "ema9",
     label: "EMA 9",
     // Warm amber — reads clearly against the teal/red candles and the sky accent.
-    defaults: { enabled: true, period: 9, source: DEFAULT_PRICE_SOURCE, color: "#fbbf24", width: 2 },
+    defaults: { enabled: true, active: true, period: 9, source: DEFAULT_PRICE_SOURCE, color: "#fbbf24", width: 2 },
   },
   {
     id: "ema20",
     label: "EMA 20",
     // The AURA accent blue (--accent) for the slower average.
-    defaults: { enabled: true, period: 20, source: DEFAULT_PRICE_SOURCE, color: "#38bdf8", width: 2 },
+    defaults: { enabled: true, active: true, period: 20, source: DEFAULT_PRICE_SOURCE, color: "#38bdf8", width: 2 },
   },
 ];
 
@@ -78,6 +93,7 @@ function sanitizeConfig(raw: unknown, fallback: EmaConfig): EmaConfig {
   if (!raw || typeof raw !== "object") return out;
   const r = raw as Record<string, unknown>;
   if (typeof r.enabled === "boolean") out.enabled = r.enabled;
+  if (typeof r.active === "boolean") out.active = r.active;
   if (isValidEmaPeriod(r.period)) out.period = r.period;
   if (isPriceSource(r.source)) out.source = r.source;
   if (typeof r.color === "string") {

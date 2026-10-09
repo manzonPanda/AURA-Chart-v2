@@ -212,12 +212,13 @@ test("valid fields are kept; invalid ones fall back individually", () => {
   });
   assert.deepEqual(out.ema9, {
     enabled: false,
+    active: true, // absent → default active (listed), as before this field existed
     period: 12,
     source: "close", // absent → default source (Pine input.source analogue)
     color: "#ff8800",
     width: 3,
   });
-  assert.deepEqual(out.ema20, { enabled: true, period: 20, source: "close", color: "#38bdf8aa", width: 2 });
+  assert.deepEqual(out.ema20, { enabled: true, active: true, period: 20, source: "close", color: "#38bdf8aa", width: 2 });
 });
 
 test("out-of-range values are rejected: period bounds, width bounds", () => {
@@ -229,6 +230,13 @@ test("out-of-range values are rejected: period bounds, width bounds", () => {
   assert.equal(out.ema9.width, 2);
   assert.equal(out.ema20.period, 20);
   assert.equal(out.ema20.width, 2);
+});
+
+test("a stored `active:false` round-trips (removed overlay stays removed)", () => {
+  const out = sanitizeEmaSettings({ ema9: { active: false, period: 12 } });
+  assert.equal(out.ema9.active, false, "removal is persisted, not reset by sanitize");
+  assert.equal(out.ema9.period, 12, "configuration is preserved alongside it");
+  assert.equal(out.ema20.active, true, "the other slot is untouched");
 });
 
 test("sanitizing is idempotent (load → save → load roundtrip)", () => {

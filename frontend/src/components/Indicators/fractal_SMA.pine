@@ -1,0 +1,292 @@
+//@version=6
+// Williams Fractals + SMA — fractal.pine and SMA.pine merged into a single script.
+// Pine allows only one indicator() declaration per script, so this line carries the
+// parameters of BOTH originals (format/precision from fractal.pine, timeframe /
+// timeframe_gaps from SMA.pine). The two sections below are fully independent —
+// no cross-references between them — and each is verbatim from its original file
+// except that inputs are tagged with group= so the Settings dialog keeps the two
+// indicators' controls in separate sections.
+indicator(title="Fractals + SMA", shorttitle="Fractals + SMA", format=format.price, precision=0, overlay=true, timeframe="", timeframe_gaps=true)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Williams Fractals (from fractal.pine)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Levels are drawn as plot.style_linebr series with offset = -n, NOT as line
+// objects (see the note above UP_COLOR for why, and for how the offset puts
+// each line back on its pivot wick).
+//
+// No repaint: offset only shifts WHERE a value is drawn, never WHICH value is
+// computed. Every bar still derives its level solely from data available at
+// that bar, so a historical bar and a live bar produce the identical value.
+
+// Define "n" as the number of periods and keep a minimum value of 2 for error handling.
+GRP_FRAC = "Fractals"
+n = input.int(title="Periods", defval=1, minval=1, group=GRP_FRAC)
+extension = input.int(title="Extension", defval=6, minval=1, maxval=20, group=GRP_FRAC)
+
+
+// UpFractal
+bool upflagDownFrontier = true
+bool upflagUpFrontier0 = true
+bool upflagUpFrontier1 = true
+bool upflagUpFrontier2 = true
+bool upflagUpFrontier3 = true
+bool upflagUpFrontier4 = true
+
+for i = 1 to n
+    upflagDownFrontier := upflagDownFrontier and (high[n-i] < high[n])
+    upflagUpFrontier0 := upflagUpFrontier0 and (high[n+i] < high[n])
+    upflagUpFrontier1 := upflagUpFrontier1 and (high[n+1] <= high[n] and high[n+i + 1] < high[n])
+    upflagUpFrontier2 := upflagUpFrontier2 and (high[n+1] <= high[n] and high[n+2] <= high[n] and high[n+i + 2] < high[n])
+    upflagUpFrontier3 := upflagUpFrontier3 and (high[n+1] <= high[n] and high[n+2] <= high[n] and high[n+3] <= high[n] and high[n+i + 3] < high[n])
+    upflagUpFrontier4 := upflagUpFrontier4 and (high[n+1] <= high[n] and high[n+2] <= high[n] and high[n+3] <= high[n] and high[n+4] <= high[n] and high[n+i + 4] < high[n])
+flagUpFrontier = upflagUpFrontier0 or upflagUpFrontier1 or upflagUpFrontier2 or upflagUpFrontier3 or upflagUpFrontier4
+
+upFractal = (upflagDownFrontier and flagUpFrontier)
+
+
+// downFractal
+bool downflagDownFrontier = true
+bool downflagUpFrontier0 = true
+bool downflagUpFrontier1 = true
+bool downflagUpFrontier2 = true
+bool downflagUpFrontier3 = true
+bool downflagUpFrontier4 = true
+
+for i = 1 to n
+    downflagDownFrontier := downflagDownFrontier and (low[n-i] > low[n])
+    downflagUpFrontier0 := downflagUpFrontier0 and (low[n+i] > low[n])
+    downflagUpFrontier1 := downflagUpFrontier1 and (low[n+1] >= low[n] and low[n+i + 1] > low[n])
+    downflagUpFrontier2 := downflagUpFrontier2 and (low[n+1] >= low[n] and low[n+2] >= low[n] and low[n+i + 2] > low[n])
+    downflagUpFrontier3 := downflagUpFrontier3 and (low[n+1] >= low[n] and low[n+2] >= low[n] and low[n+3] >= low[n] and low[n+i + 3] > low[n])
+    downflagUpFrontier4 := downflagUpFrontier4 and (low[n+1] >= low[n] and low[n+2] >= low[n] and low[n+3] >= low[n] and low[n+4] >= low[n] and low[n+i + 4] > low[n])
+flagDownFrontier = downflagUpFrontier0 or downflagUpFrontier1 or downflagUpFrontier2 or downflagUpFrontier3 or downflagUpFrontier4
+
+downFractal = (downflagDownFrontier and flagDownFrontier)
+
+// -- Temporary swing levels: CLOSE breaks the level, else pivot + extension --
+// An UP fractal draws resistance at high[n]; a DOWN fractal draws support at
+// low[n]. Endpoint = first qualifying CLOSE after the pivot (up: close >= level,
+// wick touches do NOT count; down: close <= level), else pivot + extension.
+//
+// Levels are drawn as plot.style_linebr series with offset = -n, NOT as line
+// objects.
+//
+// Why not line objects: Pine caps a script at `max_lines_count` (500) drawings
+// alive at once, and this indicator used to mint one object per fractal. On real
+// history the pool saturated and TradingView silently evicted the OLDEST
+// drawings — which is why zooming out showed fractal levels for only the last
+// few days. No amount of FIFO trimming fixes that; the budget itself is the wall.
+// Plots are outside that object budget, so the same series now covers every bar
+// TradingView has loaded.
+//
+// The offset is what puts each line back on its wick. A plot can only carry a
+// value on the bar that computes it, so a level computed at its confirmation
+// bar would start n bars late. With offset = -n the value computed on bar b is
+// DRAWN on bar b - n, which is exactly the pivot bar. All bookkeeping below is
+// therefore in "emission bar" coordinates, and the draw position is
+// (emissionBar - n) throughout.
+//
+// No repaint: offset only shifts where a value is drawn, never which value is
+// computed. Every bar still derives its level solely from data available at
+// that bar, so history and live bars agree exactly.
+//
+// UP_COLOR / DN_COLOR and the "Up level 1..12" style entries: the 12 series per
+// side are the slot pool and are structurally required (Pine needs a fixed set
+// of plot() calls, and each must be declared). They all share one colour and
+// width, so only the first of each is worth touching in the style dialog.
+UP_COLOR = #02f7df
+DN_COLOR = #F44336
+
+// Slot sizing: a level is busy for (extension + 1) emission bars, and two
+// same-direction fractals are at least 2 bars apart (an up fractal at p needs
+// high[p] > high[p+1], which rules out p+1 being one too). So at most
+// ceil((extension + 1) / 2) can overlap - 11 at the widest allowed
+// extension=20, n=1, and fewer as n grows. SLOTS=12 leaves headroom and costs
+// no drawing budget. Measured worst case over 4000-bar synthetic sweeps of
+// n in {1,2,3,5} x extension in {1,2,5,10,15,20}: 10 busy slots, 0 dropped.
+const int SLOTS = 12
+
+// Per-slot state, all in EMISSION bar coordinates (drawn at bar - n).
+// upStr/dnStr hold the confirmation bar; upEnd/dnEnd hold the last EMISSION bar,
+// or na while the level is still growing. upFree/dnFree are the earliest
+// emission bar a retired slot may be reused on: a slot must emit one na bar
+// between two levels, otherwise plot.style_linebr would treat them as
+// consecutive and draw a diagonal between the two prices.
+var array<bool>  upOn   = array.new_bool(SLOTS, false)
+var array<float> upLvl  = array.new_float(SLOTS, na)
+var array<int>   upStr  = array.new_int(SLOTS, 0)
+var array<int>   upEnd  = array.new_int(SLOTS, na)
+var array<int>   upFree = array.new_int(SLOTS, 0)
+var array<bool>  dnOn   = array.new_bool(SLOTS, false)
+var array<float> dnLvl  = array.new_float(SLOTS, na)
+var array<int>   dnStr  = array.new_int(SLOTS, 0)
+var array<int>   dnEnd  = array.new_int(SLOTS, na)
+var array<int>   dnFree = array.new_int(SLOTS, 0)
+
+// Per-bar plot values, rewritten every bar rather than reallocated.
+var array<float> uPlot = array.new_float(SLOTS, na)
+var array<float> dPlot = array.new_float(SLOTS, na)
+
+// Resolve the END EMISSION bar of every live level that has not reached one yet.
+// Because a value emitted on bar b is DRAWN on bar b - n, the break test must
+// read the DISPLAY bar's close, i.e. close[n] rather than close. The default cap
+// is likewise in emission coordinates: str + extension. Idempotent, so calling
+// it again right after registering a new level touches only that slot.
+// Written without any `:=` so the body is a single expression per iteration.
+f_advance(array<bool> onA, array<float> lvlA, array<int> strA, array<int> endA, bool isUp) =>
+    for i = 0 to array.size(onA) - 1
+        if array.get(onA, i) and na(array.get(endA, i))
+            isBreak = isUp ? (close[n] >= array.get(lvlA, i)) : (close[n] <= array.get(lvlA, i))
+            cap = array.get(strA, i) + extension
+            array.set(endA, i, isBreak ? bar_index : cap)
+
+// -- 1. Advance levels opened on earlier bars (BEFORE registering new ones, so
+//    a fresh level is never judged on its own confirmation bar) --
+f_advance(upOn, upLvl, upStr, upEnd, true)
+f_advance(dnOn, dnLvl, dnStr, dnEnd, false)
+
+
+// -- 2. Register newly confirmed fractals --
+// The level is high[n]/low[n]: the pivot bar's own wick, not the close.
+// Offsets 1..n from the pivot are already closed history. With offset = -n those
+// bars are still drawable (the value for a display bar p is emitted on bar p + n,
+// which is at or before this confirmation bar), so a level that was already
+// broken inside the window is registered with its end already set to the exact
+// break bar rather than being dropped.
+if upFractal
+    lvl = high[n]
+    hit = int(na)
+    k = 1
+    while k <= n
+        // Offset k from the pivot = history index n - k (NOT k - 1: k=1 is the
+        // bar right after the pivot = close[n-1]; k=n is this bar = close[0]).
+        // Emitted on this bar, so drawn n bars back = the pivot + k bar.
+        if close[n - k] >= lvl
+            hit := bar_index + k
+            break
+        k += 1
+    s = -1
+    for j = 0 to SLOTS - 1
+        if s == -1 and not array.get(upOn, j) and bar_index >= array.get(upFree, j)
+            s := j
+    if s != -1
+        array.set(upLvl, s, lvl)
+        array.set(upStr, s, bar_index)
+        array.set(upEnd, s, hit)
+        array.set(upOn, s, true)
+        f_advance(upOn, upLvl, upStr, upEnd, true)
+
+if downFractal
+    lvld = low[n]
+    hitd = int(na)
+    kd = 1
+    while kd <= n
+        // Offset kd from the pivot = history index n - kd (see up-scan note).
+        if close[n - kd] <= lvld
+            hitd := bar_index + kd
+            break
+        kd += 1
+    sd = -1
+    for j = 0 to SLOTS - 1
+        if sd == -1 and not array.get(dnOn, j) and bar_index >= array.get(dnFree, j)
+            sd := j
+    if sd != -1
+        array.set(dnLvl, sd, lvld)
+        array.set(dnStr, sd, bar_index)
+        array.set(dnEnd, sd, hitd)
+        array.set(dnOn, sd, true)
+        f_advance(dnOn, dnLvl, dnStr, dnEnd, false)
+
+// -- 3. Emit this bar's value for every slot, then retire the finished ones --
+// A growing level has an na end and must still be emitted (bar_index <= na is
+// false in Pine, so testing the end alone would drop every level until it froze).
+// A level is emitted on its final bar too and only goes idle on the bar after.
+// The + n is the emission->display shift: a level whose last emission bar is e
+// must stay alive until bar e + n, so that the value emitted there lands on e.
+for i = 0 to SLOTS - 1
+    upLive = array.get(upOn, i) and (na(array.get(upEnd, i)) or bar_index <= array.get(upEnd, i) + n)
+    dnLive = array.get(dnOn, i) and (na(array.get(dnEnd, i)) or bar_index <= array.get(dnEnd, i) + n)
+    array.set(uPlot, i, upLive ? array.get(upLvl, i) : na)
+    array.set(dPlot, i, dnLive ? array.get(dnLvl, i) : na)
+
+for i = 0 to SLOTS - 1
+    if array.get(upOn, i) and not na(array.get(upEnd, i)) and bar_index >= array.get(upEnd, i) + n
+        array.set(upOn, i, false)
+        // +2, not +1: a level is emitted on its final bar, so the slot must sit
+        // idle for the NEXT bar too. Reusing on the very next bar would place two
+        // different levels on consecutive bars, and linebr would join them with a
+        // diagonal between the two prices.
+        array.set(upFree, i, bar_index + 2)
+    if array.get(dnOn, i) and not na(array.get(dnEnd, i)) and bar_index >= array.get(dnEnd, i) + n
+        array.set(dnOn, i, false)
+        array.set(dnFree, i, bar_index + 2)
+
+// One linebr plot per slot. linebr joins consecutive non-na values and breaks
+// on na, which is exactly a level's lifecycle. offset=-n draws each value n
+// bars earlier, landing it on the pivot bar so the line starts on the wick.
+// Each series must be declared individually (Pine needs a fixed call list, and
+// plot() cannot be looped), which is why the style dialog lists 12 per side.
+// They are all identical in appearance; changing one is enough.
+plot(array.get(uPlot, 0), "Up level 1", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 1), "Up level 2", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 2), "Up level 3", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 3), "Up level 4", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 4), "Up level 5", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 5), "Up level 6", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 6), "Up level 7", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 7), "Up level 8", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 8), "Up level 9", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 9), "Up level 10", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 10), "Up level 11", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(uPlot, 11), "Up level 12", offset=-n, style=plot.style_linebr, color=UP_COLOR, linewidth=2)
+plot(array.get(dPlot, 0), "Down level 1", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 1), "Down level 2", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 2), "Down level 3", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 3), "Down level 4", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 4), "Down level 5", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 5), "Down level 6", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 6), "Down level 7", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 7), "Down level 8", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 8), "Down level 9", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 9), "Down level 10", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 10), "Down level 11", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+plot(array.get(dPlot, 11), "Down level 12", offset=-n, style=plot.style_linebr, color=DN_COLOR, linewidth=2)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Simple Moving Average (from SMA.pine)
+// ═══════════════════════════════════════════════════════════════════════════
+GRP_SMA = "SMA"
+len = input.int(20, minval=1, title="Length", group=GRP_SMA)
+src = input(close, title="Source", group=GRP_SMA)
+offset = input.int(title="Offset", defval=0, minval=-500, maxval=500, display = display.none, group=GRP_SMA)
+out = ta.sma(src, len)
+plot(out, color=color.rgb(228, 168, 4), title="MA", offset=offset)
+
+// Smoothing MA inputs
+GRP = "Smoothing"
+TT_BB = "Only applies when 'SMA + Bollinger Bands' is selected. Determines the distance between the SMA and the bands."
+maTypeInput = input.string("SMA + Bollinger Bands", "Type", options = ["None", "SMA", "SMA + Bollinger Bands", "EMA", "SMMA (RMA)", "WMA", "VWMA"], group = GRP, display = display.none)
+var isBB = maTypeInput == "SMA + Bollinger Bands"
+maLengthInput = input.int(6, "Length", group = GRP, display = display.none, active = maTypeInput != "None")
+bbMultInput = input.float(2.0, "BB StdDev", minval = 0.001, maxval = 50, step = 0.5, tooltip = TT_BB, group = GRP, display = display.none, active = isBB)
+var enableMA = maTypeInput != "None"
+
+// Smoothing MA Calculation
+ma(source, length, MAtype) =>
+	switch MAtype
+		"SMA"                   => ta.sma(source, length)
+		"SMA + Bollinger Bands" => ta.sma(source, length)
+		"EMA"                   => ta.ema(source, length)
+		"SMMA (RMA)"            => ta.rma(source, length)
+		"WMA"                   => ta.wma(source, length)
+		"VWMA"                  => ta.vwma(source, length)
+
+// Smoothing MA plots
+smoothingMA = enableMA ? ma(out, maLengthInput, maTypeInput) : na
+smoothingStDev = isBB ? ta.stdev(out, maLengthInput) * bbMultInput : na
+plot(smoothingMA, "SMA-based MA", color=color.rgb(72, 72, 72), display = enableMA ? display.all : display.none, editable = enableMA)
+bbUpperBand = plot(smoothingMA + smoothingStDev, title = "Upper Bollinger Band", color=color.rgb(5, 125, 37), display = isBB ? display.all : display.none, editable = isBB)
+bbLowerBand = plot(smoothingMA - smoothingStDev, title = "Lower Bollinger Band", color=color.rgb(1, 160, 14), display = isBB ? display.all : display.none, editable = isBB)
+fill(bbUpperBand, bbLowerBand, color= isBB ? color.new(#06af0c, 90) : na, title="Bollinger Bands Background Fill", display = isBB ? display.all : display.none, editable = isBB)

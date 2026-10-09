@@ -26,7 +26,7 @@ export const CONFIRMATION_CANDLE_CHOICES: readonly ConfirmationCandles[] = [1, 2
 export const DEFAULT_CONFIRMATION_CANDLES: ConfirmationCandles = 2;
 
 /** Alert timeframes — each detector runs independently (config-driven). */
-export const EMA_ALERT_TIMEFRAMES = ["MINUTE_1", "MINUTE_3"] as const;
+export const EMA_ALERT_TIMEFRAMES = ["MINUTE_1", "MINUTE_3", "MINUTE_5"] as const;
 export type EmaAlertTimeframe = (typeof EMA_ALERT_TIMEFRAMES)[number];
 export type EmaAlertTimeframeList = EmaAlertTimeframe[];
 
