@@ -4,6 +4,7 @@
  * REST is unavailable (e.g. IG_ALLOWANCE_EXHAUSTED).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactElement } from "react";
 import { TradingChart } from "./components/TradingChart/TradingChart";
 import { ChartSettingsModal } from "./components/TradingChart/ChartSettingsModal";
 import { IndicatorsMenu } from "./components/Indicators/IndicatorsMenu";
@@ -32,6 +33,13 @@ import {
   type ChartSettings,
 } from "./config/chartSettings";
 import { loadTimeFrame, saveTimeFrame } from "./services/timeframeSelection";
+import {
+  CANDLE_TYPE_LABELS,
+  loadCandleType,
+  saveCandleType,
+  VALID_CANDLE_TYPES,
+  type CandleType,
+} from "./services/heikinAshi";
 import {
   activeTemplate,
   BUILT_IN_DEFAULT_TEMPLATE,
@@ -200,6 +208,46 @@ function streamLabel(status: string, lastTickAt: number, now: number): {
   if (status === "LIVE") return { label: "LIVE", live: true, noTicks: false, ageSec };
   return { label: status, live: false, noTicks: false, ageSec };
 }
+
+/**
+ * Candle-type selector icons — inline SVG, `currentColor`, no external assets
+ * (same convention as the chart's Eye/Gear icons). Icon-only to keep the
+ * topbar compact; the accessible name lives on the host <button> (aria-label /
+ * title). Identical wick geometry so the two read as a pair — the ONLY
+ * difference is body fill: Candles are hollow, Heikin Ashi bodies are solid
+ * (HA's signature "continuous / smoothed" look).
+ */
+function CandlesTypeIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <line x1="6" y1="4" x2="6" y2="20" />
+      <line x1="12" y1="3" x2="12" y2="21" />
+      <line x1="18" y1="7" x2="18" y2="17" />
+      <rect x="3.5" y="9" width="5" height="6" rx="0.6" />
+      <rect x="9.5" y="6" width="5" height="10" rx="0.6" />
+      <rect x="15.5" y="10" width="5" height="6" rx="0.6" />
+    </svg>
+  );
+}
+
+function HeikinAshiTypeIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <line x1="6" y1="4" x2="6" y2="20" />
+      <line x1="12" y1="3" x2="12" y2="21" />
+      <line x1="18" y1="7" x2="18" y2="17" />
+      <rect x="3.5" y="9" width="5" height="6" rx="0.6" fill="currentColor" stroke="none" />
+      <rect x="9.5" y="6" width="5" height="10" rx="0.6" fill="currentColor" stroke="none" />
+      <rect x="15.5" y="10" width="5" height="6" rx="0.6" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+/** Candle-type → selector icon component (keyed by CandleType). */
+const CANDLE_TYPE_ICONS: Record<CandleType, () => ReactElement> = {
+  candles: CandlesTypeIcon,
+  "heikin-ashi": HeikinAshiTypeIcon,
+};
 
 /**
  * Build the active-indicator spec list from current App state.
@@ -417,6 +465,20 @@ export default function App() {
   const selectTimeframe = useCallback((key: TimeFrameKey): void => {
     saveTimeFrame(key);
     setTimeframe(key);
+  }, []);
+  // Displayed candle type — restored from `aura.candleType.v1` on FIRST render
+  // (lazy initializer, mirroring `timeframe` above) so the chart never paints
+  // one candle type then immediately refetches another. A missing, corrupted or
+  // unregistered stored value falls back to `candles` via `sanitizeCandleType`.
+  // This is a PRESENTATION-LAYER display switch only: the REST/WS candle data,
+  // indicators, overlays and execution prices all keep using ORIGINAL market
+  // OHLC — see the chart's `displayData`/`toDisplay` Heikin Ashi boundary.
+  const [candleType, setCandleType] = useState<CandleType>(loadCandleType);
+  // Every selector click persists the pick, so a refresh restores the same
+  // candle type. Storage failures are swallowed by `saveCandleType`.
+  const selectCandleType = useCallback((type: CandleType): void => {
+    saveCandleType(type);
+    setCandleType(type);
   }, []);
   // Chart display settings (e.g. Invert Scale) — localStorage-persisted in
   // App, frontend-only presentation state that never touches candle data.
@@ -1694,6 +1756,33 @@ export default function App() {
             O H L C, change, Range) relocated from the removed bottom
             `.chart-footer` into the ONE unified header. */}
         <div className="topbar-market" aria-label="Market data">
+          {/* Candle-type selector — Candles (default) | Heikin Ashi. A
+              presentation-layer display switch only (original market OHLC stays
+              intact for indicators, overlays and execution prices). Segmented
+              to match the timeframe selector's look; persisted in App via
+              `aura.candleType.v1`. */}
+          <div className="candle-type" role="tablist" aria-label="Candle type">
+            {VALID_CANDLE_TYPES.map((ct) => {
+              const TypeIcon = CANDLE_TYPE_ICONS[ct];
+              return (
+                <button
+                  key={ct}
+                  role="tab"
+                  aria-selected={candleType === ct}
+                  aria-label={CANDLE_TYPE_LABELS[ct]}
+                  className={`ct-btn ${candleType === ct ? "active" : ""}`}
+                  title={
+                    ct === "heikin-ashi"
+                      ? "Heikin Ashi candles (smoothed display; indicators and trading keep using real market prices)"
+                      : "Standard candlesticks"
+                  }
+                  onClick={() => selectCandleType(ct)}
+                >
+                  <TypeIcon />
+                </button>
+              );
+            })}
+          </div>
           {/* Timeframe selector — 1m (canonical persisted) | 3m (derived) */}
           <div className="timeframes" role="tablist" aria-label="Chart timeframe">
             {TIMEFRAMES.map((tf) => (
@@ -1871,6 +1960,7 @@ export default function App() {
           onToggleInvertScale={toggleInvertScale}
           themeId={chartSettings.appearance.theme}
           candleSettings={chartSettings.symbol.candles}
+          candleType={candleType}
           onOpenSettings={openChartSettings}
           replaySymbol={selectedEpic || undefined}
           onLoadMoreHistory={loadMoreHistory}

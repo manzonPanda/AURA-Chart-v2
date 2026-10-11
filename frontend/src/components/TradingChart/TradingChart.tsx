@@ -38,6 +38,12 @@ import {
 } from "../../services/realtime";
 import { diag, iso, logUpdateBar, maybeLogChartBlock } from "../../services/diagnostics";
 import { candleCloseCountdown, planLiveUpdate, pruneClosedLiveBars, type LiveBar, frameAuthority, authorityRank } from "../../services/liveCandle";
+import {
+  calculateHeikinAshi,
+  heikinAshiBar,
+  type CandleType,
+  type HeikinAshiPair,
+} from "../../services/heikinAshi";
 import { defaultEmaSettings, type EmaSettings } from "../../config/emaSettings";
 import type { SmaSettings } from "../../config/smaSettings";
 import {
@@ -64,6 +70,7 @@ import {
 } from "../../config/chartSettings";
 import { MaStructurePanel } from "./MaStructurePanel";
 import { DrawingLayer } from "./DrawingLayer";
+import { MeasureTimeFmt } from "./MeasureTimeFmt";
 import { PineBridge } from "./PineBridge";
 import { SmaBridge } from "./SmaBridge";
 import { ScrollToLatestButton } from "./ScrollToLatestButton";
@@ -261,6 +268,14 @@ function CountdownMarker({
 
 interface Props {
   candles: readonly Candle[];
+  /**
+   * Displayed candle type — "candles" (default, standard candlesticks) or
+   * "heikin-ashi" (HA-transformed display). PRESENTATION LAYER ONLY: the
+   * original `candles` prop is never mutated, and every indicator bridge
+   * (EMA/SMA/Pine/MA Structure), trading overlay and execution price keeps
+   * consuming the ORIGINAL market OHLC regardless of this setting.
+   */
+  candleType?: CandleType;
   /**
    * Warmup candles — real candles preceding the visible horizon, fetched so
    * Pine indicators (EMA/SMA/fractals/custom scripts) have sufficient context
@@ -524,6 +539,7 @@ function LiveBarBridge({
   replayActive = false,
   closedCandles = [],
   scopeKey = "",
+  candleType = "candles",
 }: {
   liveCandle: RealtimeCandleMsg | null;
   bucketSec: number;
@@ -538,10 +554,22 @@ function LiveBarBridge({
   /** When Replay Mode is active, the live stream continues updating its internal
    *  truth but DOES NOT paint — replay owns the chart during the session. */
   replayActive?: boolean;
+  /**
+   * Displayed candle type — when "heikin-ashi", every bar painted into the
+   * controller is HA-transformed at the paint boundary (`toDisplay` below).
+   * The truth/merge/authority logic keeps operating on ORIGINAL market OHLC;
+   * only the values written to the chart change. The predecessor pair is read
+   * off the controller series (which already carries the HA-transformed
+   * closed candles ChartView renders), so no parallel state is kept.
+   */
+  candleType?: CandleType;
 }) {
   const api = useChartApi();
   const liveRef = useRef(liveCandle);
   liveRef.current = liveCandle;
+  /** Displayed candle type — read at the `toDisplay` paint boundary. */
+  const haTypeRef = useRef<CandleType>(candleType);
+  haTypeRef.current = candleType;
   /** Mirror of the authoritative closed-candle ledger (latest on every render). */
   const closedRef = useRef(closedCandles);
   closedRef.current = closedCandles;
@@ -593,6 +621,33 @@ function LiveBarBridge({
     const controller = api.controller;
     if (!controller) return;
 
+    // ── HEIKIN ASHI paint boundary (presentation-layer ONLY) ─────────────────
+    // In "heikin-ashi" mode EVERY bar written to the controller is transformed
+    // HERE, at this single boundary, from its ORIGINAL market OHLC — the
+    // truth/merge/authority pipeline above is untouched and keeps operating on
+    // real prices. The HA predecessor pair is read straight off the controller
+    // series, which ALWAYS holds the HA-transformed CLOSED candles (ChartView
+    // renders `displayData` = calculateHeikinAshi(history+ledger)). So the
+    // recursive HA open is derived from the true previous HA candle — never
+    // from an already-transformed forming bar — and cannot drift across a
+    // bucket rollover, a "Load More" prepend, a scope switch or a candleType
+    // switch: ChartView re-runs setData(displayData) and the bus-"data"
+    // re-apply below re-paints the forming candle against the fresh HA chain.
+    // The predecessor lookup is O(1): the forming/closed bar sits at the tail,
+    // so the first `ts < bar.ts` scan from the end is the previous candle.
+    const toDisplay = (bar: Candle): Bar => {
+      if (haTypeRef.current !== "heikin-ashi") return asBar(bar);
+      const series = controller.getBars();
+      let prev: HeikinAshiPair | null = null;
+      for (let i = series.length - 1; i >= 0; i--) {
+        if (series[i].ts < bar.ts) {
+          prev = { open: series[i].open, close: series[i].close };
+          break;
+        }
+      }
+      return asBar(heikinAshiBar(bar, prev));
+    };
+
     // One requestAnimationFrame step of the glide: lerp the displayed close
     // toward the target with ease-out, paint wicks at the true running extremes.
     const glide = (): void => {
@@ -600,7 +655,7 @@ function LiveBarBridge({
       const t = clamp01((performance.now() - a.startTs) / SMOOTH_DURATION_MS);
       a.close = a.startClose + (a.tClose - a.startClose) * easeOutCubic(t);
       controller.updateBar(
-        asBar({ ts: a.ts, open: a.open, high: a.tHigh, low: a.tLow, close: a.close, volume: a.volume }),
+        toDisplay({ ts: a.ts, open: a.open, high: a.tHigh, low: a.tLow, close: a.close, volume: a.volume }),
       );
       diag.updateBarCalls += 1;
       if (t < 1) {
@@ -635,7 +690,7 @@ function LiveBarBridge({
     };
 
     const paintBar = (bar: LiveBar): void => {
-      controller.updateBar(asBar(bar));
+      controller.updateBar(toDisplay(bar));
       diag.updateBarCalls += 1;
     };
 
@@ -659,7 +714,7 @@ function LiveBarBridge({
           // LIGHTWEIGHT CHARTS FIX: series.update() drops the FIRST bar of an
           // empty series — seed with a one-row setData (same as the rollover
           // path below).
-          controller.setData([asBar(bar)]);
+          controller.setData([toDisplay(bar)]);
           diag.dataSeeded += 1;
         } else {
           paintBar(bar);
@@ -671,7 +726,7 @@ function LiveBarBridge({
         // bucket); the bus-"data" viewport guard keeps the user's position.
         const idx = bars.findIndex((b) => b.ts === bar.ts);
         if (idx < 0) return; // bucket never painted — history setData will carry it
-        const rebuilt = bars.map((b, i) => (i === idx ? asBar(bar) : b));
+        const rebuilt = bars.map((b, i) => (i === idx ? toDisplay(bar) : b));
         controller.setData(rebuilt);
       }
       // The closed OHLC is now the truth for its bucket; if the forming truth
@@ -755,7 +810,7 @@ function LiveBarBridge({
             // LIGHTWEIGHT CHARTS FIX: series.update() silently drops the FIRST
             // bar when the series is empty (e.g. history unavailable) — seed
             // with a one-row setData instead.
-            controller.setData([asBar(bar)]);
+            controller.setData([toDisplay(bar)]);
             diag.dataSeeded += 1;
             seededEmpty = false;
           } else {
@@ -1035,6 +1090,7 @@ function ViewportBridge({
  */
 export function TradingChart({
   candles,
+  candleType = "candles",
   warmupCandles = [],
   historyBucketSec,
   gaps,
@@ -1348,6 +1404,50 @@ export function TradingChart({
     frozenDataRef.current = liveCandles;
     return liveCandles;
   }, [candles, bucketSec, liveCandles, closedLiveLedger, historyScopeCurrent]);
+
+  /**
+   * HEIKIN ASHI display series — a PRESENTATION-LAYER transform of `data`
+   * (history + closed-live ledger). The ORIGINAL `data` is never mutated and
+   * remains the source for every indicator bridge (EMA/SMA/Pine/MA Structure),
+   * the OHLC readout fallback, trading overlays and execution prices.
+   *
+   * The transform is O(n) over the CLOSED series and only re-runs when `data`
+   * or `candleType` changes — never per tick (the forming candle is painted
+   * separately by LiveBarBridge, which transforms at its paint boundary).
+   * Historical pagination (Load More) prepends older candles to `data`, so the
+   * memo recomputes the HA chain from the NEW oldest candle — recursive opens
+   * stay correct and are never derived from already-transformed values.
+   */
+  const displayData = useMemo<Bar[]>(
+    () => (candleType === "heikin-ashi" ? (calculateHeikinAshi(data) as Bar[]) : data),
+    [data, candleType],
+  );
+
+  /**
+   * Crosshair → OHLC-readout RAW mapping: in Heikin Ashi mode the chart
+   * series carries synthetic values, but the quote strip must keep showing
+   * REAL market prices (same rule as trading overlays / execution prices).
+   * This ref maps bucket ts → the ORIGINAL candle so the crosshair handler
+   * below can translate the hovered HA bar back to actual OHLC.
+   */
+  const rawDataByTsRef = useRef<Map<number, Candle>>(new Map());
+  useEffect(() => {
+    const map = new Map<number, Candle>();
+    for (const c of data) map.set(c.ts, c);
+    rawDataByTsRef.current = map;
+  }, [data]);
+
+  /** Crosshair handler — HA bars are mapped back to ORIGINAL market OHLC. */
+  const handleCrosshairCandle = useCallback(
+    (c: Candle | null): void => {
+      if (c && candleType === "heikin-ashi") {
+        setCrosshairCandle(rawDataByTsRef.current.get(c.ts) ?? null);
+      } else {
+        setCrosshairCandle(c);
+      }
+    },
+    [candleType],
+  );
 
   // ── Closed-live-bucket ledger SCOPE (FIX 2: persistence across reloads) ──────
   // The ledger is scoped to the INSTRUMENT + TIMEFRAME — NOT to the history
@@ -1910,7 +2010,7 @@ export function TradingChart({
           chrome and the right price scale are never covered. */}
       <div className="chart-canvas-wrap" ref={chartWrapRef}>
         <ChartView
-          data={session ? NO_BARS : data}
+          data={session ? NO_BARS : displayData}
           seriesType="candlestick"
           theme="dark"
           showVolume={false}
@@ -1933,11 +2033,12 @@ export function TradingChart({
             bucketSec={bucketSec}
             scopeKey={`${replaySymbol ?? ""}|${bucketSec}`}
             replayActive={replayActive}
+            candleType={candleType}
           />
           <ViewportBridge
             candles={candles}
             bucketSec={bucketSec}
-            onCrosshairCandle={setCrosshairCandle}
+            onCrosshairCandle={handleCrosshairCandle}
             preserveRangeRef={preserveRangeRef}
             pendingLiveEdgeAnchorRef={pendingLiveEdgeAnchorRef}
             onNearHistoryEdge={setNearEdge}
@@ -2041,39 +2142,53 @@ export function TradingChart({
               fed by MeasurementController.subscribe(). It renders NOTHING until
               a Shift-drag measurement exists and is pointer-transparent
               (.ck-measure-layer { pointer-events: none }), so it can never eat
-              a click meant for the chart or the drawing tools. */}
-          <MeasurementOverlay />
-          {/* DRAWING TOOLS — CandleKit's engine + AURA's persistence bridge.
-              Restores the scope's persisted drawings before the toolbar shows,
-              coalesces every change into one debounced save, hides the tools
-              while a Replay session owns the chart. */}
-          <DrawingLayer
-            controller={drawingController}
-            epic={instrumentEpic}
-            timeframe={resolution}
-            replayActive={session !== null}
-          />
-        </ChartView>
-        {/* Upper-left indicator legend — compact TradingView-style control
-            overlay for currently-active indicators. Lives inside the chart
-            plot area so it moves with the chart, never the page. Rendered
-            only when App supplies the shared-state handlers AND some
-            indicator state exists (the legend is pure state reflection). */}
-        {onEmaChange &&
-          onSmaChange &&
-          onPineChange &&
-          onOpenIndicatorSettings &&
-          (emaSettings || smaSettings || (pineIndicators?.length ?? 0) > 0) && (
-            <ActiveIndicatorsOverlay
-              emaSettings={emaSettings ?? defaultEmaSettings}
-              smaSettings={smaSettings}
-              imported={pineIndicators ?? []}
-              onEmaChange={onEmaChange}
-              onSmaChange={onSmaChange}
-              onPineChange={onPineChange}
-              onOpenSettings={onOpenIndicatorSettings}
+              a click meant for the chart or the drawing tools. MeasureTimeFmt
+              is a presentation-only wrapper around it: the % row is hidden by
+              theming (styles.css) and the library's time token is reformatted
+              to AURA's unit style (each part only when non-zero: "1h 30m" |
+              "45m" | "2h") — values stay the library's own. */}
+          <MeasureTimeFmt>
+            <MeasurementOverlay />
+          </MeasureTimeFmt>
+          {/* LEFT RAIL — the indicator legend stacked above the drawing tools,
+              both anchored to the chart's left edge INSIDE the plot area.
+              One flex column (.chart-left-rail): the vertical drawing strip
+              always sits directly BELOW the legend, whatever the legend's
+              (dynamic) height — the legend shrinks and scrolls first, the
+              strip never moves. */}
+          <div className="chart-left-rail">
+            {/* Indicator legend — compact TradingView-style control overlay
+                for currently-active indicators. Lives inside the chart plot
+                area so it moves with the chart, never the page. Rendered only
+                when App supplies the shared-state handlers AND some indicator
+                state exists (the legend is pure state reflection). */}
+            {onEmaChange &&
+              onSmaChange &&
+              onPineChange &&
+              onOpenIndicatorSettings &&
+              (emaSettings || smaSettings || (pineIndicators?.length ?? 0) > 0) && (
+                <ActiveIndicatorsOverlay
+                  emaSettings={emaSettings ?? defaultEmaSettings}
+                  smaSettings={smaSettings}
+                  imported={pineIndicators ?? []}
+                  onEmaChange={onEmaChange}
+                  onSmaChange={onSmaChange}
+                  onPineChange={onPineChange}
+                  onOpenSettings={onOpenIndicatorSettings}
+                />
+              )}
+            {/* DRAWING TOOLS — CandleKit's engine + AURA's persistence bridge.
+                Restores the scope's persisted drawings before the toolbar
+                shows, coalesces every change into one debounced save, hides
+                the tools while a Replay session owns the chart. */}
+            <DrawingLayer
+              controller={drawingController}
+              epic={instrumentEpic}
+              timeframe={resolution}
+              replayActive={session !== null}
             />
-          )}
+          </div>
+        </ChartView>
 
         {/* Historical-edge control — subtle pill, top-left, revealed only when
             the user pans near the oldest loaded candle. Hidden during Replay

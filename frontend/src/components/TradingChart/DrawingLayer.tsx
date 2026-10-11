@@ -51,11 +51,14 @@ export const DRAWING_TOOLS: { id: DrawingToolId; label: string; title: string }[
 ];
 
 /**
- * The ruler's tooltip — the measurement help line from CandleKit's own README
- * ("Measurement ruler — Shift-drag for % move, points, bars · time"), cased to
- * match the button's accessible name.
+ * The ruler's tooltip — AURA's casing of CandleKit's own README help line,
+ * minus the "% move" segment: the tooltip no longer surfaces the % row (hidden
+ * by theming + MeasureTimeFmt — see styles.css and MeasureTimeFmt.tsx), so the
+ * title must not promise it. It still promises pts, bars and time — exactly
+ * what the readout shows (time in unit style, each part only when non-zero:
+ * "1h 30m" | "45m" | "2h").
  */
-export const MEASURE_TITLE = "Measurement Ruler — Shift-drag for % move, points, bars · time";
+export const MEASURE_TITLE = "Measurement Ruler — Shift-drag for points, bars · time";
 
 /**
  * The AURA drawing control strip. Seven controls, nothing else:
@@ -307,8 +310,12 @@ export function DrawingLayer({ controller, epic, timeframe, replayActive }: Draw
 
   return (
     <div className="drawing-layer" aria-label="Chart drawings">
-      <SyncStatusChip phase={phase} detail={detail} onRetry={handleRetry} />
+      {/* Toolbar FIRST: .drawing-layer is the vertical strip below the
+          indicator legend, so the transient sync chip renders UNDER it and
+          grows downward — the strip's position never shifts when the chip
+          appears or disappears. */}
       {showToolbar && controller && <DrawingToolsBar controller={controller} />}
+      <SyncStatusChip phase={phase} detail={detail} onRetry={handleRetry} />
     </div>
   );
 }

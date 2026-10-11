@@ -1,8 +1,9 @@
 /**
  * Upper-left chart legend of the ACTIVE indicators — a compact
  * TradingView-style control overlay anchored INSIDE the chart plot area
- * (sibling of ChartView in `.chart-canvas-wrap`, so it repositions with the
- * chart, never with the page).
+ * (first child of the `.chart-left-rail` column inside ChartView, so it
+ * repositions with the chart, never with the page — the vertical drawing
+ * strip stacks directly below it).
  *
  * Every row mirrors the EXISTING indicator state: name, visibility
  * (eye), settings (gear → the Indicator Settings modal: Inputs/Style) and
