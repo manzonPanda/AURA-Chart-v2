@@ -80,6 +80,7 @@ export type PineVisualType =
   | "histogram"
   | "area"
   | "horizontal"
+  | "fill"
   | "marker"
   | "labels"
   | "lines"
@@ -93,6 +94,25 @@ export interface PineMarkerPoint {
   color?: string;
   /** Short label text (plotshape `text=` or plotchar `char=`), ≤ 24 chars. */
   text?: string;
+}
+
+/**
+ * One point of a `fill()` region — the two boundary values at a bar plus the
+ * fill's own color for that bar. A boundary that is absent at a bar (warmup na)
+ * leaves `top`/`bottom` undefined so the renderer BREAKS the fill exactly where
+ * the script has no data (never paints a fill across an na gap).
+ *
+ * `top`/`bottom` are the two resolved boundary PRICES at this bar: either a
+ * referenced plot's value, or a constant (an hline/literal fill edge).
+ */
+export interface PineFillPoint {
+  ts: number;
+  /** First boundary price (plot value or constant). Absent ⇒ gap at this bar. */
+  top?: number;
+  /** Second boundary price (plot value or constant). Absent ⇒ gap at this bar. */
+  bottom?: number;
+  /** Per-bar fill color (`#RRGGBBAA`), when the script varies it per bar. */
+  color?: string;
 }
 
 /**
@@ -131,6 +151,21 @@ export type PineVisual =
       lineWidth?: number;
       lineStyle: "solid" | "dashed" | "dotted";
     }
+  | {
+      /**
+       * Pine `fill(plot1, plot2, …)` — the shaded region between two boundaries.
+       * `data` carries one `PineFillPoint` per bar with the two resolved
+       * boundary prices + the per-bar fill color; a boundary that is na at a
+       * bar leaves that value undefined so the renderer breaks the fill there.
+       */
+      type: "fill";
+      key: string;
+      title: string;
+      /** Uniform fill color (`#RRGGBBAA`) when the script uses a static color. */
+      color?: string;
+      /** Resolved boundary values per bar (see PineFillPoint). */
+      data: PineFillPoint[];
+    }
   | { type: "marker"; key: string; title: string; data: PineMarkerPoint[] }
   | {
       /** Pine `label.new()` drawings (see services/pineDrawings.ts). */
@@ -165,6 +200,19 @@ export type PineEngineStage = "compiling" | "executing" | "extracting";
 /** What one engine run produced / could NOT produce (runtime half of the import diagnostics). */
 export interface PineRuntimeDiagnostics {
   rendered: { key: string; title: string; type: PineVisualType }[];
+  /**
+   * Every output the script DECLARES — plots, hlines and fills — regardless of
+   * whether it produced finite values in THIS run (warmup-only, or hidden via
+   * `display=display.none`). `rendered` is the subset that actually painted.
+   *
+   * The Style tab is driven by this list (via the persisted `plotMeta`), so a
+   * conditionally-plotted or not-yet-valued output — the SMA/Bollinger bands
+   * and their fill in fractal_SMA.pine before enough history loads, or a
+   * fractal level that hasn't triggered — still exposes its independent style
+   * controls, matching TradingView. `color`/`lineWidth` carry the script's own
+   * defaults for outputs that did not paint.
+   */
+  declared: { key: string; title: string; type: PineVisualType; color?: string; lineWidth?: number }[];
   /** Detected-but-unrenderable outputs (circles/cross styles, drawings, …). */
   unsupported: { kind: string; count: number }[];
   /** Plots the script itself hides via `display=display.none`. */

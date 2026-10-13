@@ -146,21 +146,25 @@ test("renderer: line endpoints map to candle 10 → candle 15 across the time sc
   }
 });
 
-// ═══ Renderer-level regression: the REAL PineLineBoxPrimitive ════════════════
-// Drives the actual drawing primitive (the component Lightweight Charts
-// invokes) with REAL Piner engine output and a faithful LWC whitespace
-// time-scale model, then inspects the canvas moveTo/lineTo coordinates —
-// proving: Piner x1=10 / x2=15  →  renderer draws candle 10 → candle 15.
+// ═══ Renderer-level regression: fractal SERIES → LWC line data ══════════════
+// `fractal.pine` now draws levels as `plot.style_linebr` SERIES (offset=-n),
+// which PineBridge feeds to Lightweight Charts via series.setData(toLineData),
+// NOT the line.new() drawing primitive. These tests drive REAL Piner engine
+// output through the SAME LWC time-scale model the chart uses (resolveAnchorX
+// + whitespace remap) and inspect the resulting candle coordinates — proving:
+//   the level's FIRST finite point lands on the PIVOT candle (idx 10) and its
+//   LAST finite point spans to the lifetime endpoint (idx 15), across a
+//   whitespace gap the span is preserved (not collapsed/clamped), and a close
+//   break truncates the span to the breaking candle.
 
-import { PineLineBoxPrimitive } from "../src/components/TradingChart/pineLineBoxPrimitive.ts";
 import { PinerPineEngine } from "../src/services/pinePinerEngine.ts";
 import {
   FRACTAL_CLOSES_NOBREAK,
   FRACTAL_HIGHS,
   FRACTAL_PINE_SOURCE,
-  fractalLines,
+  finiteRows,
   fractalScenarioBars,
-  fractalUp110,
+  fractalUpSeries,
 } from "./fractalFixture.mjs";
 
 const RENDER_SPEC = { id: "fractal-render-regression", source: FRACTAL_PINE_SOURCE, bindings: [] };
@@ -200,128 +204,90 @@ function makeLwcScale(candleTimes, slots) {
   };
 }
 
-
-/** Canvas 2D recorder: captures moveTo/lineTo segments, no-ops the rest. */
-function makeCtxRecorder() {
-  const segments = [];
-  let current = null;
-  return {
-    segments,
-    save() {},
-    restore() {},
-    scale() {},
-    beginPath() {},
-    setLineDash() {},
-    stroke() {},
-    fill() {},
-    closePath() {},
-    moveTo(x, y) {
-      current = { x1: x, y1: y };
-    },
-    lineTo(x, y) {
-      if (current) {
-        segments.push({ x1: current.x1, y1: current.y1, x2: x, y2: y });
-        current = null;
-      }
-    },
-  };
-}
-
 const PRICE_TO_Y = (price) => 1000 - price * 8; // linear, finite for all fixture prices
 const Y110 = PRICE_TO_Y(110);
 
-/** Render the engine's line drawings through the REAL primitive; return the
- *  canvas segments (bitmap space, pixelRatio 1). */
-function renderThroughPrimitive(lines, klines, slots) {
-  const prim = new PineLineBoxPrimitive();
-  prim.attached({
-    chart: { timeScale: () => makeLwcScale(klines.map((k) => k.openTime), slots) },
-    series: { priceToCoordinate: PRICE_TO_Y },
-    requestUpdate: () => {},
-  });
-  prim.setAnchorContext(klines, slots);
-  prim.setDrawings(lines, []);
-  const ctx = makeCtxRecorder();
-  prim.renderer.draw({
-    useBitmapCoordinateSpace: (cb) =>
-      cb({
-        context: ctx,
-        mediaSize: { width: 4000, height: 600 },
-        bitmapSize: { width: 4000, height: 600 },
-        horizontalPixelRatio: 1,
-        verticalPixelRatio: 1,
-      }),
-  });
-  return ctx.segments;
+/** Map a series' finite points to their LWC (x, y) canvas coordinates through
+ *  the real time scale — the same resolveAnchorX path PineLineBoxPrimitive
+ *  uses, and the same price mapping a chart series uses. Returns one entry per
+ *  finite point: { x, y, idx }. */
+function seriesToCanvas(series, bars, slots) {
+  const klines = bars.map((b) => ({ openTime: b.ts, high: b.high, low: b.low }));
+  const candleTimes = klines.map((k) => k.openTime);
+  const scale = makeLwcScale(candleTimes, slots);
+  return finiteRows(series, bars).map((r) => ({
+    idx: r.idx,
+    x: resolveAnchorX(r.idx, r.ts, klines, slots, scale),
+    y: PRICE_TO_Y(r.value),
+  }));
 }
 
-/** The canvas segment for the UP level (the horizontal line at price 110). */
-function upSegment(segments) {
-  return segments.find((s) => s.y1 === Y110 && s.y2 === Y110);
-}
 
-test("renderer primitive: Piner x1=10/x2=15 → canvas draws candle 10 → candle 15 (contiguous)", async () => {
+test("renderer: fractal SERIES first point lands on the pivot candle, last spans to the lifetime endpoint (contiguous)", async () => {
   const bars = fractalScenarioBars(FRACTAL_HIGHS, FRACTAL_CLOSES_NOBREAK);
   const eng = new PinerPineEngine();
   eng.setCandles(bars, null, 60, null);
   const run = await eng.computeScriptVisuals(RENDER_SPEC);
   assert.ok(run, "script must run");
-  const up = fractalUp110(fractalLines(run));
-  assert.ok(up, "UP level drawing must exist");
-  // Piner's exact endpoint report:
-  assert.deepEqual(
-    { x1: up.logical1, x2: up.logical2, y1: up.price1, y2: up.price2, xloc: up.xloc },
-    { x1: 10, x2: 15, y1: 110, y2: 110, xloc: "bar_index" },
-  );
+  const up = fractalUpSeries(run);
+  assert.ok(up, "Up level 1 series must exist");
+  assert.equal(up.breakOnNa, true, "levels are style_linebr series");
   eng.dispose();
 
-  const klines = bars.map((b) => ({ openTime: b.ts, high: b.high, low: b.low }));
-  const segments = renderThroughPrimitive(fractalLines(run), klines, []);
-  const seg = upSegment(segments);
-  assert.ok(seg, "the 110-level line must be stroked on the canvas");
-  // What the renderer actually paints (canvas coordinates):
-  assert.equal(seg.x1, coord(10), "renderer x1 == candle 10 coordinate");
-  assert.equal(seg.x2, coord(15), "renderer x2 == candle 15 coordinate — full 5-candle span, NOT clamped");
-  assert.equal(seg.y1, Y110, "renderer y1 == price 110");
-  assert.equal(seg.y2, Y110, "renderer y2 == price 110 (horizontal)");
-  assert.notEqual(seg.x2, coord(12), "x2 must NOT be the confirmation bar (candle 12)");
-  assert.ok(seg.x2 > coord(12), "x2 extends past the confirmation bar");
+  const pts = seriesToCanvas(up, bars, []);
+  assert.ok(pts.length >= 6, "the level paints its full finite lifetime");
+  const first = pts[0];
+  const last = pts[pts.length - 1];
+  // offset=-n: the FIRST finite point lands on the PIVOT candle (idx 10).
+  assert.equal(first.idx, 10, "first painted point is the pivot candle");
+  assert.equal(first.x, coord(10), "renderer x1 == candle 10 coordinate");
+  assert.equal(first.y, Y110, "renderer y1 == price 110");
+  // The LAST point spans the full 5-candle lifetime to candle 15.
+  assert.equal(last.idx, 15, "last painted point is the lifetime endpoint");
+  assert.equal(last.x, coord(15), "renderer x2 == candle 15 — full span, NOT clamped");
+  assert.equal(last.y, Y110, "renderer y2 == price 110 (horizontal)");
+  // It must extend PAST the confirmation bar (candle 12), never clamp to it.
+  assert.notEqual(last.x, coord(12), "x2 must NOT be the confirmation bar (candle 12)");
+  assert.ok(last.x > coord(12), "x2 extends past the confirmation bar");
+  // Every painted point is the horizontal level at 110.
+  assert.ok(pts.every((p) => p.y === Y110), "every painted point is at price 110");
 });
 
-test("renderer primitive: full span across 2 whitespace slots between the endpoints", async () => {
+test("renderer: full span preserved across 2 whitespace slots between the endpoints", async () => {
   const bars = gappedFractalBars(FRACTAL_HIGHS, FRACTAL_CLOSES_NOBREAK);
   const eng = new PinerPineEngine();
   eng.setCandles(bars, null, 60, null);
   const run = await eng.computeScriptVisuals(RENDER_SPEC);
   assert.ok(run, "script must run");
-  const up = fractalUp110(fractalLines(run));
-  assert.ok(up, "UP level drawing must exist");
-  assert.equal(up.logical1, 10, "engine logical x1 = pivot 10 (compacted engine space)");
-  assert.equal(up.logical2, 15, "engine logical x2 = pivot+5 (compacted engine space)");
-  assert.equal(up.time1Ms, BASE + 10 * MIN, "time1Ms = pivot candle openTime");
-  assert.equal(up.time2Ms, BASE + 17 * MIN, "time2Ms = endpoint candle openTime (gap-shifted)");
+  const up = fractalUpSeries(run);
+  assert.ok(up, "Up level 1 series must exist");
   eng.dispose();
 
-  const klines = bars.map((b) => ({ openTime: b.ts, high: b.high, low: b.low }));
+  const candleTimes = bars.map((b) => b.ts);
+  const pts = seriesToCanvas(up, bars, WSPACE_SLOTS);
+  const first = pts[0];
+  const last = pts[pts.length - 1];
   // pivot (engine 10) sits at chart logical 10; endpoint (engine 15) at chart
   // logical 17 — 2 whitespace slots inserted after chart logical 11.
-  const segments = renderThroughPrimitive(fractalLines(run), klines, WSPACE_SLOTS);
-  const seg = upSegment(segments);
-  assert.ok(seg, "the 110-level line must be stroked on the canvas");
-  assert.equal(seg.x1, coord(10), "renderer x1 == pivot candle (chart logical 10)");
+  assert.equal(first.idx, 10, "first point is the pivot candle");
+  assert.equal(first.x, coord(10), "renderer x1 == pivot candle (chart logical 10)");
+  assert.equal(last.idx, 15, "last point is the lifetime endpoint candle");
   assert.equal(
-    seg.x2,
+    last.x,
     coord(17),
     "renderer x2 == endpoint candle (chart 15 + 2 slots = 17) — gap crossed, NOT collapsed",
   );
-  const confirmChartLogical = remapLogicalToChart(12, klines.map((k) => k.openTime), WSPACE_SLOTS);
-  assert.notEqual(seg.x2, coord(confirmChartLogical), "x2 must NOT clamp to the confirmation candle");
-  assert.ok(seg.x2 > coord(confirmChartLogical), "x2 extends past the confirmation candle");
+  // The span must NOT clamp to the confirmation candle (engine 12 → chart 14).
+  const confirmChartLogical = remapLogicalToChart(12, candleTimes, WSPACE_SLOTS);
+  assert.notEqual(last.x, coord(confirmChartLogical), "x2 must NOT clamp to the confirmation candle");
+  assert.ok(last.x > coord(confirmChartLogical), "x2 extends past the confirmation candle");
+  // Sanity: the whitespace chart logical really is 2 past the contiguous one.
+  assert.equal(remapLogicalToChart(15, candleTimes, WSPACE_SLOTS), 17, "endpoint chart logical = 17");
 });
 
-test("renderer primitive: close-break line visibly ends exactly at the breaking candle", async () => {
+test("renderer: close-break truncates the level WITH the breaking candle included", async () => {
   const closes = [...FRACTAL_CLOSES_NOBREAK];
-  closes[12] = 110; // first close >= level at engine idx 12
+  closes[12] = 110; // first close >= level at display bar 12
   for (const [gapped, slots, label] of [
     [false, [], "contiguous"],
     [true, WSPACE_SLOTS, "whitespace"],
@@ -330,21 +296,28 @@ test("renderer primitive: close-break line visibly ends exactly at the breaking 
     const eng = new PinerPineEngine();
     eng.setCandles(bars, null, 60, null);
     const run = await eng.computeScriptVisuals(RENDER_SPEC);
-    const up = fractalUp110(fractalLines(run));
-    assert.ok(up, `UP level drawing must exist (${label})`);
-    assert.equal(up.logical2, 12, `Piner x2 = breaking candle 12 (${label})`);
+    assert.ok(run, `script must run (${label})`);
+    const up = fractalUpSeries(run);
+    assert.ok(up, `Up level series must exist (${label})`);
     eng.dispose();
 
-    const klines = bars.map((b) => ({ openTime: b.ts, high: b.high, low: b.low }));
-    const segments = renderThroughPrimitive(fractalLines(run), klines, slots);
-    const seg = upSegment(segments);
-    assert.ok(seg, `the 110-level line must be stroked on the canvas (${label})`);
-    assert.equal(seg.x1, coord(10), `renderer x1 == candle 10 (${label})`);
-    const confirmChartLogical = remapLogicalToChart(12, klines.map((k) => k.openTime), slots);
-    assert.equal(
-      seg.x2,
-      coord(confirmChartLogical),
-      `renderer x2 == breaking candle 12's exact chart slot (${label})`,
-    );
+    const candleTimes = bars.map((b) => b.ts);
+    const pts = seriesToCanvas(up, bars, slots);
+    assert.ok(pts.length > 0, `the 110-level is painted (${label})`);
+
+    // The breaking candle (engine idx 12) is INCLUDED in the painted span…
+    const breaking = pts.find((p) => p.idx === 12);
+    assert.ok(breaking, `the breaking candle (idx 12) is painted (${label})`);
+    assert.equal(breaking.x, coord(remapLogicalToChart(12, candleTimes, slots)), `breaking candle at its exact chart slot (${label})`);
+    assert.equal(breaking.y, Y110, `breaking candle at price 110 (${label})`);
+
+    // …and the level is TRUNCATED: it ends at break + n (engine idx 14), which
+    // is short of the full unbroken lifetime (engine idx 15).
+    const last = pts[pts.length - 1];
+    assert.equal(last.idx, 14, `last painted point = breaking candle + n = 14 (${label})`);
+    const fullLifetime = coord(remapLogicalToChart(15, candleTimes, slots));
+    assert.ok(last.x < fullLifetime, `close break truncates below the full lifetime (${label})`);
+    // First point is still the pivot.
+    assert.equal(pts[0].idx, 10, `starts on the pivot candle (${label})`);
   }
 });

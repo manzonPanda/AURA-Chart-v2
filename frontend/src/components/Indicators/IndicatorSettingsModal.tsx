@@ -31,11 +31,15 @@ import {
   sanitizeInputValue,
   type ImportedPineIndicator,
   type PineInputMetaSnapshot,
+  type PinePlotMetaSnapshot,
   type PineRunStatus,
 } from "../../services/pineImport";
 import {
   isDefaultPlotStyle,
+  PINE_FILL_OPACITIES,
+  PINE_LINE_STYLES,
   PINE_PLOT_WIDTHS,
+  type PineLineStyle,
   type PinePlotStyleOverride,
   type PineStyleOverrides,
 } from "../../services/pineStyle";
@@ -93,6 +97,163 @@ function toPickerHex(color: unknown): string {
   }
   if (/^#[0-9a-f]{6,8}$/.test(c)) return c.slice(0, 7);
   return "#000000";
+}
+
+/** Human label per visual kind so plot / hline() / fill() outputs are distinguishable. */
+const VISUAL_KIND_LABEL: Record<string, string> = {
+  line: "Line",
+  area: "Area",
+  histogram: "Histogram",
+  horizontal: "H-line",
+  fill: "Fill",
+  marker: "Marker",
+  labels: "Labels",
+};
+
+/** Line-style select options with readable labels. */
+const LINE_STYLE_LABEL: Record<PineLineStyle, string> = {
+  solid: "Solid",
+  dashed: "Dashed",
+  dotted: "Dotted",
+};
+
+/** Extract the alpha (0–1) from a hex color (#RGB/#RRGGBB/#RRGGBBAA); null when opaque/absent. */
+function alphaFromHex(color: unknown): number | null {
+  if (typeof color !== "string") return null;
+  const c = color.trim();
+  const m8 = /^#[0-9a-f]{8}$/i.exec(c);
+  if (m8) return parseInt(c.slice(7, 9), 16) / 255;
+  const m4 = /^#[0-9a-f]{4}$/i.exec(c);
+  if (m4) return parseInt(c[3] + c[3], 16) / 255;
+  return null;
+}
+
+/**
+ * One Style-tab row for a single Pine visual output. Shows ONLY the controls
+ * meaningful for the visual's kind:
+ *   line / area         → visibility, color, width, line style
+ *   histogram           → visibility, color
+ *   horizontal (hline)  → visibility, color, width, line style
+ *   fill                → visibility, color, opacity
+ *   marker / labels     → visibility only (drawings/markers carry no color/width here)
+ * A small reset affordance restores the script-defined default for that visual.
+ */
+function PineStyleRow({
+  meta,
+  override,
+  onPatch,
+  onReset,
+}: {
+  meta: PinePlotMetaSnapshot;
+  override: PinePlotStyleOverride | undefined;
+  onPatch: (patch: Partial<PinePlotStyleOverride>) => void;
+  onReset: () => void;
+}) {
+  const visible = override?.visible !== false;
+  const kindLabel = VISUAL_KIND_LABEL[meta.type] ?? "Plot";
+  const isFill = meta.type === "fill";
+  const isMarkerish = meta.type === "marker" || meta.type === "labels";
+  const hasWidth = meta.type === "line" || meta.type === "area" || meta.type === "horizontal";
+  const hasLineStyle = meta.type === "line" || meta.type === "area" || meta.type === "horizontal";
+  // Shown values: explicit override, else the script's own value.
+  const shownColor = override?.color ?? meta.color ?? (isFill ? "#2962FF" : "#38bdf8");
+  const shownWidth = override?.lineWidth ?? meta.linewidth ?? 2;
+  const shownStyle: PineLineStyle = override?.lineStyle ?? "solid";
+  // Opacity: an override in 0–1 → percent; else the script color's own alpha,
+  // else a 30% default. Never touches the boundary plots.
+  const scriptAlpha = alphaFromHex(meta.color);
+  const shownOpacity = Math.round((override?.opacity ?? scriptAlpha ?? 0.3) * 100);
+  const overridden = !isDefaultPlotStyle(override);
+
+  return (
+    <div className="iset-styleblock" data-hidden={visible ? undefined : ""}>
+      <div className="iset-plotrow">
+        <input
+          type="checkbox"
+          checked={visible}
+          title={visible ? "Visible — uncheck to hide this output" : "Hidden — check to show this output"}
+          aria-label={`${meta.title} visibility`}
+          onChange={(e) => onPatch({ visible: e.target.checked })}
+        />
+        <input
+          type="color"
+          value={toPickerHex(shownColor)}
+          title={`${meta.title} color`}
+          aria-label={`${meta.title} color`}
+          onChange={(e) => onPatch({ color: e.target.value })}
+        />
+        <span className="iset-plotname" title={`${meta.key} · ${kindLabel}`}>
+          <span className="iset-kindtag">{kindLabel}</span>
+          {meta.title}
+        </span>
+        <button
+          type="button"
+          className="iset-reset"
+          title={overridden ? "Restore this output's script-defined styling" : "Using script-defined styling"}
+          aria-label={`${meta.title} reset to script default`}
+          disabled={!overridden}
+          onClick={onReset}
+        >
+          ↺
+        </button>
+      </div>
+      {!isMarkerish && (
+        <div className="iset-plotcontrols">
+          {hasWidth && (
+            <label className="iset-ctl">
+              <span>Width</span>
+              <select
+                value={shownWidth}
+                title={`${meta.title} width`}
+                aria-label={`${meta.title} width`}
+                onChange={(e) => onPatch({ lineWidth: Number(e.target.value) })}
+              >
+                {PINE_PLOT_WIDTHS.map((w) => (
+                  <option key={w} value={w}>
+                    {w}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {hasLineStyle && (
+            <label className="iset-ctl">
+              <span>Style</span>
+              <select
+                value={shownStyle}
+                title={`${meta.title} line style`}
+                aria-label={`${meta.title} line style`}
+                onChange={(e) => onPatch({ lineStyle: e.target.value as PineLineStyle })}
+              >
+                {PINE_LINE_STYLES.map((s) => (
+                  <option key={s} value={s}>
+                    {LINE_STYLE_LABEL[s]}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {isFill && (
+            <label className="iset-ctl">
+              <span>Opacity</span>
+              <select
+                value={shownOpacity}
+                title={`${meta.title} opacity`}
+                aria-label={`${meta.title} opacity`}
+                onChange={(e) => onPatch({ opacity: Number(e.target.value) / 100 })}
+              >
+                {PINE_FILL_OPACITIES.map((o) => (
+                  <option key={o} value={o}>
+                    {o}%
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -461,52 +622,29 @@ export function IndicatorSettingsModal({ target, onApply, onCancel }: Props) {
           {tab === "style" && isPine && (
             <>
               {target.indicator.plotMeta.length === 0 ? (
-                <div className="iset-note">This script exposes no renderable plots to style.</div>
+                <div className="iset-note">This script exposes no renderable outputs to style.</div>
               ) : (
-                target.indicator.plotMeta.map((p) => {
-                  const o = pineStyle?.[p.key];
-                  const visible = o?.visible !== false;
-                  // Shown value: explicit override, else the script's own color.
-                  const shownColor = o?.color ?? p.color ?? "#38bdf8";
-                  const shownWidth = o?.lineWidth ?? p.linewidth ?? 2;
-                  return (
-                    <div className="iset-plotrow" key={p.key} data-hidden={visible ? undefined : ""}>
-                      <input
-                        type="checkbox"
-                        checked={visible}
-                        title={visible ? "Visible — uncheck to hide this plot" : "Hidden — check to show this plot"}
-                        aria-label={`${p.title} visibility`}
-                        onChange={(e) => patchPineStyle(p.key, { visible: e.target.checked })}
-                      />
-                      <input
-                        type="color"
-                        value={toPickerHex(shownColor)}
-                        title={`${p.title} color`}
-                        aria-label={`${p.title} color`}
-                        onChange={(e) => patchPineStyle(p.key, { color: e.target.value })}
-                      />
-                      <span className="iset-plotname" title={p.key}>
-                        {p.title}
-                      </span>
-                      <select
-                        value={shownWidth}
-                        title={`${p.title} line width`}
-                        aria-label={`${p.title} width`}
-                        onChange={(e) => patchPineStyle(p.key, { lineWidth: Number(e.target.value) })}
-                      >
-                        {PINE_PLOT_WIDTHS.map((w) => (
-                          <option key={w} value={w}>
-                            {w}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  );
-                })
+                target.indicator.plotMeta.map((p) => (
+                  <PineStyleRow
+                    key={p.key}
+                    meta={p}
+                    override={pineStyle?.[p.key]}
+                    onPatch={(patch) => patchPineStyle(p.key, patch)}
+                    onReset={() =>
+                      setPineStyle((prev) => {
+                        const out = { ...(prev ?? {}) };
+                        delete out[p.key];
+                        return out;
+                      })
+                    }
+                  />
+                ))
               )}
               <div className="iset-note">
-                Style overrides apply at render time — the script itself is never modified. Per-bar
-                script colors are replaced while overridden; hline/fill styling is not supported yet.
+                Style overrides apply at render time — the script itself is never modified. An override
+                replaces the script's per-bar colors for that output while it is active; clearing it (the ↺
+                button, or Defaults) restores the script-defined styling. Plots, hline() and fill() outputs
+                are styled independently.
               </div>
             </>
           )}

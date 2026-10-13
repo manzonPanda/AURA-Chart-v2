@@ -28,8 +28,10 @@ import {
 } from "../src/services/pineImport.ts";
 import {
   isDefaultPlotStyle,
-  sanitizeStyleOverrides,
+  PINE_FILL_OPACITIES,
+  PINE_LINE_STYLES,
   PINE_PLOT_WIDTHS,
+  sanitizeStyleOverrides,
 } from "../src/services/pineStyle.ts";
 
 const FRONTEND_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -148,9 +150,32 @@ test("isDefaultPlotStyle: identity is default; any real override is not", () => 
   assert.equal(isDefaultPlotStyle(undefined), true);
   assert.equal(isDefaultPlotStyle({}), true);
   assert.equal(isDefaultPlotStyle({ visible: true }), true);
+  assert.equal(isDefaultPlotStyle({ lineStyle: "solid" }), true, "solid is the default line style");
   assert.equal(isDefaultPlotStyle({ visible: false }), false);
   assert.equal(isDefaultPlotStyle({ color: "#ff0000" }), false);
   assert.equal(isDefaultPlotStyle({ lineWidth: 2 }), false);
+  assert.equal(isDefaultPlotStyle({ lineStyle: "dashed" }), false);
+  assert.equal(isDefaultPlotStyle({ opacity: 0.4 }), false);
+});
+
+test("sanitizeStyleOverrides: lineStyle + fill opacity are validated per-field", () => {
+  const clean = sanitizeStyleOverrides({
+    Line: { color: "#00ff00", lineStyle: "dashed" },
+    Hline: { lineStyle: "dotted", lineWidth: 3 },
+    Fill: { color: "#112233", opacity: 0.45 },
+    Bad: { lineStyle: "wavy" }, // unknown style → dropped
+    BadOpacity: { opacity: 9 }, // clamped to 1
+  });
+  assert.deepEqual(clean.Line, { color: "#00ff00", lineStyle: "dashed" });
+  assert.deepEqual(clean.Hline, { lineStyle: "dotted", lineWidth: 3 });
+  assert.deepEqual(clean.Fill, { color: "#112233", opacity: 0.45 });
+  assert.equal(clean.Bad, undefined, "an unknown lineStyle with nothing else drops the key");
+  assert.equal(clean.BadOpacity.opacity, 1, "opacity clamps to [0,1]");
+});
+
+test("PINE_LINE_STYLES / PINE_FILL_OPACITIES offer the documented presets", () => {
+  assert.deepEqual(PINE_LINE_STYLES, ["solid", "dashed", "dotted"]);
+  assert.deepEqual(PINE_FILL_OPACITIES, [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
 });
 
 test("PINE_PLOT_WIDTHS offers the same 1–4 widths as the EMA/SMA modal", () => {
@@ -166,15 +191,18 @@ test("modal: source inputs render a price-source dropdown with Default (script)"
   assert.ok(code.includes("PRICE_SOURCE_LABEL[s]"), "existing source labels reused");
 });
 
-test("modal: grouped Inputs tab + Defaults reset + per-plot Style rows + style in Apply", () => {
+test("modal: grouped Inputs tab + Defaults reset + per-output Style rows + style in Apply", () => {
   const code = stripComments(readSrc("src/components/Indicators/IndicatorSettingsModal.tsx"));
   assert.ok(code.includes("groupPineInputMeta("), "Inputs tab groups by the script's group metadata");
   assert.ok(code.includes('className="iset-group-title"'), "group header rendered");
   assert.ok(code.includes("resetPineDefaults"), "Defaults restores script defaults");
   assert.ok(code.includes("sanitizeInputValue(m, undefined)"), "Defaults rebuilds the import-time input shape");
   assert.ok(code.includes("inputs: pineInputs ?? {}, style: pineStyle ?? {}"), "Apply carries style overrides");
-  assert.ok(code.includes("aria-label={`${p.title} visibility`}"), "Style rows expose visibility toggle");
+  assert.ok(code.includes("aria-label={`${meta.title} visibility`}"), "Style rows expose a visibility toggle");
   assert.ok(code.includes("PINE_PLOT_WIDTHS.map"), "Style rows expose the shared width options");
+  assert.ok(code.includes("PINE_LINE_STYLES.map"), "line/hline rows expose solid/dashed/dotted");
+  assert.ok(code.includes("PINE_FILL_OPACITIES.map"), "fill rows expose an opacity control");
+  assert.ok(code.includes("VISUAL_KIND_LABEL"), "outputs are tagged by kind (Line/H-line/Fill/…)");
 });
 
 test("PineBridge: renderer consumes style overrides at series creation/paint", () => {

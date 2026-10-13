@@ -31,6 +31,8 @@ import {
   type PineSymbolMeta,
 } from "./pineEngineTypes.ts";
 import { createPineEngine } from "./pineEngineFactory.ts";
+import type { PineInputBinding } from "./pineIndicators.ts";
+import { normalizeSourceInputs } from "./pineSourceInputs.ts";
 import { isPriceSource } from "./priceSource.ts";
 import { sanitizeStyleOverrides, type PineStyleOverrides } from "./pineStyle.ts";
 
@@ -49,8 +51,16 @@ export type { PineSymbolMeta };
 export const MAX_PINE_SOURCE_LENGTH = 100_000;
 /** Maximum number of imported indicators kept in localStorage + rendered. */
 export const MAX_IMPORTED_INDICATORS = 10;
-/** Maximum line plots rendered per imported indicator (rest are ignored). */
-export const MAX_PLOT_SERIES_PER_INDICATOR = 8;
+/** Maximum line plots rendered per imported indicator (rest are ignored).
+ *
+ * `fractal_SMA.pine` (Williams Fractals + SMA) is a merged script that declares
+ * 24 fractal line-br plots (Up/Down level 1..12) PLUS the SMA/Bollinger plots.
+ * The old cap of 8 truncated that to `Up level 1..8` — every Down level and all
+ * SMA series were silently dropped at the import boundary, which is why the
+ * fractals stopped rendering. 30 matches `PINER_MAX_VISUALS` (the engine's
+ * extraction budget) so the two caps agree and no series is dropped between the
+ * engine and the persisted indicator. */
+export const MAX_PLOT_SERIES_PER_INDICATOR = 30;
 /** Maximum input widgets per imported indicator (sanity cap). */
 export const MAX_PINE_INPUTS = 32;
 
@@ -94,6 +104,26 @@ export interface PineInputMetaSnapshot {
   group?: string;
   /** TradingView-style hover hint (`input.*(..., tooltip="...")`). */
   tooltip?: string;
+}
+
+/**
+ * Engine-side bindings for a compiled import — the SINGLE construction point,
+ * shared by the live chart (PineBridge) and the import preview in this module.
+ *
+ * Piner resolves runtime `inputs` overrides by its DEDUPED input key
+ * (`compile().metadata.inputs[].key`): two declarations titled "Length" become
+ * "Length" and "Length (2)", and `pickInput` reads that deduped key — never the
+ * raw title (see tests/pineDuplicateTitleBindings.test.mjs). AURA keys persisted params by
+ * `varId` (= that same deduped key), so for imports both sides are the same
+ * string: varId → varId. The previous shape (`{ title: m.title, ... }`) keyed
+ * the ENGINE side by the raw title, so the second "Length" binding OVERWROTE
+ * the first inside the engine's `inputsFor`: the SMA length control went dead
+ * and the smoothing value drove the SMA instead (fractal_SMA.pine's duplicate
+ * titles). Binding by title also happens to work for registry scripts (unique
+ * titles ⇒ key == title) — only the duplicate-title case breaks, silently.
+ */
+export function pineInputBindings(meta: readonly PineInputMetaSnapshot[]): PineInputBinding[] {
+  return meta.map((m) => ({ title: m.varId, paramKey: m.varId }));
 }
 
 /** Snapshot of one renderable output discovered at compile time. */
@@ -512,7 +542,7 @@ export function groupPineInputMeta(meta: readonly PineInputMetaSnapshot[]): Pine
 
 // ── Record sanitization (localStorage can contain anything) ────────────────
 
-const VISUAL_TYPES: ReadonlySet<string> = new Set(["line", "histogram", "area", "horizontal", "marker", "labels"]);
+const VISUAL_TYPES: ReadonlySet<string> = new Set(["line", "histogram", "area", "horizontal", "fill", "marker", "labels"]);
 
 function sanitizePlotMeta(raw: unknown): PinePlotMetaSnapshot | null {
   if (!isPlainObject(raw)) return null;
@@ -569,14 +599,51 @@ function sanitizeDiagnostics(raw: unknown): PineImportDiagnostics | null {
   };
 }
 
+/**
+ * Heal a persisted `inputMeta` that predates source normalization.
+ *
+ * Before the `input.source()` fix, the generic `input(<ohlc-series>, …)` form
+ * was classified by Piner as `kind:"float"`, so an already-imported
+ * `fractal_SMA.pine` persisted its Source as `type:"float"` (a number box). The
+ * runtime compile now normalizes that form to `input.source(...)`, but the
+ * STORED metadata still says `float` — so the Inputs tab would keep showing a
+ * number field until a re-import (which the UX forbids). This recompiles the
+ * normalized source ONCE to read the authoritative `kind` and upgrades a stored
+ * `float` → `source` ONLY where the fresh compile reports `kind:"source"` — so a
+ * genuine `input.float(2.0)` (which still compiles to `float`) is never touched.
+ *
+ * Cost is paid only when a `float` input exists to check; any compile failure
+ * (e.g. a script that needs async library resolution) falls back to the stored
+ * metadata unchanged, so a previously-working indicator can never regress.
+ */
+function healSourceInputMeta(
+  source: string,
+  meta: readonly PineInputMetaSnapshot[],
+): PineInputMetaSnapshot[] {
+  if (!meta.some((m) => m.type === "float")) return meta as PineInputMetaSnapshot[];
+  try {
+    const fresh = compile(normalizeSourceInputs(source)).metadata.inputs ?? [];
+    const kindByKey = new Map<string, string>();
+    for (const d of fresh) if (typeof d.key === "string") kindByKey.set(d.key, d.kind);
+    return meta.map((m) =>
+      m.type === "float" && kindByKey.get(m.varId) === "source" ? { ...m, type: "source" } : m,
+    );
+  } catch {
+    return meta as PineInputMetaSnapshot[];
+  }
+}
+
 /** Validate one stored imported indicator. Returns null for records to DROP. */
 export function sanitizeImportedIndicator(raw: unknown): ImportedPineIndicator | null {
   if (!isPlainObject(raw)) return null;
   if (typeof raw.source !== "string" || raw.source.length === 0) return null;
   if (raw.source.length > MAX_PINE_SOURCE_LENGTH) return null; // oversized → drop
-  const inputMeta: PineInputMetaSnapshot[] = Array.isArray(raw.inputMeta)
-    ? raw.inputMeta.map(sanitizeInputMeta).filter((m): m is PineInputMetaSnapshot => m !== null).slice(0, MAX_PINE_INPUTS)
-    : [];
+  const inputMeta: PineInputMetaSnapshot[] = healSourceInputMeta(
+    raw.source,
+    Array.isArray(raw.inputMeta)
+      ? raw.inputMeta.map(sanitizeInputMeta).filter((m): m is PineInputMetaSnapshot => m !== null).slice(0, MAX_PINE_INPUTS)
+      : [],
+  );
   const inputs: Record<string, unknown> = {};
   for (const m of inputMeta) {
     inputs[m.varId] = sanitizeInputValue(m, isPlainObject(raw.inputs) ? raw.inputs[m.varId] : undefined);
@@ -624,6 +691,54 @@ function plotMetaFromVisual(v: PineVisual): PinePlotMetaSnapshot {
   }
   if (typeof (v as { color?: unknown }).color === "string") meta.color = (v as { color: string }).color;
   return meta;
+}
+
+/** One engine-declared output's style-relevant snapshot (see declared capture). */
+type PineDeclaredSnapshot = PineRuntimeDiagnostics["declared"][number];
+
+/**
+ * Build the persistable plot-meta snapshot (the Style tab's row list).
+ *
+ * UNION of the engine's DECLARED outputs and the RENDERED visuals, deduped by
+ * stable key:
+ *   - `declared` (declaration order) is the source of truth for the Style tab —
+ *     a conditionally-plotted or warmup-only output (the SMA/Bollinger bands +
+ *     their fill in fractal_SMA.pine before enough history loads, or a fractal
+ *     level that hasn't triggered) STILL gets a row, matching TradingView. A
+ *     declared-only row carries the script's declared color/width.
+ *   - `visuals` layers in the accurate color/width for outputs that painted and
+ *     adds markers/drawings (runtime extras that are never "declared"). A
+ *     rendered output therefore keeps its exact styling; a declared-only output
+ *     keeps the script defaults.
+ *
+ * Rendering is UNAFFECTED: PineBridge paints from `visuals` (finite-valued
+ * only), so a declared-but-unrendered row exposes style controls without ever
+ * creating a phantom empty series — its override simply takes effect the moment
+ * the output produces finite values.
+ *
+ * Exported so PineBridge can REBUILD this list at RUNTIME from a live engine
+ * run and heal an already-imported indicator whose persisted `plotMeta`
+ * predates the declared-output capture (the frozen-at-import bug). See
+ * `onDeclared` in PineBridge.
+ */
+export function buildPlotMeta(
+  declared: readonly PineDeclaredSnapshot[],
+  visuals: readonly PineVisual[],
+): PinePlotMetaSnapshot[] {
+  const byKey = new Map<string, PinePlotMetaSnapshot>();
+  const order: string[] = [];
+  const put = (meta: PinePlotMetaSnapshot): void => {
+    if (!byKey.has(meta.key)) order.push(meta.key);
+    byKey.set(meta.key, meta); // later (visuals) refines declared defaults
+  };
+  for (const d of declared) {
+    const meta: PinePlotMetaSnapshot = { key: d.key, title: d.title, type: d.type };
+    if (d.color) meta.color = d.color;
+    if (d.lineWidth) meta.linewidth = d.lineWidth;
+    put(meta);
+  }
+  for (const v of visuals) put(plotMetaFromVisual(v));
+  return order.map((k) => byKey.get(k)!).slice(0, MAX_PLOT_SERIES_PER_INDICATOR);
 }
 
 // ── localStorage load/save (guarded, injectable for tests) ─────────────────
@@ -724,12 +839,17 @@ export async function compileImportedPine(args: CompileImportedPineArgs): Promis
 
   // 2. Compile-only check: syntax + semantic errors surface here with line:column.
   //    Piner's compile() also yields the input.* metadata (settings schema).
+  //    `normalizeSourceInputs` first rewrites the generic `input(<ohlc-series>)`
+  //    form to `input.source(<ohlc-series>)` so Piner reports it as `kind:"source"`
+  //    (a dropdown), not a numeric float — matching the runtime compile in
+  //    pinerCompile so the Inputs-tab control type and the executed math agree.
+  //    See pineSourceInputs.ts for the full root cause.
   let inputs: PineInputMetaSnapshot[] = [];
   onStage?.("transpiling");
   let compiledOverlay: boolean | null = null;
   let compiledTitle: string | null = null;
   try {
-    const compiled = compile(source);
+    const compiled = compile(normalizeSourceInputs(source));
     compiledTitle = compiled.metadata.title;
     compiledOverlay = compiled.metadata.overlay;
     inputs = (compiled.metadata.inputs ?? [])
@@ -771,7 +891,7 @@ export async function compileImportedPine(args: CompileImportedPineArgs): Promis
         {
           id: "pine-import-preview",
           source,
-          bindings: inputs.map((m) => ({ title: m.title, paramKey: m.varId })),
+          bindings: pineInputBindings(inputs),
         },
         {},
         (raw) => {
@@ -799,6 +919,14 @@ export async function compileImportedPine(args: CompileImportedPineArgs): Promis
   }
 
   const truncated = visuals.length > MAX_PLOT_SERIES_PER_INDICATOR;
+  // The Style tab is driven by plotMeta, built from the engine's DECLARED
+  // outputs (source of truth: every output the script declares, even
+  // conditional / warmup-only ones) unioned with the RENDERED visuals (which
+  // add accurate color/width for painted outputs plus markers/drawings). This
+  // is what makes the SMA/Bollinger bands + their fill styleable in
+  // fractal_SMA.pine before enough history loads, or while a fractal level is
+  // idle — see buildPlotMeta and PineRuntimeDiagnostics.declared.
+  const plotMeta = buildPlotMeta(runtimeDiagnostics?.declared ?? [], visuals);
   const diagnostics: PineImportDiagnostics = {
     staticCounts: staticScanCounts(source),
     rendered: (runtimeDiagnostics?.rendered ?? []).slice(0, MAX_PLOT_SERIES_PER_INDICATOR),
@@ -846,7 +974,7 @@ export async function compileImportedPine(args: CompileImportedPineArgs): Promis
       overlay,
       inputs: inputs0,
       inputMeta: inputs,
-      plotMeta: visuals.slice(0, MAX_PLOT_SERIES_PER_INDICATOR).map(plotMetaFromVisual),
+      plotMeta,
       diagnostics,
       createdAt: Date.now(),
     },

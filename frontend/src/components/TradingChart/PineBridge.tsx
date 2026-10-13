@@ -21,11 +21,15 @@ import type { Bar } from "@getcandlekit/charts/react";
 
 import {
   friendlyPineError,
+  buildPlotMeta,
+  pineInputBindings,
   type ImportedPineIndicator,
+  type PinePlotMetaSnapshot,
   type PineRunStatus,
 } from "../../services/pineImport";
 import {
   type PineBar,
+  type PineFillPoint,
   type PineLiveCandle,
   type PineMarkerPoint,
   type PineScriptEngine,
@@ -34,10 +38,12 @@ import {
 } from "../../services/pineEngineTypes";
 import { createPineEngine } from "../../services/pineEngineFactory";
 import { CoalescedFlights } from "../../services/pineCoalesce";
-import type { PinePlotStyleOverride, PineStyleOverrides } from "../../services/pineStyle";
+import type { PineLineStyle, PinePlotStyleOverride, PineStyleOverrides } from "../../services/pineStyle";
 import type { RealtimeCandleMsg } from "../../services/realtime";
 import { PineLabelPrimitive } from "./pineLabelPrimitive";
 import { PineLineBoxPrimitive } from "./pineLineBoxPrimitive";
+import { PineFillPrimitive, type PineFillRegion } from "./pineFillPrimitive";
+import { linebrIdBase, linebrSegmentsToDrawings } from "../../services/pineDrawings";
 
 /** Stable empty identity — optional-prop absence never changes effect deps. */
 const EMPTY_SLOTS: readonly number[] = [];
@@ -57,6 +63,16 @@ interface Props {
   symbol?: PineSymbolMeta | null;
   /** Runtime status reporter (status-change guarded; safe to call every frame). */
   onStatus?: (id: string, status: PineRunStatus) => void;
+  /**
+   * Runtime Style-tab healer. After each successful engine run this reports the
+   * freshly-built plotMeta (declared outputs ∪ rendered visuals — see
+   * `buildPlotMeta`) so App can REPLACE an already-imported indicator's stale,
+   * frozen-at-import `plotMeta`. Without this, an indicator imported before the
+   * declared-output capture would keep missing the conditional / warmup-only
+   * Style rows (the fractal_SMA.pine bug). The consumer must change-guard on
+   * the array (identity-stable) so per-frame calls never loop.
+   */
+  onDeclared?: (id: string, plotMeta: PinePlotMetaSnapshot[]) => void;
   /**
    * Whitespace slot timestamps (epoch ms) the chart's time scale carries for
    * detected data gaps (WhitespaceBridge) — presentation-only metadata used to
@@ -102,6 +118,8 @@ type IndicatorChartState = {
   drawingPrimitives: Map<number, PineLineBoxPrimitive>;
   /** Overlay primitive for `force_overlay=true` lines/boxes (main pane). */
   overlayDrawingPrimitive: PineLineBoxPrimitive | null;
+  /** Renderer primitives for this indicator's `fill()` regions, per pane host. */
+  fillPrimitives: Map<number, PineFillPrimitive>;
   priceLines: IPriceLine[];
   priceLineSig: string;
   priceLineHost: ISeriesApi<"Line"> | null;
@@ -146,6 +164,7 @@ export function PineBridge({
   indicators,
   symbol,
   onStatus,
+  onDeclared,
   whitespaceSlots,
 }: Props) {
   // Whitespace slot timestamps for drawing-anchor remapping (see Props).
@@ -193,6 +212,7 @@ export function PineBridge({
     overlayLabelPrimitive: null,
     drawingPrimitives: new Map(),
     overlayDrawingPrimitive: null,
+    fillPrimitives: new Map(),
     priceLines: [],
     priceLineSig: "",
     priceLineHost: null,
@@ -258,6 +278,13 @@ export function PineBridge({
     if (st.overlayDrawingPrimitive) {
       try {
         st.overlayDrawingPrimitive.setDrawings([], []);
+      } catch {
+        /* primitive gone */
+      }
+    }
+    for (const prim of st.fillPrimitives.values()) {
+      try {
+        prim.setFills([]);
       } catch {
         /* primitive gone */
       }
@@ -337,12 +364,13 @@ export function PineBridge({
     key: string,
     scriptColor: string | null,
     scriptWidth: number | null,
-  ): { color: string | null; width: number | null } => {
+  ): { color: string | null; width: number | null; lineStyle: PineLineStyle | null } => {
     const o: PinePlotStyleOverride | undefined = style[key];
-    if (!o) return { color: scriptColor, width: scriptWidth };
+    if (!o) return { color: scriptColor, width: scriptWidth, lineStyle: null };
     return {
       color: typeof o.color === "string" ? o.color : scriptColor,
       width: typeof o.lineWidth === "number" ? o.lineWidth : scriptWidth,
+      lineStyle: typeof o.lineStyle === "string" ? o.lineStyle : null,
     };
   };
 
@@ -361,6 +389,54 @@ export function PineBridge({
     const b = parseInt(m[1].slice(4, 6), 16);
     const ownAlpha = m[2] ? parseInt(m[2], 16) / 255 : 1;
     return `rgba(${r}, ${g}, ${b}, ${(Math.max(0, Math.min(1, alpha)) * ownAlpha).toFixed(3)})`;
+  };
+
+  /**
+   * Resolve one fill() visual into a PineFillRegion under its style override.
+   *
+   * Rules (mirroring the plot color rules):
+   *   - No override ⇒ keep the script's per-bar / static colors verbatim.
+   *   - `color` override ⇒ a uniform fill color that REPLACES every per-bar
+   *     script color (the per-bar colors are stripped so the override is
+   *     complete; the fill's own boundaries are untouched).
+   *   - `opacity` override ⇒ the fill's alpha, applied to whichever color wins
+   *     (override color, else the script color). The boundary PLOTS' colors are
+   *     never touched — only the fill band is affected.
+   * The region's `color` is the fallback for bars that carry no per-bar color.
+   */
+  const resolveFill = (
+    style: PineStyleOverrides,
+    key: string,
+    scriptColor: string | null,
+    data: readonly PineFillPoint[],
+  ): PineFillRegion => {
+    const o: PinePlotStyleOverride | undefined = style[key];
+    const overrideColor = typeof o?.color === "string" ? o.color : null;
+    const opacity = typeof o?.opacity === "number" ? Math.max(0, Math.min(1, o.opacity)) : null;
+    const base = overrideColor ?? scriptColor ?? null;
+    // Region fallback color (bars with no per-bar color): apply opacity on top.
+    let regionColor = base ?? "#2962FF33";
+    if (opacity !== null) {
+      const src = base ?? "#2962FF";
+      regionColor = withAlpha(src.startsWith("#") ? src : "#2962FF", opacity);
+    }
+    // When a color override is active, strip the per-bar colors so the uniform
+    // override wins; otherwise preserve the script's per-bar colors exactly.
+    const stripPerBar = overrideColor !== null;
+    const points: PineFillPoint[] = stripPerBar
+      ? data.map((p) => ({ ts: p.ts, ...(p.top !== undefined ? { top: p.top } : {}), ...(p.bottom !== undefined ? { bottom: p.bottom } : {}) }))
+      : data.map((p) => ({
+          ts: p.ts,
+          ...(p.top !== undefined ? { top: p.top } : {}),
+          ...(p.bottom !== undefined ? { bottom: p.bottom } : {}),
+          // Apply an opacity override to the script's own per-bar color too.
+          ...(p.color && opacity !== null
+            ? { color: withAlpha(p.color.startsWith("#") ? p.color : "#2962FF", opacity) }
+            : p.color
+              ? { color: p.color }
+              : {}),
+        }));
+    return { points, color: regionColor };
   };
 
   type HorizontalVisual = Extract<PineVisual, { type: "horizontal" }>;
@@ -389,11 +465,19 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
     let seenLabels = false;
     /** True when THIS run carried a line/box visual — its absence clears old drawings. */
     let seenDrawings = false;
+    /** A plot.style_linebr visual was seen this run (it owns the drawing primitive,
+     *  so its segments must be re-pushed even when a run yields zero of them). */
+    let sawLinebr = false;
+    /** A fill() visual was seen this run (owns the fill primitive, so it must be
+     *  re-pushed even when every bar is a gap). */
+    let sawFill = false;
     // Merged line/box drawings for this run (both visuals feed ONE primitive).
     const paneLines: LinesVisual["lines"] = [];
     const overlayLines: LinesVisual["lines"] = [];
     const paneBoxes: BoxesVisual["boxes"] = [];
     const overlayBoxes: BoxesVisual["boxes"] = [];
+    // Merged fill regions for this run (all fill() visuals feed ONE primitive).
+    const paneFills: PineFillRegion[] = [];
 
     // Anchor context for the drawing primitives: real-candle times (engine
     // space) + the chart's whitespace slots (chart space). Primitives resolve
@@ -410,6 +494,39 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
         // series OBJECT stays in st.data and repaints on un-hide.
         if (override?.visible === false) continue;
         seenData.add(ident);
+        // plot.style_linebr → independent horizontal SEGMENTS via the drawing
+        // primitive, NOT a connected LineSeries. Lightweight Charts joins every
+        // finite point of a LineSeries into one polyline (it drops the na
+        // whitespace rows), so a slot reused for two different-priced levels
+        // would be bridged by a diagonal. Each contiguous finite run becomes its
+        // own horizontal PineLineDrawing (see linebrSegmentsToDrawings), so the
+        // line genuinely BREAKS on na — exactly Pine's linebr semantics. This
+        // path also carries no per-segment LWC series, so dense histories stay
+        // cheap. Non-linebr lines (SMA/Bollinger/MA) keep the LineSeries path.
+        if (v.type === "line" && v.breakOnNa) {
+          const r = resolveStyle(style, ident, v.color ?? null, v.lineWidth ?? null);
+          const segColor = r.color ?? "#38bdf8";
+          const segWidth = (r.width ?? v.lineWidth ?? 2) as number;
+          // Stable id base per visual key so redraws don't churn drawing ids.
+          const idBase = linebrIdBase(ident);
+          const segs = linebrSegmentsToDrawings(v.data, segColor, segWidth, idBase);
+          seenDrawings = true;
+          sawLinebr = true;
+          for (const ln of segs) paneLines.push(ln);
+          // A linebr visual no longer owns a data series; drop any stale one so
+          // the seenData cleanup below can't leave an orphaned LineSeries.
+          const stale = st.data.get(ident);
+          if (stale) {
+            try {
+              chart.removeSeries(stale.series as ISeriesApi<"Line">);
+            } catch {
+              /* already gone */
+            }
+            st.data.delete(ident);
+          }
+          if (segs.length > 0) paintedAny = true;
+          continue;
+        }
         // Re-create when the STYLE changes (color/width) — applyOptions would
         // need extra plumbing across the Line/Histogram/Area union, so we keep
         // the freshest signature per ident and let the create-branch re-add.
@@ -443,6 +560,13 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
             const color = r.color ?? "#38bdf8";
             // histogram visuals carry no script linewidth — default 2.
             const width = (r.width ?? (v.type === "histogram" ? undefined : v.lineWidth) ?? 2) as LineWidth;
+            // lineStyle override → LWC LineStyle (only for line/area, not hist).
+            const lineStyleOpt =
+              r.lineStyle === "dashed"
+                ? LineStyle.Dashed
+                : r.lineStyle === "dotted"
+                  ? LineStyle.Dotted
+                  : undefined;
             if (v.type === "line") {
               const s = chart.addSeries(
                 LineSeries,
@@ -450,6 +574,7 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
                   ...base,
                   color,
                   lineWidth: width,
+                  ...(lineStyleOpt !== undefined ? { lineStyle: lineStyleOpt } : {}),
                   lineType: v.stepLine ? LineType.WithSteps : LineType.Simple,
                   pointMarkersVisible: false,
                   crosshairMarkerRadius: 3,
@@ -469,6 +594,7 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
                   topColor: withAlpha(color, 0.35),
                   bottomColor: withAlpha(color, 0.04),
                   lineWidth: width,
+                  ...(lineStyleOpt !== undefined ? { lineStyle: lineStyleOpt } : {}),
                 },
                 st.paneIndex,
               );
@@ -557,12 +683,25 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
         seenDrawings = true;
         for (const bx of v.boxes) paneBoxes.push(bx);
         for (const bx of v.overlayBoxes) overlayBoxes.push(bx);
+      } else if (v.type === "fill") {
+        // Pine fill(plot1, plot2, …) → the shared fill primitive. A hidden
+        // override skips it; a color/opacity override resolves via resolveFill
+        // (uniform color replaces per-bar colors; opacity scales the alpha).
+        // The boundary plots/hlines keep their OWN colors — a fill override
+        // never recolors what it shades.
+        const override = style[v.key] as PinePlotStyleOverride | undefined;
+        if (override?.visible === false) continue;
+        sawFill = true;
+        const region = resolveFill(style, v.key, v.color ?? null, v.data);
+        paneFills.push(region);
       }
     }
 
-    // Lines + boxes merged → one setDrawings per host (only when non-empty;
-    // the seenDrawings-clear below handles the vanished case).
-    if (paneLines.length > 0 || paneBoxes.length > 0) {
+    // Lines + boxes merged → one setDrawings per host. Runs whenever this run
+    // carried any line/box/linebr art (sawLinebr included) so a linebr run that
+    // yields ZERO segments still clears the previously-painted levels; the
+    // !seenDrawings-clear below handles the fully-vanished case.
+    if (sawLinebr || paneLines.length > 0 || paneBoxes.length > 0) {
       const host = labelHostFor(chart, st, candleSeries, barsNow);
       if (host) {
         const prim = ensureDrawingPrimitive(host, st, st.paneIndex);
@@ -585,6 +724,19 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
         paintedAny = true;
       }
     }
+    // Fills merged → one setFills per host. Runs whenever this run carried a
+    // fill visual (sawFill) so a run that yields zero regions still clears the
+    // previously-painted fills; the !sawFill-clear below handles the vanished
+    // case. Fills paint BEHIND the plots (zOrder "bottom" in the primitive).
+    if (sawFill || paneFills.length > 0) {
+      const host = labelHostFor(chart, st, candleSeries, barsNow);
+      if (host) {
+        const prim = ensureFillPrimitive(host, st, st.paneIndex);
+        prim.setAnchorContext(anchorKlines, wsSlots);
+        prim.setFills(paneFills);
+        paintedAny = true;
+      }
+    }
     // Markers: LWC requires time-sorted arrays; one merged set per pane.
     const plugin =
       markers.length > 0
@@ -601,28 +753,45 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
     }
 
     // hlines → price lines on the pane's host (candle series for overlays).
-    const hlineSig = hlines
-      .map((h) => `${h.key}:${h.price}:${h.color ?? ""}:${h.lineWidth ?? 1}:${h.lineStyle}`)
+    // Style overrides apply per hline key: a `visible:false` override removes
+    // the line entirely; color/width/lineStyle replace the engine defaults
+    // (Piner 0.13.0 does not surface the script's own hline styling, so the
+    // override is the ONLY way to restyle an hline). The override is folded
+    // into the signature so a style change re-creates the price lines.
+    const hlineViews = hlines
+      .map((h) => {
+        const o = style[h.key] as PinePlotStyleOverride | undefined;
+        return {
+          h,
+          hidden: o?.visible === false,
+          color: (typeof o?.color === "string" ? o.color : h.color) ?? "#787b86",
+          lineWidth: (typeof o?.lineWidth === "number" ? o.lineWidth : h.lineWidth) ?? 1,
+          lineStyle: (o?.lineStyle ?? h.lineStyle) as "solid" | "dashed" | "dotted",
+        };
+      })
+      .filter((x) => !x.hidden);
+    const hlineSig = hlineViews
+      .map((x) => `${x.h.key}:${x.h.price}:${x.color}:${x.lineWidth}:${x.lineStyle}`)
       .join("|");
     if (hlines.length > 0) {
       const host = priceLineHostFor(chart, st, candleSeries, barsNow);
       if (host && hlineSig !== st.priceLineSig) {
         removePriceLines(st);
         st.priceLineHost = host;
-        for (const h of hlines) {
+        for (const x of hlineViews) {
           try {
             st.priceLines.push(
               host.createPriceLine({
-                price: h.price,
-                color: h.color ?? "#787b86",
-                lineWidth: (h.lineWidth ?? 1) as LineWidth,
+                price: x.h.price,
+                color: x.color,
+                lineWidth: x.lineWidth as LineWidth,
                 lineStyle:
-                  h.lineStyle === "dotted"
+                  x.lineStyle === "dotted"
                     ? LineStyle.Dotted
-                    : h.lineStyle === "dashed"
+                    : x.lineStyle === "dashed"
                       ? LineStyle.Dashed
                       : LineStyle.Solid,
-                title: h.title,
+                title: x.h.title,
                 axisLabelVisible: true,
               }),
             );
@@ -688,6 +857,18 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
       }
     }
 
+    // Same lifecycle for fills: a run without a fill visual (script edit,
+    // warmup-only, or every fill overridden off) clears the painted fills.
+    if (!sawFill) {
+      for (const prim of st.fillPrimitives.values()) {
+        try {
+          prim.setFills([]);
+        } catch {
+          /* primitive gone */
+        }
+      }
+    }
+
     return paintedAny;
   };
 
@@ -727,13 +908,16 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
     st.paneIndex = s.paneIndex;
 
     let rawError: string | null = null;
-    let run: { visuals: PineVisual[] } | null = null;
+    let run: { visuals: PineVisual[]; diagnostics?: { declared?: unknown[] } } | null = null;
     try {
       run = await engineRef.current.computeScriptVisuals(
         {
           id: s.id,
           source: ind.source,
-          bindings: ind.inputMeta.map((m) => ({ title: m.title, paramKey: m.varId })),
+          // Shared helper keys the ENGINE side by varId (= Piner's deduped
+          // input key), NOT the raw title — duplicate titles ("Length" /
+          // "Length (2)") collide when keyed by title (see pineInputBindings).
+          bindings: pineInputBindings(ind.inputMeta),
         },
         ind.inputs,
         (raw) => {
@@ -766,6 +950,16 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
         // barsRef.current = the LATEST authoritative bridge bars (the forming
         // candle's truth merged in), so drawings/labels anchor to the newest data.
         const painted = applyVisuals(chart, st, run.visuals, candleSeries ?? null, barsRef.current, ind.style ?? EMPTY_STYLE);
+        // Style-tab healer: rebuild the plotMeta from THIS live run (declared
+        // outputs ∪ rendered visuals) and report it so App can replace the
+        // indicator's stale, frozen-at-import plotMeta. This is what makes the
+        // conditional / warmup-only Style rows (SMA-based MA, Bollinger bands,
+        // their fill in fractal_SMA.pine) appear for an indicator imported
+        // BEFORE the declared-output capture — no re-import required.
+        if (onDeclared) {
+          const declared = (run.diagnostics?.declared ?? []) as Parameters<typeof buildPlotMeta>[0];
+          onDeclared(id, buildPlotMeta(declared, run.visuals));
+        }
         report(
           id,
           painted
@@ -1003,6 +1197,24 @@ type BoxesVisual = Extract<PineVisual, { type: "boxes" }>;
       st.overlayDrawingPrimitive = prim;
     } catch {
       /* older LWC without primitive support */
+    }
+    return prim;
+  };
+
+  /** One fill primitive per pane host (mirrors the line/box primitive). */
+  const ensureFillPrimitive = (
+    host: ISeriesApi<"Line">,
+    st: IndicatorChartState,
+    paneIndex: number,
+  ): PineFillPrimitive => {
+    const existing = st.fillPrimitives.get(paneIndex);
+    if (existing) return existing;
+    const prim = new PineFillPrimitive();
+    try {
+      host.attachPrimitive(prim);
+      st.fillPrimitives.set(paneIndex, prim);
+    } catch {
+      /* older LWC without primitive support — fills degrade silently */
     }
     return prim;
   };

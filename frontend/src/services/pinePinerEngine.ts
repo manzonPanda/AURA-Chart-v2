@@ -23,6 +23,7 @@
 import {
   pinerCompile,
   pinerRunVisuals,
+  PINER_MAX_VISUALS,
   type PinerCompiled,
 } from "./pinePinerCore.ts";
 import {
@@ -121,7 +122,12 @@ export class PinerPineEngine implements PineScriptEngine {
     return c;
   }
 
-  /** Re-key AURA params (keyed by varId) onto Piner's input-title keys. */
+  /**
+   * Re-key AURA params onto Piner's RUNTIME input keys — the DEDUPED input key
+   * (`metadata.inputs[].key`), not the raw title: duplicate titles dedupe
+   * ("Length" / "Length (2)") and colliding title keys overwrite each other
+   * (see `pineInputBindings`). Registry specs use unique titles (key == title).
+   */
   private inputsFor(spec: PineScriptSpec, params: Record<string, unknown>): Record<string, unknown> {
     const inputs: Record<string, unknown> = {};
     for (const b of spec.bindings ?? []) {
@@ -219,10 +225,11 @@ export class PinerPineEngine implements PineScriptEngine {
         onError?.(msg);
         return null;
       }
-      // Line-only contract: plain (non-step) lines only.
+      // Line-only contract: plain (non-step) lines only. Use the single
+      // source of truth from pinePinerCore.ts; never hardcode a bare number.
       const outMap = new Map<string, PineSeries>();
       for (const v of out.visuals) {
-        if (outMap.size >= 8) break;
+        if (outMap.size >= PINER_MAX_VISUALS) break;
         if (v.type !== "line" || v.stepLine) continue;
         outMap.set(v.key, {
           key: v.key,

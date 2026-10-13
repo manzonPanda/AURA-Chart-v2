@@ -37,6 +37,7 @@
 import { compile, Engine, ArrayFeed } from "@heyphat/piner";
 
 import { resolveMintickForRun } from "./pineMintick.ts";
+import { normalizeSourceInputs } from "./pineSourceInputs.ts";
 import {
   extractBoxDrawings,
   extractLabelDrawings,
@@ -53,16 +54,28 @@ import type { PineCandle } from "./pineSeries.ts";
 // contracts shared with the engine boundary module (pineEngineTypes.ts) —
 // type-only, erased at build time, so the worker bundle stays engine-only.
 import type {
+  PineFillPoint,
   PineLinePoint,
   PineMarkerPoint,
   PinePoint,
   PineRuntimeDiagnostics,
   PineSymbolMeta,
   PineVisual,
+  PineVisualType,
 } from "./pineEngineTypes.ts";
 
 /** Extraction cap for the imported-script path (mirrors MAX_SCRIPT_SERIES). */
-export const PINER_MAX_VISUALS = 8;
+// The default visual budget. Piner 0.13.0 exposes the aggregate `outputs.plots`
+// map in declaration order, and AURA's bridge consumes it via this bounded loop.
+// `fractal_SMA.pine` is a merged script that declares SMA + Bollinger plots AND
+// twelve Up / twelve Down fractal line-br plots per side, so the budget must
+// cover all of them simultaneously (28 plots) or the fractal levels are
+// silently dropped by the bounded loop below. 30 is a power-of-two margin over
+// 28 that leaves room for any future plot additions without changing caller
+// code. This is a deliberate, explicit increase tied to a measured script
+// footprint — NOT a blind global raise: the constant stays private and is only
+// ever consulted through `maxVisuals` in this module.
+export const PINER_MAX_VISUALS = 30;
 
 /**
  * Sentinel-magnitude guard for script-produced PLOT values.
@@ -103,7 +116,13 @@ export function pineTimeframeStr(bucketSec: number): string {
 
 /** Compile a Pine source with Piner. Throws on syntax/semantic errors. */
 export function pinerCompile(source: string): PinerCompiled {
-  return compile(source);
+  // Normalize the generic `input(<ohlc-series>)` source form to the explicit
+  // `input.source(<ohlc-series>)` form BEFORE compiling, so Piner classifies it
+  // as a source (not a float) and resolves price-source overrides at runtime.
+  // See pineSourceInputs.ts for the full root cause. Metadata-only callers get
+  // the same normalization (compileImportedPine applies it too), so the Inputs
+  // tab's control type and the executed math always agree.
+  return compile(normalizeSourceInputs(source));
 }
 
 /** Extract `input.*` titles from a compiled script (binding keys). */
@@ -145,7 +164,12 @@ export async function pinerRunVisuals(args: {
   const { compiled, klines, inputs, symbol, bucketSec, onStage } = args;
   const maxVisuals = args.maxVisuals ?? PINER_MAX_VISUALS;
   const visuals: PineVisual[] = [];
-  const diagnostics: PineRuntimeDiagnostics = { rendered: [], unsupported: [], hidden: 0 };
+  // `declared` = every output the script declares (plots/hlines/fills), even
+  // ones that produce no finite values in THIS window. It drives the Style tab
+  // (via the persisted plotMeta) so a conditional / warmup-only output still
+  // exposes its style controls — see PineRuntimeDiagnostics.declared.
+  const declaredKeys = new Set<string>();
+  const diagnostics: PineRuntimeDiagnostics = { rendered: [], declared: [], unsupported: [], hidden: 0 };
   const unsupportedFor = (kind: string): void => {
     const found = diagnostics.unsupported.find((u) => u.kind === kind);
     if (found) found.count += 1;
@@ -182,17 +206,26 @@ export async function pinerRunVisuals(args: {
   const runMs = performance.now() - t0;
   onStage?.("extracting");
 
-  const tsAt = (i: number): number => klines[i]!.openTime;
+  // ── ts resolution ─────────────────────────────────────────────────────────
+  // Piner stores a plot's value at the bar that COMPUTES it (`data[i]`, indexed
+  // by computation bar). Pine's `offset=n` then DRAWS that value at display bar
+  // `i + n` (offset=-n shifts the series left, i.e. earlier in time). AURA feeds
+  // Lightweight Charts, which requires STRICTLY ASCENDING, UNIQUE timestamps —
+  // so a value whose display bar falls outside `[0, klines.length)` must be
+  // DROPPED (it is shifted off the edge), never clamped onto a neighbour bar
+  // (clamping collides several source bars onto one timestamp and LWC silently
+  // refuses the whole series). Returns -1 when the display bar is off-range.
+  const displayIndex = (i: number, plotOffset = 0): number => {
+    const d = i + plotOffset;
+    return d >= 0 && d < klines.length ? d : -1;
+  };
 
   // ── plots → line / stepline / histogram / area visuals ────────────────────
   let dataVisuals = 0;
   for (const [, p] of engine.outputs.plots) {
     if (dataVisuals >= maxVisuals) break;
-    const opts = (p.options ?? {}) as { style?: unknown; linewidth?: unknown; display?: unknown };
-    if (opts.display === "none") {
-      diagnostics.hidden += 1;
-      continue;
-    }
+    const opts = (p.options ?? {}) as { style?: unknown; linewidth?: unknown; display?: unknown; offset?: unknown };
+    const plotOffset = typeof opts.offset === "number" ? opts.offset : 0;
     const colors = Array.isArray(p.colors) ? (p.colors as unknown[]) : [];
     let uniform: string | undefined;
     let dynamic = false;
@@ -207,6 +240,35 @@ export async function pinerRunVisuals(args: {
     // is why every style historically DROPPED them and the gap silently closed.
     const style = typeof opts.style === "string" ? opts.style : "line";
     const breaksOnNa = style === "linebr";
+    const lineWidth =
+      typeof opts.linewidth === "number" && Number.isInteger(opts.linewidth)
+        ? Math.max(1, Math.min(4, opts.linewidth))
+        : undefined;
+    const color = dynamic ? undefined : uniform;
+    // Keys follow the title-keyed contract (key = plot title, so
+    // persisted plotMeta reconciles across runs); untitled → stable plot:N.
+    const plotTitle = typeof p.title === "string" && p.title.length > 0 ? p.title : `plot:${p.id}`;
+    const key = plotTitle;
+    // ── DECLARED (Style tab) capture ────────────────────────────────────────
+    // Recorded BEFORE the display=none / valued===0 drops below, so a
+    // conditionally-plotted or warmup-only output still exposes its style
+    // controls — the SMA/Bollinger bands + their fill in fractal_SMA.pine, or a
+    // fractal level that hasn't triggered in the current window. Only styles
+    // that map to a renderable visual type are declared; circles / cross stay
+    // in `unsupported`. Deduped by key so an untitled plot:N never collides.
+    const declaredType: PineVisualType | undefined =
+      style === "stepline" || style === "linebr" || style === "line" ? "line"
+      : style === "histogram" || style === "columns" ? "histogram"
+      : style === "area" ? "area"
+      : undefined;
+    if (declaredType && !declaredKeys.has(key)) {
+      declaredKeys.add(key);
+      diagnostics.declared.push({ key, title: plotTitle, type: declaredType, ...(color ? { color } : {}), ...(lineWidth ? { lineWidth } : {}) });
+    }
+    if (opts.display === "none") {
+      diagnostics.hidden += 1;
+      continue;
+    }
     // `points` = today's behaviour for EVERY current style (na dropped, so a
     // gap collapses). `breaks` additionally keeps each na bar as a value-less
     // WHITESPACE row and is used ONLY by style_linebr. Building both keeps the
@@ -218,10 +280,17 @@ export async function pinerRunVisuals(args: {
       const v = p.data[i];
       const c = colors[i];
       const perBarColor = dynamic && typeof c === "string" && c.length > 0 ? c : undefined;
+      // Resolve the DISPLAY bar for this computation index under the plot offset.
+      // Off-edge values (shifted past either end by `offset`) are dropped, not
+      // clamped — see `displayIndex` above. Without this, an offset plot piles
+      // several source values onto one timestamp and LWC refuses the series.
+      const di = displayIndex(i, plotOffset);
+      if (di < 0) continue;
+      const rowTs = klines[di]!.openTime;
       // Warmup na rows AND sentinel-magnitude values (±1e10-class) are both
       // dropped here — see PINE_VALUE_SANITY_LIMIT for the autoscale rationale.
       if (typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= PINE_VALUE_SANITY_LIMIT) {
-        const row: PinePoint = { ts: tsAt(i), value: v, ...(perBarColor ? { color: perBarColor } : {}) };
+        const row: PinePoint = { ts: rowTs, value: v, ...(perBarColor ? { color: perBarColor } : {}) };
         points.push(row);
         breaks.push(row);
         valued += 1;
@@ -231,19 +300,10 @@ export async function pinerRunVisuals(args: {
         // Pine `plot.style_linebr`: KEEP the bar as a value-less WHITESPACE
         // row. Lightweight Charts renders no line across it, so bar i-1 is
         // never connected to bar i+1 — the real Pine line-break semantics.
-        breaks.push({ ts: tsAt(i), ...(perBarColor ? { color: perBarColor } : {}) });
+        breaks.push({ ts: rowTs, ...(perBarColor ? { color: perBarColor } : {}) });
       }
     }
     if (valued === 0) continue; // warmup-only / all-na plot — nothing to draw
-    const lineWidth =
-      typeof opts.linewidth === "number" && Number.isInteger(opts.linewidth)
-        ? Math.max(1, Math.min(4, opts.linewidth))
-        : undefined;
-    const color = dynamic ? undefined : uniform;
-    // Keys follow the title-keyed contract (key = plot title, so
-    // persisted plotMeta reconciles across runs); untitled → stable plot:N.
-    const plotTitle = typeof p.title === "string" && p.title.length > 0 ? p.title : `plot:${p.id}`;
-    const key = plotTitle;
     if (style === "stepline") {
       visuals.push({ type: "line", key, title: plotTitle, ...(color ? { color } : {}), ...(lineWidth ? { lineWidth } : {}), stepLine: true, data: points });
     } else if (breaksOnNa) {
@@ -284,7 +344,7 @@ export async function pinerRunVisuals(args: {
       const r = row as { color?: unknown; text?: unknown };
       const color = typeof r.color === "string" && r.color.length > 0 ? r.color : undefined;
       const text = typeof r.text === "string" && r.text.length > 0 ? r.text.slice(0, 24) : undefined;
-      points.push({ ts: tsAt(i), position, shape, ...(color ? { color } : {}), ...(text ? { text } : {}) });
+      points.push({ ts: klines[i]!.openTime, position, shape, ...(color ? { color } : {}), ...(text ? { text } : {}) });
     }
     if (points.length > 0) {
       // Title-keyed contract (see plots above); untitled → stable marker:N.
@@ -301,9 +361,101 @@ export async function pinerRunVisuals(args: {
   // apply instead of a wrong guess.
   for (const [, h] of engine.outputs.hlines) {
     const price = (h as { price?: unknown }).price;
-    if (typeof price !== "number" || !Number.isFinite(price)) continue;
     const hTitle = typeof (h as { title?: unknown }).title === "string" ? (h as { title: string }).title : "hline";
-    visuals.push({ type: "horizontal", key: `hline:${String((h as { id?: unknown }).id)}`, title: hTitle, price, lineStyle: "solid" });
+    const key = `hline:${String((h as { id?: unknown }).id)}`;
+    // ── DECLARED (Style tab) capture ────────────────────────────────────────
+    // Before the finite-price drop, so a declared hline always exposes its
+    // colour/width/style controls even if a run produced no finite price.
+    if (!declaredKeys.has(key)) {
+      declaredKeys.add(key);
+      diagnostics.declared.push({ key, title: hTitle, type: "horizontal" });
+    }
+    if (typeof price !== "number" || !Number.isFinite(price)) continue;
+    visuals.push({ type: "horizontal", key, title: hTitle, price, lineStyle: "solid" });
+  }
+
+  // ── fills ──────────────────────────────────────────────────────────────────
+  // Pine `fill(plot1, plot2, …)` shades the region between two boundaries. The
+  // engine's `FillRegion` IR stores `plot1`/`plot2` as the RETURNED HANDLE of
+  // each boundary: a plot id (plot() returns its id) when the boundary is a
+  // plot, or the literal constant when it is `fill(p, 1.2345)` (a constant
+  // price edge). We resolve each against the `plots` map — a hit is a plot
+  // boundary (use its per-bar data, honouring that plot's `offset`), a miss is
+  // a constant. Per-bar colors come straight from `fill.colors[]`. A boundary
+  // that is na at a bar (warmup) leaves that side undefined so the renderer
+  // breaks the fill exactly where the script has no data (no phantom fill).
+  // Gradient fills (top_value/bottom_value) are NOT populated by Piner 0.13.0's
+  // extraction path (`gradient` is undefined there) — reported as unsupported
+  // rather than approximated.
+  const plotDataById = new Map<number, { data: readonly unknown[]; offset: number }>();
+  for (const [pid, p] of engine.outputs.plots) {
+    const popts = (p.options ?? {}) as { offset?: unknown };
+    plotDataById.set(pid, {
+      data: Array.isArray(p.data) ? p.data : [],
+      offset: typeof popts.offset === "number" ? popts.offset : 0,
+    });
+  }
+  const resolveBoundary = (
+    handle: number,
+    bar: number,
+  ): number | undefined => {
+    const plot = plotDataById.get(handle);
+    if (plot) {
+      // Plot boundary: read the value at this bar under the plot's own offset.
+      const di = displayIndex(bar, plot.offset);
+      if (di < 0) return undefined;
+      const v = plot.data[di];
+      if (typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= PINE_VALUE_SANITY_LIMIT) return v;
+      return undefined;
+    }
+    // Constant boundary (literal price): present at every bar.
+    if (typeof handle === "number" && Number.isFinite(handle)) return handle;
+    return undefined;
+  };
+  for (const [, f] of engine.outputs.fills) {
+    const fr = f as { id?: unknown; plot1?: unknown; plot2?: unknown; title?: unknown; color?: unknown; colors?: unknown; gradient?: unknown };
+    const p1 = fr.plot1;
+    const p2 = fr.plot2;
+    if (typeof p1 !== "number" || typeof p2 !== "number" || !Number.isFinite(p1) || !Number.isFinite(p2)) {
+      unsupportedFor("fill() boundary");
+      continue;
+    }
+    if (fr.gradient !== undefined && fr.gradient !== null) {
+      unsupportedFor("fill() gradient");
+      continue;
+    }
+    // At least one boundary must resolve to a real plot (a pure constant/constant
+    // fill would be a degenerate full-height band — skip, never fake it).
+    if (!plotDataById.has(p1) && !plotDataById.has(p2)) continue;
+    const fillColors = Array.isArray(fr.colors) ? (fr.colors as unknown[]) : [];
+    const staticColor = typeof fr.color === "string" && fr.color.length > 0 ? fr.color : undefined;
+    const fTitle = typeof fr.title === "string" && fr.title.length > 0 ? fr.title : `fill:${String(fr.id)}`;
+    const key = `fill:${String(fr.id)}`;
+    // ── DECLARED (Style tab) capture ────────────────────────────────────────
+    // Before the valued===0 drop, so a warmup-only fill (the Bollinger Bands
+    // Background Fill in fractal_SMA.pine before enough history loads) still
+    // exposes its colour/opacity controls. Deduped by key.
+    if (!declaredKeys.has(key)) {
+      declaredKeys.add(key);
+      diagnostics.declared.push({ key, title: fTitle, type: "fill", ...(staticColor ? { color: staticColor } : {}) });
+    }
+    const points: PineFillPoint[] = [];
+    let valued = 0;
+    for (let i = 0; i < klines.length; i++) {
+      const top = resolveBoundary(p1, i);
+      const bottom = resolveBoundary(p2, i);
+      if (top === undefined || bottom === undefined) {
+        // Gap row: no fill here — the renderer must not bridge across it.
+        points.push({ ts: klines[i]!.openTime });
+        continue;
+      }
+      const c = fillColors[i];
+      const perBar = typeof c === "string" && c.length > 0 ? c : staticColor;
+      points.push({ ts: klines[i]!.openTime, top, bottom, ...(perBar ? { color: perBar } : {}) });
+      valued += 1;
+    }
+    if (valued === 0) continue; // warmup-only / all-na fill — nothing to draw
+    visuals.push({ type: "fill", key, title: fTitle, ...(staticColor ? { color: staticColor } : {}), data: points });
   }
 
   // ── drawings → the shared pineDrawings normalizers ─────────────────────────

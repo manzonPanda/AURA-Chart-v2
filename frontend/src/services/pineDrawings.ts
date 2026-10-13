@@ -159,6 +159,8 @@ export const PINE_DEFAULT_LABEL_STYLE: PineLabelStyleName = "label_down";
 export const PINE_DEFAULT_LABEL_SIZE: PineLabelSizeName = "normal";
 /** Pine's label.new default balloon color (color.blue in TradingView's palette). */
 export const PINE_DEFAULT_LABEL_COLOR = "#2962FF";
+/** Pine `fill()` default color (color.blue with transparency in TradingView). */
+export const PINE_DEFAULT_FILL_COLOR = "#2962FF33";
 
 const SIZE_NAMES: ReadonlySet<string> = new Set(["tiny", "small", "normal", "large", "huge"]);
 const ALIGN_ALIASES: Record<string, PineLabelAlign> = {
@@ -819,6 +821,95 @@ export function extractLineDrawings(
   return { lines, unsupported };
 }
 
+// ── plot.style_linebr → independent horizontal SEGMENTS ──────────────────────
+// A `style_linebr` plot emits one series whose value-less (na) rows are LINE
+// BREAKS. Lightweight Charts 5.2.1's LineSeries cannot honor that: it joins
+// every finite point into ONE polyline and silently drops the whitespace rows,
+// so two distinct levels that merely share a slot get bridged by a DIAGONAL
+// (browser pixel proof: 161 ink rows via LineSeries vs 9 via a primitive).
+// Instead we split the series into contiguous FINITE runs and map each run to
+// its own horizontal PineLineDrawing, rendered by PineLineBoxPrimitive (one
+// moveTo/lineTo per drawing — nothing is ever connected across a gap). This is
+// exactly Pine's break-on-na semantics, and it also dodges the per-series LWC
+// object budget: hundreds of levels live in ONE primitive.
+
+/** One row of a linebr series: a finite `value` is a painted point; otherwise it is a whitespace (break) row. */
+export interface LinebrSeriesRow {
+  ts: number;
+  value?: number;
+  color?: string;
+}
+
+/**
+ * Split a linebr series into contiguous FINITE runs, one horizontal
+ * `PineLineDrawing` per run. Each segment is anchored by `bar_time` (the engine
+ * already resolved the plot's `offset` into a real epoch-ms timestamp), so
+ * `resolveAnchorX` places it exactly on its candles across whitespace.
+ *
+ * Invariants (pinned by tests/pineLinebrSegments.test.mjs):
+ *   - price1 === price2 for every segment (a level never changes price within
+ *     its lifetime — a diagonal between two prices is structurally impossible).
+ *   - A run of N contiguous finite rows collapses to ONE segment from the first
+ *     row's ts to the last row's ts.
+ *   - A whitespace/na row terminates the current run (the line BREAKS).
+ *   - Segments are emitted in ascending ts order; ids ascend from `idBase`.
+ */
+export function linebrSegmentsToDrawings(
+  data: readonly LinebrSeriesRow[],
+  color: string,
+  width: number,
+  idBase: number,
+): PineLineDrawing[] {
+  const out: PineLineDrawing[] = [];
+  let run: { ts: number; value: number }[] = [];
+  const flush = () => {
+    if (run.length === 0) return;
+    const first = run[0]!;
+    const last = run[run.length - 1]!;
+    out.push({
+      id: idBase + out.length,
+      time1Ms: first.ts,
+      price1: first.value,
+      logical1: null,
+      time2Ms: last.ts,
+      price2: last.value,
+      logical2: null,
+      xloc: "bar_time",
+      extend: "none",
+      color,
+      style: "solid",
+      width,
+      forceOverlay: false,
+    });
+    run = [];
+  };
+  for (const p of data) {
+    if (typeof p.value === "number") run.push({ ts: p.ts, value: p.value });
+    else flush();
+  }
+  flush();
+  return out;
+}
+
+/**
+ * Stable numeric id base for one linebr visual's segment drawings. PineLineBox
+ * merges every pane's line/box drawings into ONE primitive keyed by `id`, so a
+ * deterministic base per visual key keeps ids collision-free and stable across
+ * redraws (no churn → no needless repaints). FNV-1a over the visual key, then
+ * stride past the largest plausible per-visual segment count so two visuals'
+ * id ranges never overlap.
+ */
+export function linebrIdBase(visualKey: string): number {
+  let h = 0x811c9dc5; // FNV-1a offset basis
+  for (let i = 0; i < visualKey.length; i++) {
+    h ^= visualKey.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  // Keep the base in a safe, positive, non-zero range and stride past the largest
+  // plausible per-visual segment count so two visuals never overlap ids.
+  return ((h >>> 0) % 1_000_000) * 1_000_000 + 1;
+}
+
 interface BoxSnapshotLike {
   id?: unknown;
   left?: unknown;
@@ -1111,6 +1202,16 @@ export function labelLayout(
  */
 export function pineHexToRgba(hex: string, fallback: string): string {
   if (typeof hex !== "string" || hex.length === 0) return fallback;
+  // Already-canvas-ready rgb()/rgba() passes straight through. The fill Style
+  // override path (PineBridge `resolveFill`) applies an opacity override via its
+  // `withAlpha` helper, which produces an `rgba(r, g, b, a)` region color; that
+  // value is fed back through here by the fill primitive. Without this branch
+  // the rgba string failed every hex pattern and fell back to the hardcoded
+  // default — so an opacity (or color+opacity) override painted the WRONG color
+  // (the default blue) instead of the user's chosen fill color. Validate the
+  // shape so a malformed value still falls back safely.
+  if (/^rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*(0|1|0?\.\d+|\.\d+)\s*\)$/i.test(hex)) return hex.trim();
+  if (/^rgb\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*\)$/i.test(hex)) return hex.trim();
   const m = /^#([0-9a-f]{3})([0-9a-f])?([0-9a-f])?$/i.exec(hex);
   if (m) {
     // #RGB(A) — expand each nibble.

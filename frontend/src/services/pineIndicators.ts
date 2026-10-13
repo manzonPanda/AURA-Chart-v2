@@ -25,9 +25,17 @@
  * reused for every subsequent run.
  */
 
-/** Maps a Pine `input.*()` title to a key on the caller's params object. */
+/**
+ * Maps a Pine input's ENGINE-SIDE override key to a key on the caller's params
+ * object. The engine side is Piner's DEDUPED input key
+ * (`compile().metadata.inputs[].key`), not the display title: duplicate titles
+ * dedupe ("Length" → "Length" / "Length (2)") and the runtime `pickInput`
+ * resolves by that deduped key — binding by raw title collides. Registry specs
+ * carry unique titles (key == title); imported specs pass `varId` via
+ * `pineInputBindings` (the single construction point).
+ */
 export interface PineInputBinding {
-  /** Title as declared in the Pine `input.*()` call (the stable identifier). */
+  /** Piner's runtime input key (deduped key; equals `varId` for imports). */
   title: string;
   /** Key on the params object whose value feeds this input. */
   paramKey: string;

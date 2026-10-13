@@ -51,7 +51,7 @@ import {
   setIndicatorActive,
   setIndicatorVisible,
 } from "../../services/activeIndicators";
-import type { ImportedPineIndicator, PineRunStatus } from "../../services/pineImport";
+import type { ImportedPineIndicator, PinePlotMetaSnapshot, PineRunStatus } from "../../services/pineImport";
 import type { PineSymbolMeta } from "../../services/pineEngineTypes";
 import type { HorizonCalendar } from "../../services/marketCalendar";
 import type { Candle, CandleGap } from "../../types/candle";
@@ -358,6 +358,9 @@ interface Props {
   marketCalendar?: HorizonCalendar | null;
   /** Runtime status reporter for imported Pine indicators. */
   onPineStatus?: (id: string, status: PineRunStatus) => void;
+  /** Runtime Style-tab healer — replaces an indicator's stale plotMeta with a
+   *  fresh declared-outputs build from the live engine run (see PineBridge). */
+  onPineDeclared?: (id: string, plotMeta: PinePlotMetaSnapshot[]) => void;
   /**
    * Visual price-scale inversion (TradingView-style "Invert Scale"). A pure
    * viewport transform on the main right price scale — OHLC data, candle
@@ -1110,6 +1113,7 @@ export function TradingChart({
   pineSymbol = null,
   marketCalendar = null,
   onPineStatus,
+  onPineDeclared,
   invertScale = false,
   onToggleInvertScale,
   themeId = DEFAULT_THEME_ID,
@@ -2103,6 +2107,7 @@ export function TradingChart({
             indicators={pineIndicators}
             symbol={pineSymbol}
             onStatus={onPineStatus}
+            onDeclared={onPineDeclared}
             whitespaceSlots={whitespaceSlots}
           />
           {/* DATA GAP shading — presentation-only band primitive attached to the

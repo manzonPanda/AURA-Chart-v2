@@ -143,11 +143,12 @@ test("9. several linebr plots in ONE script all import and render (real failure 
 
 test("9b. the per-indicator series cap still applies, and never becomes 'unsupported'", async () => {
   const bars = makeBars(20);
-  // 10 linebr plots — above PINER_MAX_VISUALS (8). A rendered plot legitimately
-  // consumes a series slot, so only the first N render (pre-existing, documented
-  // limit: "Only the first 8 outputs are rendered"). The KEY regression guard:
-  // the overflow is a CAP, never a "plot style linebr" unsupported entry.
-  const body = Array.from({ length: 10 }, (_, i) =>
+  // More linebr plots than PINER_MAX_VISUALS. A rendered plot legitimately
+  // consumes a series slot, so only the first PINER_MAX_VISUALS render (the
+  // documented limit). The KEY regression guard: the overflow is a CAP, never a
+  // "plot style linebr" unsupported entry.
+  const count = PINER_MAX_VISUALS + 4;
+  const body = Array.from({ length: count }, (_, i) =>
     `plot(bar_index % ${3 + i} == 0 ? close : na, "br${i}", style=plot.style_linebr)`,
   ).join("\n");
   const run = await runScript(IND(body, "cap"), bars);

@@ -147,6 +147,7 @@ import {
   saveImportedPineIndicators,
   type ImportedPineIndicator,
   type PineImportOutcome,
+  type PinePlotMetaSnapshot,
   type PineRunStatus,
   type PineSymbolMeta,
   type PineCompileStage,
@@ -1291,6 +1292,29 @@ export default function App() {
     });
   }, []);
 
+  /**
+   * Runtime Style-tab HEALER — change-guarded so PineBridge's per-frame calls
+   * never loop. The indicator's `plotMeta` (which the settings modal's Style
+   * tab renders) is captured ONCE at import and otherwise frozen; an indicator
+   * imported before the declared-output capture would keep a stale list missing
+   * the conditional / warmup-only rows (the fractal_SMA.pine bug). PineBridge
+   * rebuilds plotMeta from every live engine run and reports it here; we adopt
+   * it only when the key/type set actually changed, then persist (the
+   * [importedPine] effect writes it). No re-import required.
+   */
+  const handlePineDeclared = useCallback((id: string, plotMeta: PinePlotMetaSnapshot[]) => {
+    setImportedPine((prev) => {
+      const idx = prev.findIndex((x) => x.id === id);
+      if (idx < 0) return prev;
+      const cur = prev[idx]!;
+      const sig = (m: readonly PinePlotMetaSnapshot[]): string => m.map((p) => `${p.key}:${p.type}`).join("|");
+      if (sig(cur.plotMeta) === sig(plotMeta)) return prev; // unchanged — no loop
+      const next = prev.slice();
+      next[idx] = { ...cur, plotMeta };
+      return next;
+    });
+  }, []);
+
   /** Remove an imported indicator and drop its session status. */
   const handlePineChange = useCallback((next: ImportedPineIndicator[]) => {
     setImportedPine(next);
@@ -1956,6 +1980,7 @@ export default function App() {
           pineSymbol={pineSymbol}
           marketCalendar={selectedInstrument?.calendar ?? null}
           onPineStatus={handlePineStatus}
+          onPineDeclared={handlePineDeclared}
           invertScale={chartSettings.invertScale}
           onToggleInvertScale={toggleInvertScale}
           themeId={chartSettings.appearance.theme}
