@@ -69,13 +69,16 @@ import type {
 // map in declaration order, and AURA's bridge consumes it via this bounded loop.
 // `fractal_SMA.pine` is a merged script that declares SMA + Bollinger plots AND
 // twelve Up / twelve Down fractal line-br plots per side, so the budget must
-// cover all of them simultaneously (28 plots) or the fractal levels are
-// silently dropped by the bounded loop below. 30 is a power-of-two margin over
-// 28 that leaves room for any future plot additions without changing caller
-// code. This is a deliberate, explicit increase tied to a measured script
-// footprint — NOT a blind global raise: the constant stays private and is only
-// ever consulted through `maxVisuals` in this module.
-export const PINER_MAX_VISUALS = 30;
+// cover all of them simultaneously or the fractal levels are silently dropped by
+// the bounded loop below. The two EMA plots added to that script brought the
+// declared footprint (30 plots + the trailing Bollinger fill) to 31, so the
+// budget was raised from 30 to 32 — a power-of-two margin that also matches the
+// sibling `MAX_PLOT_SERIES_PER_INDICATOR` / `MAX_PINE_INPUTS` / `MAX_STYLE_KEYS`
+// caps so the two budgets stay in agreement and nothing is dropped between the
+// engine and the persisted indicator. This is a deliberate, explicit increase
+// tied to a measured script footprint — NOT a blind global raise: the constant
+// stays private and is only ever consulted through `maxVisuals` in this module.
+export const PINER_MAX_VISUALS = 32;
 
 /**
  * Sentinel-magnitude guard for script-produced PLOT values.

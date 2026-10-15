@@ -316,23 +316,9 @@ test("7b. no preventDefault on the controls — mouse and touch activation stay 
   assert.match(PANEL, /const stopChartPointer = \(e: \{ stopPropagation: \(\) => void \}\): void => \{/);
 });
 
-test("7c. TradingChart wiring is unchanged — same props, no visibility prop, no remount", () => {
-  const mount = TRADING_CHART.match(/<MaStructurePanel[\s\S]*?\/>/);
-  assert.ok(mount, "MaStructurePanel mount not found");
-  for (const prop of [
-    "bars={visibleBars}",
-    "liveCandle={session ? null : liveCandle}",
-    "bucketSec={bucketSec}",
-    "replayActive={session !== null}",
-    "resetKey=",
-    "rightInset={priceScaleInset}",
-  ]) {
-    assert.ok(mount[0].includes(prop), `missing existing prop ${prop}`);
-  }
-  // Visibility is panel-local: no prop and no key (a key change would remount
-  // the chart subtree), and no App-level plumbing was introduced.
-  assert.ok(!/visible=|hidden=|showMa/i.test(mount[0]));
-  assert.ok(!/<MaStructurePanel[^>]*\bkey=/.test(mount[0]));
+test("7c. TradingChart no longer mounts the panel — the mini table is removed from the chart", () => {
+  assert.ok(!TRADING_CHART.includes("<MaStructurePanel"), "MaStructurePanel must not be mounted");
+  assert.ok(!TRADING_CHART.includes("MaStructurePanel"), "MaStructurePanel must not be imported");
 });
 
 test("7d. the panel still exposes the same live region and unchanged content", () => {

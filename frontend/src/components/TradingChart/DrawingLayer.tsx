@@ -2,12 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import {
   type DrawingController,
   type DrawingToolId,
+  useChartApi,
 } from "@getcandlekit/charts/react";
 import {
   DrawingSync,
   drawingsToEngineJson,
   type DrawingSyncPhase,
 } from "../../services/drawingPersistence";
+import { DrawingAnnotationPrimitive, type DrawingEngineLike } from "./DrawingAnnotationPrimitive";
 
 /**
  * DrawingLayer — bridges one CandleKit DrawingController (one chart scope) to
@@ -231,6 +233,9 @@ export interface DrawingLayerProps {
 }
 
 export function DrawingLayer({ controller, epic, timeframe, replayActive }: DrawingLayerProps) {
+  const api = useChartApi();
+  const chartApiRef = useRef(api);
+  chartApiRef.current = api;
   const [phase, setPhase] = useState<DrawingSyncPhase>("idle");
   const [detail, setDetail] = useState<string | undefined>(undefined);
   const [restored, setRestored] = useState(false);
@@ -292,6 +297,36 @@ export function DrawingLayer({ controller, epic, timeframe, replayActive }: Draw
       syncRef.current?.notifyChange(engine.getDrawings());
     });
     return off;
+  }, [controller]);
+
+  // (2b) Text-annotation renderer — a SECOND series primitive (the SAME pattern
+  // as GapRegionsPrimitive / pineLabelPrimitive) that reads the SAME engine and
+  // paints only the annotation text CandleKit's own primitive does not. No
+  // second drawing system: it never mutates a drawing, never persists, never
+  // draws a shape — it only renders `style.text` on top of the shape geometry.
+  useEffect(() => {
+    if (!controller) return;
+    const api = chartApiRef.current;
+    const host = (api?.controller as unknown as { getSeries?: () => unknown } | undefined)?.getSeries?.() as
+      | { attachPrimitive?: (p: unknown) => void; detachPrimitive?: (p: unknown) => void }
+      | undefined
+      | null;
+    if (!host?.attachPrimitive) return;
+    const prim = new DrawingAnnotationPrimitive();
+    prim.setEngine(controller.engine as unknown as DrawingEngineLike);
+    try {
+      host.attachPrimitive(prim);
+    } catch {
+      return; // older LWC without primitive support — annotations degrade silently
+    }
+    return () => {
+      try {
+        host.detachPrimitive?.(prim);
+      } catch {
+        /* ignore */
+      }
+      prim.setEngine(null);
+    };
   }, [controller]);
 
   // "✓ Saved" settles back to quiet so the chip doesn't linger.

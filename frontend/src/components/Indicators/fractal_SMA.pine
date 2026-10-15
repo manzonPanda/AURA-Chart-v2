@@ -290,3 +290,23 @@ plot(smoothingMA, "SMA-based MA", color=color.rgb(72, 72, 72), display = enableM
 bbUpperBand = plot(smoothingMA + smoothingStDev, title = "Upper Bollinger Band", color=color.rgb(5, 125, 37), display = isBB ? display.all : display.none, editable = isBB)
 bbLowerBand = plot(smoothingMA - smoothingStDev, title = "Lower Bollinger Band", color=color.rgb(1, 160, 14), display = isBB ? display.all : display.none, editable = isBB)
 fill(bbUpperBand, bbLowerBand, color= isBB ? color.new(#06af0c, 90) : na, title="Bollinger Bands Background Fill", display = isBB ? display.all : display.none, editable = isBB)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Exponential Moving Averages (EMA1 + EMA2)
+// ═══════════════════════════════════════════════════════════════════════════
+// Two independent exponential moving averages, each with its own length and
+// source input. Their colours are passed as literals to plot() (NOT via
+// input.color), so — like the SMA above — the colour picker lives in the STYLE
+// tab, not the Inputs tab. Fully independent of the Fractals and SMA sections
+// above — no cross-references.
+GRP_EMA = "EMA"
+
+ema1Len = input.int(title="EMA1 Length", defval=12, minval=1, group=GRP_EMA)
+ema1Src = input(close, title="EMA1 Source", group=GRP_EMA)
+ema1 = ta.ema(ema1Src, ema1Len)
+plot(ema1, title="EMA1", color=#2962FF, linewidth=2)
+
+ema2Len = input.int(title="EMA2 Length", defval=26, minval=1, group=GRP_EMA)
+ema2Src = input(close, title="EMA2 Source", group=GRP_EMA)
+ema2 = ta.ema(ema2Src, ema2Len)
+plot(ema2, title="EMA2", color=#FF6D00, linewidth=2)

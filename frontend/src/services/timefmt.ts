@@ -40,6 +40,12 @@ const dmyFmt = new Intl.DateTimeFormat("en-GB", {
   month: "short",
 });
 
+/** Full English weekday in Manila (Monday … Sunday) — same instant + zone as the date below. */
+const weekdayFmt = new Intl.DateTimeFormat("en-US", {
+  timeZone: MANILA_TZ,
+  weekday: "long",
+});
+
 /** "21:30" — Manila wall-clock of a UTC epoch-ms instant. */
 export function formatManilaHHMM(tsMs: number): string {
   return hmFmt.format(tsMs);
@@ -55,13 +61,15 @@ export function formatManilaDayHHMM(tsMs: number): string {
   return `${dmyFmt.format(tsMs)} ${hmFmt.format(tsMs)}`;
 }
 
-/** "2026-08-28 21:30 PH" — tooltip / OHLC strip full label. */
+/** "Friday Aug-28-2026 21:30 PH" — crosshair hover time label (Lightweight Charts `localization.timeFormatter`). */
 export function formatManilaDateTimeFull(tsMs: number): string {
-  const isoLocal = new Intl.DateTimeFormat("en-CA", {
+  const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: MANILA_TZ,
     year: "numeric",
-    month: "2-digit",
+    month: "short",
     day: "2-digit",
-  }).format(tsMs);
-  return `${isoLocal} ${hmFmt.format(tsMs)} PH`;
+  }).formatToParts(tsMs);
+  const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? "";
+  const mdyLocal = `${get("month")}-${get("day")}-${get("year")}`;
+  return `${weekdayFmt.format(tsMs)} ${mdyLocal} ${hmFmt.format(tsMs)} PH`;
 }

@@ -46,11 +46,6 @@ import {
 } from "../../services/heikinAshi";
 import { defaultEmaSettings, type EmaSettings } from "../../config/emaSettings";
 import type { SmaSettings } from "../../config/smaSettings";
-import {
-  listBuiltInOverlayControls,
-  setIndicatorActive,
-  setIndicatorVisible,
-} from "../../services/activeIndicators";
 import type { ImportedPineIndicator, PinePlotMetaSnapshot, PineRunStatus } from "../../services/pineImport";
 import type { PineSymbolMeta } from "../../services/pineEngineTypes";
 import type { HorizonCalendar } from "../../services/marketCalendar";
@@ -58,6 +53,7 @@ import type { Candle, CandleGap } from "../../types/candle";
 import { ActiveIndicatorsOverlay } from "./ActiveIndicatorsOverlay";
 import { CandleCountdownPrimitive, type CountdownCandle } from "./CandleCountdownPrimitive";
 import { ChartContextMenu } from "./ChartContextMenu";
+import { DrawingContextToolbar } from "./DrawingContextToolbar";
 import { EmaBridge } from "./EmaBridge";
 import { InvertScaleBridge } from "./InvertScaleBridge";
 import { InvertDebugProbe } from "./invertDebug"; // ⚠ TEMP debug probe (?debugInvert)
@@ -68,7 +64,6 @@ import {
   defaultCandleSettings,
   type CandleSettings,
 } from "../../config/chartSettings";
-import { MaStructurePanel } from "./MaStructurePanel";
 import { DrawingLayer } from "./DrawingLayer";
 import { MeasureTimeFmt } from "./MeasureTimeFmt";
 import { PineBridge } from "./PineBridge";
@@ -1634,8 +1629,8 @@ export function TradingChart({
 
   /**
    * Rendered width of the right price scale (px; 0 = not measurable yet). The
-   * MA Structure overlay anchors LEFT of it so the panel never covers the price
-   * axis — re-measured on chart resize / timeframe switch via the effect below.
+   * Scroll-to-latest button anchors LEFT of it so the control never covers the
+   * price axis — re-measured on chart resize / timeframe switch via the effect below.
    */
   const [priceScaleInset, setPriceScaleInset] = useState(0);
   /** Chart container (`.chart-canvas-wrap`) — the right-click context menu's
@@ -1682,7 +1677,7 @@ export function TradingChart({
   // Measure the right price scale's ACTUAL rendered width once the chart is
   // ready, and keep it current as the chart resizes (browser width, chart
   // width, timeframe switches all flow through LWC's size-change event). The
-  // MA Structure panel consumes this as its right inset — never an arbitrary
+  // Scroll-to-latest button consumes this as its right inset — never an arbitrary
   // fixed offset — so the axis labels always stay readable.
   useEffect(() => {
     if (!chartApi) return;
@@ -2224,35 +2219,6 @@ export function TradingChart({
         {/* Chart-loading overlay lives in App (.chart-loading-overlay) — the
             old top-right .chart-spinner was removed to avoid duplicate
             loading indicators during the initial history load. */}
-        {/* Moving Average Structure (EMA9 • EMA20 • SMA20) — trader-facing
-            overlay panel. Same anti-look-ahead contract as the bridges: the
-            bars are the replay cursor slice during Replay and the forming
-            candle's live truth is withheld, so structure/gaps can never see
-            the future or mix replay state into live data. resetKey re-seeds
-            the gap-trend history on instrument / timeframe / replay streams. */}
-        <MaStructurePanel
-          bars={visibleBars}
-          liveCandle={session ? null : liveCandle}
-          bucketSec={bucketSec}
-          replayActive={session !== null}
-          resetKey={`${replaySymbol ?? ""}|${bucketSec}|${session ? "replay" : "live"}`}
-          rightInset={priceScaleInset}
-          overlays={listBuiltInOverlayControls(emaSettings, smaSettings)}
-          onToggleOverlay={(id, visible) => {
-            // The SAME action the chart legend's eye uses — one source of truth.
-            const patch = setIndicatorVisible(emaSettings, smaSettings, pineIndicators ?? [], id, visible);
-            if (patch.ema) onEmaChange?.(patch.ema);
-            if (patch.sma && smaSettings) onSmaChange?.(patch.sma);
-          }}
-          onAddOverlay={(id) => {
-            // Re-add a REMOVED built-in overlay, restoring its preserved
-            // period/color/width. This only affects the chart overlay — the
-            // panel's own structural calculation is untouched.
-            const patch = setIndicatorActive(emaSettings, smaSettings, true, id);
-            if (patch.ema) onEmaChange?.(patch.ema);
-            if (patch.sma && smaSettings) onSmaChange?.(patch.sma);
-          }}
-        />
         {/* Replay dock — CandleKit's native ReplayControls + Exit, floating
             bottom-center INSIDE the plot area so the top header chrome and the
             right price scale stay unobstructed while a session is active. */}
@@ -2286,6 +2252,21 @@ export function TradingChart({
           onOpenSettings={onOpenSettings}
           scopeKey={`${replaySymbol ?? ""}|${bucketSec}|${session ? "replay" : "live"}`}
         />
+
+        {/* Contextual drawing toolbar — appears when a supported drawing (trend
+            line / rectangle) is SELECTED. A sibling of ChartView (like the
+            context menu) so it positions inside `.chart-canvas-wrap` and its
+            clicks never reach the chart canvas (no pan / no new drawing). Reads
+            selection and mutates through the SAME DrawingEngine; annotations and
+            settings persist via the existing DrawingSync path. Hidden in replay
+            (Replay owns the chart) and when drawing is off (no controller). */}
+        {drawingController && !session && (
+          <DrawingContextToolbar
+            engine={drawingController.engine}
+            chartApi={chartApi}
+            containerRef={chartWrapRef}
+          />
+        )}
       </div>
     </div>
   );

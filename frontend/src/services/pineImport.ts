@@ -53,14 +53,21 @@ export const MAX_PINE_SOURCE_LENGTH = 100_000;
 export const MAX_IMPORTED_INDICATORS = 10;
 /** Maximum line plots rendered per imported indicator (rest are ignored).
  *
- * `fractal_SMA.pine` (Williams Fractals + SMA) is a merged script that declares
- * 24 fractal line-br plots (Up/Down level 1..12) PLUS the SMA/Bollinger plots.
- * The old cap of 8 truncated that to `Up level 1..8` — every Down level and all
- * SMA series were silently dropped at the import boundary, which is why the
- * fractals stopped rendering. 30 matches `PINER_MAX_VISUALS` (the engine's
- * extraction budget) so the two caps agree and no series is dropped between the
- * engine and the persisted indicator. */
-export const MAX_PLOT_SERIES_PER_INDICATOR = 30;
+ * `fractal_SMA.pine` (Williams Fractals + SMA + EMA1/EMA2) is a merged script
+ * that declares 24 fractal line-br plots (Up/Down level 1..12) PLUS the SMA /
+ * Bollinger / EMA plots and the Bollinger fill. The old cap of 8 truncated that
+ * to `Up level 1..8` — every Down level and all SMA series were silently dropped
+ * at the import boundary, which is why the fractals stopped rendering.
+ *
+ * `buildPlotMeta` slices the declared+rendered union to this cap in DECLARATION
+ * order, so the value must cover the script's FULL declared footprint or the
+ * trailing outputs (e.g. the Bollinger fill, declared last) lose their Style
+ * row. Adding the two EMA plots grew that footprint from 29 to 31 declared
+ * outputs, so the cap was raised from 30 to 32. 32 matches `PINER_MAX_VISUALS`
+ * (the engine's extraction budget) so the two caps agree and no series is
+ * dropped between the engine and the persisted indicator, and mirrors the
+ * sibling `MAX_PINE_INPUTS` / `MAX_STYLE_KEYS` caps. */
+export const MAX_PLOT_SERIES_PER_INDICATOR = 32;
 /** Maximum input widgets per imported indicator (sanity cap). */
 export const MAX_PINE_INPUTS = 32;
 

@@ -405,7 +405,7 @@ test("scope: chart templates and EMA-alert timeframes are untouched", () => {
   );
   assert.match(selectFn, /saveTimeFrame\(key\);/);
   assert.match(selectFn, /setTimeframe\(key\);/);
-  // The alert timeframe selection remains separate, control-driven state.
-  assert.match(app, /<EmaAlertControl[\s\S]*?timeframe=\{timeframe\}/);
-  assert.match(app, /const \[emaAlertSettings, setEmaAlertSettings\]/);
+  // The EMA Alert toolbar control was removed — no alert wiring remains in App.
+  assert.ok(!app.includes("<EmaAlertControl"), "EmaAlertControl must not be rendered");
+  assert.ok(!app.includes("emaAlertSettings"), "no alert settings state in App");
 });

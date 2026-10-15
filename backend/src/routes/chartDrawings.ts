@@ -38,6 +38,60 @@ export const MAX_DRAWINGS_JSON_BYTES = 256 * 1024;
 const MAX_POINTS_PER_DRAWING = 32;
 const MAX_ID_LENGTH = 128;
 const MAX_TOOL_LENGTH = 64;
+/** Annotation + styling caps — mirrors frontend/src/services/drawingAnnotations.ts. */
+const MAX_TEXT_LENGTH = 200;
+const MAX_STYLE_COLOR_LENGTH = 64;
+const TEXT_SIZE_MIN = 8;
+const TEXT_SIZE_MAX = 48;
+const VALID_PLACEMENTS = new Set(["auto", "above", "below", "center"]);
+/** A colour is safe if it is a hex or rgb/rgba string (no CSS injection surface). */
+const HEX_COLOR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+const RGB_COLOR = /^rgba?\(\s*[0-9.,\s%]*\)$/i;
+
+function isSafeColor(v: unknown): boolean {
+  if (typeof v !== "string" || v.length > MAX_STYLE_COLOR_LENGTH) return false;
+  return HEX_COLOR.test(v) || RGB_COLOR.test(v);
+}
+
+/**
+ * Validate the annotation + extended-style fields AURA layers on top of
+ * CandleKit's `DrawingStyle` (`text`, `textColor`, `textSize`, `textPlacement`,
+ * `fillOpacity`). These are OPTIONAL: a legacy drawing (or one with none of
+ * them) is valid and passes through. When present, each is shape-checked so a
+ * hostile or malformed body can never reach the DB or the renderer. CandleKit's
+ * own `color`/`width`/`dashed`/`fill` are NOT re-validated here — the engine
+ * owns those; only the fill colour string is length-checked for safety.
+ */
+function validateStyleAnnotation(style: Record<string, unknown>): { ok: true } | { ok: false; reason: string } {
+  if ("text" in style && style.text !== undefined) {
+    const t = style.text;
+    if (typeof t !== "string") return { ok: false, reason: "drawing.style.text must be a string" };
+    if (t.length > MAX_TEXT_LENGTH) {
+      return { ok: false, reason: `drawing.style.text must be ≤${MAX_TEXT_LENGTH} chars` };
+    }
+  }
+  if ("textColor" in style && style.textColor !== undefined && !isSafeColor(style.textColor)) {
+    return { ok: false, reason: "drawing.style.textColor must be a hex or rgb/rgba colour" };
+  }
+  if ("textSize" in style && style.textSize !== undefined) {
+    const s = style.textSize;
+    if (!isFiniteNumber(s) || s < TEXT_SIZE_MIN || s > TEXT_SIZE_MAX) {
+      return { ok: false, reason: `drawing.style.textSize must be ${TEXT_SIZE_MIN}..${TEXT_SIZE_MAX}` };
+    }
+  }
+  if ("textPlacement" in style && style.textPlacement !== undefined) {
+    if (typeof style.textPlacement !== "string" || !VALID_PLACEMENTS.has(style.textPlacement)) {
+      return { ok: false, reason: "drawing.style.textPlacement must be auto|above|below|center" };
+    }
+  }
+  if ("fillOpacity" in style && style.fillOpacity !== undefined) {
+    const o = style.fillOpacity;
+    if (!isFiniteNumber(o) || o < 0 || o > 1) {
+      return { ok: false, reason: "drawing.style.fillOpacity must be 0..1" };
+    }
+  }
+  return { ok: true };
+}
 /** Headroom over MAX_DRAWINGS_JSON_BYTES for the JSON body wrapper
  *  (instrument/timeframe/keys) so an accepted array can never trip the
  *  pre-parse content-length guard. */
@@ -124,6 +178,10 @@ function validateOneDrawing(raw: unknown): { ok: true; record: ChartDrawingRecor
   }
   if (style !== undefined && !isPlainObject(style)) {
     return { ok: false, reason: "drawing.style must be an object when present" };
+  }
+  if (style !== undefined) {
+    const styleCheck = validateStyleAnnotation(style as Record<string, unknown>);
+    if (!styleCheck.ok) return styleCheck;
   }
   return {
     ok: true,

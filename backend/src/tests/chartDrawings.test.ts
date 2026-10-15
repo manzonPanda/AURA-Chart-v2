@@ -350,3 +350,67 @@ test("no PostgreSQL store → 503 DB_NOT_CONFIGURED on every endpoint", async ()
   }
 });
 
+// ── Annotation + styling validation (text annotation feature) ────────────────
+
+/** A drawing carrying AURA's annotation + extended-style fields. */
+function annotated(id: string, tool = "TrendLine"): Record<string, unknown> {
+  return {
+    ...drawing(id, tool),
+    style: {
+      color: "#4f8cff",
+      width: 2,
+      dashed: false,
+      fill: null,
+      text: "Support",
+      textColor: "#e6edf3",
+      textSize: 14,
+      textPlacement: "above",
+      ...(tool === "Rectangle" ? { fill: "rgba(38, 166, 154, 0.3)", fillOpacity: 0.3 } : {}),
+    },
+  };
+}
+
+test("annotation: a fully-annotated drawing round-trips byte-identical", async () => {
+  const root = makeRoot(new MemoryStore());
+  const d = annotated("a1", "Rectangle");
+  const putRes = await put(root, { epic: "GOLD", timeframe: "MINUTE_1", drawings: [d] });
+  assert.equal(putRes.status, 200);
+  const body = (await (await get(root, SCOPE_QS)).json()) as { drawings: unknown[] };
+  assert.deepEqual(body.drawings, [d]);
+});
+
+test("annotation: a LEGACY drawing with no annotation fields is accepted", async () => {
+  const root = makeRoot(new MemoryStore());
+  const legacy = drawing("legacy"); // { color, width, dashed, fill } only
+  const putRes = await put(root, { epic: "GOLD", timeframe: "MINUTE_1", drawings: [legacy] });
+  assert.equal(putRes.status, 200);
+  const body = (await (await get(root, SCOPE_QS)).json()) as { drawings: unknown[] };
+  assert.deepEqual(body.drawings, [legacy]);
+});
+
+test("annotation: empty text is a valid save (removes the label, keeps the drawing)", async () => {
+  const root = makeRoot(new MemoryStore());
+  const d = { ...annotated("e1"), style: { ...(annotated("e1").style as object), text: "" } };
+  const putRes = await put(root, { epic: "GOLD", timeframe: "MINUTE_1", drawings: [d] });
+  assert.equal(putRes.status, 200);
+});
+
+test("annotation: malformed annotation fields are rejected with 400", async () => {
+  const root = makeRoot(new MemoryStore());
+  const bad: [string, Record<string, unknown>][] = [
+    ["text too long", { text: "x".repeat(201) }],
+    ["text not a string", { text: 123 }],
+    ["textColor not a colour", { textColor: "javascript:alert(1)" }],
+    ["textSize out of range", { textSize: 999 }],
+    ["textPlacement invalid", { textPlacement: "sideways" }],
+    ["fillOpacity out of range", { fillOpacity: 5 }],
+  ];
+  for (const [label, stylePatch] of bad) {
+    const d = { ...drawing("bad"), style: { color: "#fff", width: 1, dashed: false, fill: null, ...stylePatch } };
+    const res = await put(root, { epic: "GOLD", timeframe: "MINUTE_1", drawings: [d] });
+    assert.equal(res.status, 400, label);
+    assert.equal(((await res.json()) as { code: string }).code, "INVALID_DRAWINGS", label);
+  }
+});
+
+

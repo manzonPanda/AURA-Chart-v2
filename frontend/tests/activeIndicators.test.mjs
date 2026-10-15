@@ -303,11 +303,6 @@ test("the panel settings popover offers hide/unhide + re-add for the built-in ov
   assert.match(panel, /aria-label=\{`Add \$\{o\.name\} back to the chart`\}/);
   assert.match(panel, /onClick=\{\(\) => onToggleOverlay\?\.\(o\.id, !o\.visible\)\}/);
   assert.match(panel, /onClick=\{\(\) => onAddOverlay\?\.\(o\.id\)\}/);
-  // The chart supplies them through the SAME pure helpers the legend uses.
-  const chart = readSrc("src/components/TradingChart/TradingChart.tsx");
-  assert.match(chart, /overlays=\{listBuiltInOverlayControls\(emaSettings, smaSettings\)\}/);
-  assert.match(chart, /setIndicatorVisible\(emaSettings, smaSettings, pineIndicators \?\? \[\], id, visible\)/);
-  assert.match(chart, /setIndicatorActive\(emaSettings, smaSettings, true, id\)/);
 });
 
 test("listBuiltInOverlayControls: reports every built-in with BOTH axes", () => {

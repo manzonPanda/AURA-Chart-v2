@@ -1193,6 +1193,118 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   outline: none;
 }
 
+/* ── Contextual drawing toolbar (selection) ─────────────────────────────────
+   Compact floating toolbar that appears when a supported drawing (trend line /
+   rectangle) is SELECTED. A sibling overlay of the chart canvas inside
+   `.chart-canvas-wrap` (same positioning context as `.chart-context-menu`), so
+   it moves with the chart and its clicks never reach the chart pane — a toolbar
+   click can never start a pan, drag a drawing, or arm a new tool. z-index 60
+   (same tier as the context menu) clears every chart overlay. */
+.drawing-context-bar {
+  position: absolute;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: rgba(11, 14, 20, 0.94);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  user-select: none;
+}
+.drawing-ctx-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--ck-fg);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.drawing-ctx-btn:hover { background: rgba(127, 127, 127, 0.16); }
+.drawing-ctx-btn[aria-pressed="true"] {
+  background: var(--ck-accent);
+  color: var(--ck-accent-fg);
+}
+.drawing-ctx-btn--danger:hover {
+  background: rgba(255, 107, 114, 0.18);
+  color: var(--down);
+}
+
+/* Editor / settings popover — anchored under the toolbar (same quiet panel tone
+   as the context menu). Compact; never wider than the chart. */
+.drawing-ctx-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 61;
+  min-width: 200px;
+  max-width: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: rgba(11, 14, 20, 0.96);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
+}
+.drawing-ctx-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+.drawing-ctx-field > span { letter-spacing: 0.02em; }
+.drawing-ctx-field input[type="text"],
+.drawing-ctx-field input[type="number"],
+.drawing-ctx-field textarea,
+.drawing-ctx-field select {
+  width: 100%;
+  padding: 5px 7px;
+  font-size: 0.78rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.drawing-ctx-field textarea { resize: vertical; min-height: 40px; }
+.drawing-ctx-row { display: flex; gap: 8px; }
+.drawing-ctx-row > .drawing-ctx-field { flex: 1; min-width: 0; }
+/* Colour / check fields read as a labelled control on one row. */
+.drawing-ctx-field--color { flex-direction: row; align-items: center; justify-content: space-between; }
+.drawing-ctx-field--color input[type="color"] {
+  width: 40px; height: 24px; padding: 2px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
+}
+.drawing-ctx-field--check { flex-direction: row; align-items: center; justify-content: space-between; }
+.drawing-ctx-field--check input[type="checkbox"] { width: 15px; height: 15px; cursor: pointer; }
+.drawing-ctx-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.drawing-ctx-action {
+  padding: 5px 12px;
+  font-size: 0.74rem;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.drawing-ctx-action:hover { background: var(--accent-soft); }
+.drawing-ctx-action.primary {
+  color: var(--ck-accent-fg);
+  background: var(--ck-accent);
+  border-color: var(--ck-accent);
+}
+
+
 /* ── Measurement readout (Shift-drag ruler) ──────────────────────────────────
    CandleKit's MeasurementOverlay renders the tooltip — AURA narrows WHAT it
    shows through the two sanctioned channels it has (the overlay exposes only
